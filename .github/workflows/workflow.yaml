@@ -30,13 +30,25 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install CUDA Toolkit
+      # ==================== Linux CUDA Toolkit ====================
+      # Linux 只安装编译需要的 nvcc 和 cudart-dev，避免安装 NVIDIA driver / dkms
+      - name: Install CUDA Toolkit on Linux
+        if: matrix.platform == 'linux'
         uses: Jimver/cuda-toolkit@v0.2.35
         with:
           cuda: ${{ matrix.cuda }}
           method: network
           sub-packages: '["nvcc", "cudart-dev"]'
-          log-file-suffix: '${{ matrix.platform }}-${{ matrix.cuda }}.txt'
+          log-file-suffix: 'linux-${{ matrix.cuda }}.txt'
+
+      # ==================== Windows CUDA Toolkit ====================
+      # Windows 使用你之前成功过的旧版本，不使用 sub-packages
+      - name: Install CUDA Toolkit on Windows
+        if: matrix.platform == 'windows'
+        uses: Jimver/cuda-toolkit@v0.2.21
+        with:
+          cuda: ${{ matrix.cuda }}
+          method: network
 
       - name: Set up MSVC Developer Command Prompt
         if: matrix.platform == 'windows'
@@ -52,6 +64,22 @@ jobs:
       - name: Verify nvcc
         run: nvcc --version
 
+      - name: Verify CUDA path on Linux
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: |
+          echo "CUDA_PATH=$CUDA_PATH"
+          which nvcc
+          nvcc --version
+
+      - name: Verify CUDA path on Windows
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          Write-Host "CUDA_PATH=$env:CUDA_PATH"
+          where.exe nvcc
+          nvcc --version
+
       - name: Verify cl.exe on Windows
         if: matrix.platform == 'windows'
         shell: pwsh
@@ -59,6 +87,7 @@ jobs:
           where.exe cl
           cl
 
+      # ==================== Linux Build ====================
       - name: Compile CUDA extension on Linux
         if: matrix.platform == 'linux'
         shell: bash
@@ -84,6 +113,7 @@ jobs:
           echo "Built: $out_file"
           ls -lh "$out_file"
 
+      # ==================== Windows Build ====================
       - name: Compile CUDA extension on Windows
         if: matrix.platform == 'windows'
         shell: pwsh
@@ -110,6 +140,22 @@ jobs:
           Write-Host "Built: $out_file"
           Get-Item $out_file | Format-List Name, Length, LastWriteTime
 
+      # ==================== Symbol Check on Linux ====================
+      - name: Check exported symbols on Linux
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: |
+          echo "Exported symbols:"
+          nm -D src/DeepGPR/lib/deepgpr.so | grep -E "forward|backward" || true
+
+      # ==================== Symbol Check on Windows ====================
+      - name: Check exported symbols on Windows
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          dumpbin /exports src\DeepGPR\lib\deepgpr.dll
+
+      # ==================== Upload Artifacts ====================
       - name: Upload shared library artifact
         uses: actions/upload-artifact@v4
         with:
