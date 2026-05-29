@@ -3,6 +3,13 @@
 #include <stdio.h>
 #include <cfloat>
 
+
+#ifdef _WIN32
+#define DEEPGPR_API extern "C" __declspec(dllexport)
+#else
+#define DEEPGPR_API extern "C" __attribute__((visibility("default")))
+#endif
+
 __constant__ float e0 = 8.8541878128e-12;
 __constant__ float m0 = 1.25663706212e-06;
 
@@ -598,9 +605,7 @@ __global__ void accumulate_gradients(
 }
 
 
-extern "C" {
-
-void forward(const float* __restrict__ er, const float* __restrict__ se, const float* __restrict__ mr,  
+DEEPGPR_API void forward(const float* __restrict__ er, const float* __restrict__ se, const float* __restrict__ mr,  
              float* __restrict__ Eall_ptr, 
              float* __restrict__ Ex,  float* __restrict__ Ey, float* __restrict__ Ez,  
              float* __restrict__ Hx, float* __restrict__ Hy,  float* __restrict__ Hz,
@@ -702,7 +707,7 @@ void forward(const float* __restrict__ er, const float* __restrict__ se, const f
     }
 }
 
-void backward(const float* __restrict__ er, const float* __restrict__ se, const float* __restrict__ mr,  
+DEEPGPR_API void backward(const float* __restrict__ er, const float* __restrict__ se, const float* __restrict__ mr,  
              const float* __restrict__ Eall_ptr,
              float* __restrict__ Ex,  float* __restrict__ Ey, float* __restrict__ Ez,  
              float* __restrict__ Hx, float* __restrict__ Hy,  float* __restrict__ Hz,
@@ -815,6 +820,4 @@ void backward(const float* __restrict__ er, const float* __restrict__ se, const 
         cudaStreamDestroy(stream_comp);
         cudaStreamDestroy(stream_trans);
     }
-}
-
 }
