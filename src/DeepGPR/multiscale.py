@@ -38,7 +38,7 @@ def apply_filter(data: torch.Tensor, fs: float, cutoff: float) -> torch.Tensor:
         return filtered.view(step, nrx, iterations).permute(0, 2, 1)
 
     else:
-        raise ValueError(f"不支持的数据维度: {data.ndim}。期望 1D 或 3D tensor。")
+        raise ValueError(f"Data dimension: {data.ndim}。expected 1D or 3D tensor。")
     
 def hilbert_transform(data_in, p=1):
   ns, nt, nr = data_in.shape

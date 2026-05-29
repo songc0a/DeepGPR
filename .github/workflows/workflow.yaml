@@ -11,18 +11,18 @@ jobs:
   build:
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-20.04
-            platform: linux
-            lib_ext: .so
-            cuda: '12.6.3'
-            python: '3.10'
-          - os: windows-latest
-            platform: windows
-            lib_ext: .dll
-            cuda: '12.6.3'
-            python: '3.10'
+        matrix:
+          include:
+            - os: ubuntu-22.04
+              platform: linux
+              lib_ext: .so
+              cuda: '12.6.3'
+              python: '3.10'
+            - os: windows-latest
+              platform: windows
+              lib_ext: .dll
+              cuda: '12.6.3'
+              python: '3.10'
 
     runs-on: ${{ matrix.os }}
     name: Build on ${{ matrix.platform }}
@@ -31,8 +31,6 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ==================== Linux CUDA Toolkit ====================
-      # 重点：Linux 使用 ubuntu-20.04 编译，避免 ubuntu-latest 生成 GLIBC_2.34+ 依赖
       - name: Install CUDA Toolkit on Linux
         if: matrix.platform == 'linux'
         uses: Jimver/cuda-toolkit@v0.2.35

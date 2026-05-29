@@ -149,29 +149,18 @@ class TVRegularization(nn.Module):
         self.method = method
 
     def _compute_tv(self, data):
-        """
-        自动适应 2D [H, W] 或 3D [D, H, W] / [H, W, C] 的 TV 计算
-        """
-        # 1. 维度清洗：如果是 [H, W, 1]，先去掉那个 1
         if data.dim() == 3 and data.shape[-1] == 1:
             data = data.squeeze(-1)
             
-        # 2. 根据维度分情况计算梯度
         if data.dim() == 2:
-            # --- 2D 情况 [H, W] ---
-            # X方向差分 (行与行之间)
             d_x = data[1:, :] - data[:-1, :]
-            # Y方向差分 (列与列之间)
             d_y = data[:, 1:] - data[:, :-1]
             
-            # 2D 肯定没有 Z 方向
             loss_x = torch.sum(torch.abs(d_x))
             loss_y = torch.sum(torch.abs(d_y))
             loss_z = 0.0
             
         elif data.dim() == 3:
-            # --- 3D 情况 [D, H, W] ---
-            # 假设第0维是深度/X，第1维是高度/Y，第2维是宽度/Z
             d_x = data[1:, :, :] - data[:-1, :, :]
             d_y = data[:, 1:, :] - data[:, :-1, :]
             d_z = data[:, :, 1:] - data[:, :, :-1]
@@ -181,8 +170,6 @@ class TVRegularization(nn.Module):
             loss_z = torch.sum(torch.abs(d_z))
             
         elif data.dim() == 4:
-             # --- 4D 情况 [Batch, Channel, H, W] ---
-             # 常见于图像处理习惯
              d_x = data[..., 1:, :] - data[..., :-1, :]
              d_y = data[..., :, 1:] - data[..., :, :-1]
              
@@ -191,16 +178,13 @@ class TVRegularization(nn.Module):
              loss_z = 0.0
              
         else:
-            # 避免标量或1D数据报错
             return torch.tensor(0.0, device=data.device)
 
-        # 3. 汇总 Loss
         if self.method == 'anisotropic':
-            # 各向异性：直接相加 (|dx| + |dy|)
+
             total_tv = loss_x + loss_y + loss_z
         else:
-            # 各向同性：平方和开根 (sqrt(dx^2 + dy^2)) - 简化版近似
-            # 注意：严谨的各向同性需要对每个像素点求平方和再sum，这里简化处理以保持计算图简单
+
             total_tv = (loss_x**2 + loss_y**2 + loss_z**2 + 1e-8).sqrt()
 
         return total_tv 
