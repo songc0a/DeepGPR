@@ -31,10 +31,12 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install CUDA Toolkit
-        uses: Jimver/cuda-toolkit@v0.2.21
+        uses: Jimver/cuda-toolkit@v0.2.35
         with:
           cuda: ${{ matrix.cuda }}
           method: network
+          sub-packages: '["nvcc", "cudart-dev"]'
+          log-file-suffix: '${{ matrix.platform }}-${{ matrix.cuda }}.txt'
 
       - name: Set up MSVC Developer Command Prompt
         if: matrix.platform == 'windows'
@@ -57,7 +59,6 @@ jobs:
           where.exe cl
           cl
 
-      # ==================== Linux Build ====================
       - name: Compile CUDA extension on Linux
         if: matrix.platform == 'linux'
         shell: bash
@@ -83,7 +84,6 @@ jobs:
           echo "Built: $out_file"
           ls -lh "$out_file"
 
-      # ==================== Windows Build ====================
       - name: Compile CUDA extension on Windows
         if: matrix.platform == 'windows'
         shell: pwsh
@@ -110,7 +110,6 @@ jobs:
           Write-Host "Built: $out_file"
           Get-Item $out_file | Format-List Name, Length, LastWriteTime
 
-      # ==================== Upload immediately after build ====================
       - name: Upload shared library artifact
         uses: actions/upload-artifact@v4
         with:
