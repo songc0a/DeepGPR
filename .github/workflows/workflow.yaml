@@ -12,16 +12,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
-        cuda: ['12.6.3']
-        python: ['3.10']
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-20.04
             platform: linux
             lib_ext: .so
+            cuda: '12.6.3'
+            python: '3.10'
           - os: windows-latest
             platform: windows
             lib_ext: .dll
+            cuda: '12.6.3'
+            python: '3.10'
 
     runs-on: ${{ matrix.os }}
     name: Build on ${{ matrix.platform }}
@@ -31,7 +32,7 @@ jobs:
         uses: actions/checkout@v4
 
       # ==================== Linux CUDA Toolkit ====================
-      # Linux 只安装编译需要的 nvcc 和 cudart-dev，避免安装 NVIDIA driver / dkms
+      # 重点：Linux 使用 ubuntu-20.04 编译，避免 ubuntu-latest 生成 GLIBC_2.34+ 依赖
       - name: Install CUDA Toolkit on Linux
         if: matrix.platform == 'linux'
         uses: Jimver/cuda-toolkit@v0.2.35
@@ -42,7 +43,6 @@ jobs:
           log-file-suffix: 'linux-${{ matrix.cuda }}.txt'
 
       # ==================== Windows CUDA Toolkit ====================
-      # Windows 使用你之前成功过的旧版本，不使用 sub-packages
       - name: Install CUDA Toolkit on Windows
         if: matrix.platform == 'windows'
         uses: Jimver/cuda-toolkit@v0.2.21
@@ -61,29 +61,29 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
 
+      # ==================== Verify toolchain ====================
       - name: Verify nvcc
         run: nvcc --version
 
-      - name: Verify CUDA path on Linux
+      - name: Verify Linux build environment
         if: matrix.platform == 'linux'
         shell: bash
         run: |
+          set -e
           echo "CUDA_PATH=$CUDA_PATH"
           which nvcc
           nvcc --version
+          ldd --version
+          gcc --version
+          g++ --version
 
-      - name: Verify CUDA path on Windows
+      - name: Verify Windows build environment
         if: matrix.platform == 'windows'
         shell: pwsh
         run: |
           Write-Host "CUDA_PATH=$env:CUDA_PATH"
           where.exe nvcc
           nvcc --version
-
-      - name: Verify cl.exe on Windows
-        if: matrix.platform == 'windows'
-        shell: pwsh
-        run: |
           where.exe cl
           cl
 
@@ -102,7 +102,14 @@ jobs:
             exit 1
           fi
 
-          nvcc -shared -Xcompiler -fPIC -D_GLIBCXX_USE_CXX11_ABI=0 \
+          rm -f "$out_file"
+
+          nvcc -shared \
+               -Xcompiler -fPIC \
+               -Xcompiler -static-libstdc++ \
+               -Xcompiler -static-libgcc \
+               -D_GLIBCXX_USE_CXX11_ABI=0 \
+               -cudart static \
                -o "$out_file" "$cu_file"
 
           if [ ! -f "$out_file" ]; then
@@ -112,6 +119,36 @@ jobs:
 
           echo "Built: $out_file"
           ls -lh "$out_file"
+
+      # ==================== Linux Compatibility Check ====================
+      - name: Check Linux shared library compatibility
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: |
+          set -e
+
+          out_file="src/DeepGPR/lib/deepgpr.so"
+
+          echo "ldd output:"
+          ldd "$out_file" || true
+
+          echo ""
+          echo "Required GLIBC versions:"
+          objdump -T "$out_file" | grep -o 'GLIBC_[0-9.]*' | sort -V | uniq || true
+
+          echo ""
+          echo "Required GLIBCXX versions:"
+          strings "$out_file" | grep -o 'GLIBCXX_[0-9.]*' | sort -V | uniq || true
+
+          echo ""
+          echo "Checking that GLIBC_2.34 is not required..."
+          if objdump -T "$out_file" | grep -q 'GLIBC_2\.34'; then
+            echo "ERROR: $out_file still requires GLIBC_2.34."
+            echo "This means the .so is not compatible with older Linux systems."
+            exit 1
+          fi
+
+          echo "Compatibility check passed: GLIBC_2.34 was not found."
 
       # ==================== Windows Build ====================
       - name: Compile CUDA extension on Windows
@@ -127,7 +164,11 @@ jobs:
             throw "CUDA source file not found: $cu_file"
           }
 
-          nvcc -shared -o $out_file $cu_file
+          if (Test-Path $out_file) {
+            Remove-Item $out_file -Force
+          }
+
+          nvcc -shared -cudart static -o $out_file $cu_file
 
           if ($LASTEXITCODE -ne 0) {
             throw "nvcc failed with exit code $LASTEXITCODE"
@@ -145,8 +186,9 @@ jobs:
         if: matrix.platform == 'linux'
         shell: bash
         run: |
+          set -e
           echo "Exported symbols:"
-          nm -D src/DeepGPR/lib/deepgpr.so | grep -E "forward|backward" || true
+          nm -D src/DeepGPR/lib/deepgpr.so | grep -E "forward|backward"
 
       # ==================== Symbol Check on Windows ====================
       - name: Check exported symbols on Windows
