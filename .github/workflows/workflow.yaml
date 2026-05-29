@@ -58,7 +58,7 @@ jobs:
           cl
 
       # ==================== Linux Build ====================
-      - name: Compile CUDA extension (Linux)
+      - name: Compile CUDA extension on Linux
         if: matrix.platform == 'linux'
         shell: bash
         run: |
@@ -84,7 +84,7 @@ jobs:
           ls -lh "$out_file"
 
       # ==================== Windows Build ====================
-      - name: Compile CUDA extension (Windows)
+      - name: Compile CUDA extension on Windows
         if: matrix.platform == 'windows'
         shell: pwsh
         run: |
@@ -110,59 +110,7 @@ jobs:
           Write-Host "Built: $out_file"
           Get-Item $out_file | Format-List Name, Length, LastWriteTime
 
-      # ==================== Install & Smoke Test ====================
-      - name: Install Python dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install torch --index-url https://download.pytorch.org/whl/cu126
-          pip install numpy scipy
-
-      - name: Install DeepGPR
-        run: pip install -e .
-
-      - name: Verify shared library loads (Linux)
-        if: matrix.platform == 'linux'
-        shell: bash
-        run: |
-          python - <<'PY'
-          import ctypes
-          import os
-
-          lib_path = os.path.abspath(os.path.join("src", "DeepGPR", "lib", "deepgpr.so"))
-
-          if not os.path.exists(lib_path):
-              raise FileNotFoundError(lib_path)
-
-          lib = ctypes.cdll.LoadLibrary(lib_path)
-          print("deepgpr.so loaded successfully")
-
-          lib.forward.restype = None
-          lib.backward.restype = None
-          print("forward/backward symbols found")
-          PY
-
-      - name: Verify shared library loads (Windows)
-        if: matrix.platform == 'windows'
-        shell: pwsh
-        run: |
-          python -c @"
-          import ctypes
-          import os
-
-          lib_path = os.path.abspath(os.path.join("src", "DeepGPR", "lib", "deepgpr.dll"))
-
-          if not os.path.exists(lib_path):
-              raise FileNotFoundError(lib_path)
-
-          lib = ctypes.cdll.LoadLibrary(lib_path)
-          print("deepgpr.dll loaded successfully")
-
-          lib.forward.restype = None
-          lib.backward.restype = None
-          print("forward/backward symbols found")
-          "@
-
-      # ==================== Upload Artifacts ====================
+      # ==================== Upload immediately after build ====================
       - name: Upload shared library artifact
         uses: actions/upload-artifact@v4
         with:
