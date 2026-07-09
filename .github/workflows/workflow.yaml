@@ -36,12 +36,6 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ============================================================
-      # Windows CUDA Toolkit
-      # Use windows-2022 to keep Visual Studio 2022 / MSVC 193x.
-      # CUDA 12.6 does not support the VS2026 toolchain used by
-      # windows-latest after the image migration.
-      # ============================================================
       - name: Install CUDA Toolkit on Windows
         if: matrix.platform == 'windows'
         uses: Jimver/cuda-toolkit@v0.2.35
@@ -61,9 +55,6 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
 
-      # ============================================================
-      # Verify Windows toolchain
-      # ============================================================
       - name: Verify Windows build environment
         if: matrix.platform == 'windows'
         shell: pwsh
@@ -87,13 +78,6 @@ jobs:
             Write-Host "cl printed version information without input files; continuing."
           }
 
-      # ============================================================
-      # Linux Build
-      # IMPORTANT:
-      # Build inside Ubuntu 20.04 CUDA container to avoid GLIBC_2.34.
-      # Do not compile the Linux .so directly on ubuntu-latest /
-      # ubuntu-22.04 / ubuntu-24.04.
-      # ============================================================
       - name: Compile CUDA and CPU backends on Linux inside Ubuntu 20.04 container
         if: matrix.platform == 'linux'
         shell: bash
@@ -120,10 +104,18 @@ jobs:
 
               echo "===== Build environment ====="
               echo "Container image: ${{ matrix.cuda_container }}"
-              ldd --version | head -n 1
-              gcc --version | head -n 1
-              g++ --version | head -n 1
-              nvcc --version
+
+              echo "----- ldd version -----"
+              ldd --version || true
+
+              echo "----- gcc version -----"
+              gcc --version || true
+
+              echo "----- g++ version -----"
+              g++ --version || true
+
+              echo "----- nvcc version -----"
+              nvcc --version || true
 
               cu_file="src/DeepGPR/lib/deepgpr.cu"
               cuda_out_file="src/DeepGPR/lib/deepgpr.so"
@@ -217,22 +209,20 @@ jobs:
 
               echo ""
               echo "===== Check exported Linux symbols ====="
-              nm -D "$cuda_out_file" | grep -E "forward|backward" || {
+
+              if ! nm -D "$cuda_out_file" | grep -E "forward|backward"; then
                 echo "ERROR: expected CUDA backend symbols were not found."
                 exit 1
-              }
+              fi
 
-              nm -D "$cpu_out_file" | grep -E "forward|backward|set_fdtd_order" || {
+              if ! nm -D "$cpu_out_file" | grep -E "forward|backward|set_fdtd_order"; then
                 echo "ERROR: expected CPU backend symbols were not found."
                 exit 1
-              }
+              fi
 
               echo "Linux build and compatibility checks passed."
             '
 
-      # ============================================================
-      # Windows Build
-      # ============================================================
       - name: Compile CUDA extension on Windows
         if: matrix.platform == 'windows'
         shell: pwsh
@@ -287,9 +277,6 @@ jobs:
           Write-Host "Built: $out_file"
           Get-Item $out_file | Format-List Name, Length, LastWriteTime
 
-      # ============================================================
-      # Windows Symbol Check
-      # ============================================================
       - name: Check exported symbols on Windows CUDA DLL
         if: matrix.platform == 'windows'
         shell: pwsh
@@ -305,9 +292,6 @@ jobs:
           Write-Host "===== Exported symbols from $dll_file ====="
           dumpbin /exports $dll_file
 
-      # ============================================================
-      # Windows CPU Build
-      # ============================================================
       - name: Compile CPU backend on Windows
         if: matrix.platform == 'windows'
         shell: pwsh
@@ -340,9 +324,16 @@ jobs:
             Remove-Item $obj_file -Force
           }
 
-          Write-Host "===== Build CPU DLL ====="
+          Write-Host "===== Build CPU DLL with LLVM OpenMP runtime ====="
 
-          & cl /LD /O2 /openmp /MD "/Fe:$out_file" $c_file
+          & cl `
+            /LD `
+            /O2 `
+            /MD `
+            /TC `
+            /openmp:llvm `
+            "/Fe:$out_file" `
+            $c_file
 
           if ($LASTEXITCODE -ne 0) {
             throw "cl failed with exit code $LASTEXITCODE"
@@ -358,9 +349,6 @@ jobs:
           Write-Host "===== Exported symbols from $out_file ====="
           dumpbin /exports $out_file
 
-      # ============================================================
-      # Upload Artifacts
-      # ============================================================
       - name: Upload shared library artifact
         uses: actions/upload-artifact@v4
         with:
