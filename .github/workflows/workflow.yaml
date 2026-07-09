@@ -16,12 +16,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-22.04
+          - os: ubuntu-latest
             platform: linux
             lib_ext: .so
             cuda: '12.6.3'
+            cuda_container: 'nvidia/cuda:12.6.3-devel-ubuntu20.04'
             python: '3.10'
-          - os: windows-latest
+
+          - os: windows-2022
             platform: windows
             lib_ext: .dll
             cuda: '12.6.3'
@@ -34,124 +36,203 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install CUDA Toolkit on Linux
-        if: matrix.platform == 'linux'
+      # ============================================================
+      # Windows CUDA Toolkit
+      # Use windows-2022 to keep Visual Studio 2022 / MSVC 193x.
+      # CUDA 12.6 does not support the VS2026 toolchain used by
+      # windows-latest after the image migration.
+      # ============================================================
+      - name: Install CUDA Toolkit on Windows
+        if: matrix.platform == 'windows'
         uses: Jimver/cuda-toolkit@v0.2.35
         with:
           cuda: ${{ matrix.cuda }}
           method: network
-          sub-packages: '["nvcc", "cudart-dev"]'
-          log-file-suffix: 'linux-${{ matrix.cuda }}.txt'
 
-      # ==================== Windows CUDA Toolkit ====================
-      - name: Install CUDA Toolkit on Windows
-        if: matrix.platform == 'windows'
-        uses: Jimver/cuda-toolkit@v0.2.21
-        with:
-          cuda: ${{ matrix.cuda }}
-          method: network
-
-      - name: Set up MSVC Developer Command Prompt
+      - name: Set up MSVC 2022 Developer Command Prompt
         if: matrix.platform == 'windows'
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
 
-      - name: Set up Python
+      - name: Set up Python on Windows
+        if: matrix.platform == 'windows'
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
 
-      # ==================== Verify toolchain ====================
-      - name: Verify nvcc
-        run: nvcc --version
-
-      - name: Verify Linux build environment
-        if: matrix.platform == 'linux'
-        shell: bash
-        run: |
-          set -e
-          echo "CUDA_PATH=$CUDA_PATH"
-          which nvcc
-          nvcc --version
-          ldd --version
-          gcc --version
-          g++ --version
-
+      # ============================================================
+      # Verify Windows toolchain
+      # ============================================================
       - name: Verify Windows build environment
         if: matrix.platform == 'windows'
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+
           Write-Host "CUDA_PATH=$env:CUDA_PATH"
+
+          Write-Host "===== nvcc location ====="
           where.exe nvcc
+
+          Write-Host "===== nvcc version ====="
           nvcc --version
+
+          Write-Host "===== cl location ====="
           where.exe cl
-          cl
 
-      # ==================== Linux Build ====================
-      - name: Compile CUDA extension on Linux
+          Write-Host "===== cl version ====="
+          cmd.exe /c "cl 2>&1"
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "cl printed version information without input files; continuing."
+          }
+
+      # ============================================================
+      # Linux Build
+      # IMPORTANT:
+      # Build inside Ubuntu 20.04 CUDA container to avoid GLIBC_2.34.
+      # Do not compile the Linux .so directly on ubuntu-latest /
+      # ubuntu-22.04 / ubuntu-24.04.
+      # ============================================================
+      - name: Compile CUDA and CPU backends on Linux inside Ubuntu 20.04 container
         if: matrix.platform == 'linux'
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
-          cu_file="src/DeepGPR/lib/deepgpr.cu"
-          out_file="src/DeepGPR/lib/deepgpr.so"
+          docker run --rm \
+            -v "$PWD":/workspace \
+            -w /workspace \
+            "${{ matrix.cuda_container }}" \
+            bash -lc '
+              set -euo pipefail
 
-          if [ ! -f "$cu_file" ]; then
-            echo "CUDA source file not found: $cu_file"
-            exit 1
-          fi
+              echo "===== Install build dependencies inside Ubuntu 20.04 container ====="
+              apt-get update
+              DEBIAN_FRONTEND=noninteractive apt-get install -y \
+                build-essential \
+                binutils \
+                ca-certificates \
+                file \
+                python3 \
+                python3-dev \
+                python3-pip
 
-          rm -f "$out_file"
+              echo "===== Build environment ====="
+              echo "Container image: ${{ matrix.cuda_container }}"
+              ldd --version | head -n 1
+              gcc --version | head -n 1
+              g++ --version | head -n 1
+              nvcc --version
 
-          nvcc -shared \
-               -Xcompiler -fPIC \
-               -Xcompiler -static-libstdc++ \
-               -Xcompiler -static-libgcc \
-               -D_GLIBCXX_USE_CXX11_ABI=0 \
-               -cudart static \
-               -o "$out_file" "$cu_file"
+              cu_file="src/DeepGPR/lib/deepgpr.cu"
+              cuda_out_file="src/DeepGPR/lib/deepgpr.so"
 
-          if [ ! -f "$out_file" ]; then
-            echo "Build failed: $out_file was not generated"
-            exit 1
-          fi
+              c_file="src/DeepGPR/lib/deepgpr_cpu.c"
+              cpu_out_file="src/DeepGPR/lib/deepgpr_cpu.so"
 
-          echo "Built: $out_file"
-          ls -lh "$out_file"
+              if [ ! -f "$cu_file" ]; then
+                echo "CUDA source file not found: $cu_file"
+                exit 1
+              fi
 
-      # ==================== Linux Compatibility Check ====================
-      - name: Check Linux shared library compatibility
-        if: matrix.platform == 'linux'
-        shell: bash
-        run: |
-          set -e
+              if [ ! -f "$c_file" ]; then
+                echo "CPU source file not found: $c_file"
+                exit 1
+              fi
 
-          out_file="src/DeepGPR/lib/deepgpr.so"
+              echo "===== Clean old Linux build artifacts ====="
+              rm -f "$cuda_out_file" "$cpu_out_file"
 
-          echo "ldd output:"
-          ldd "$out_file" || true
+              echo "===== Compile CUDA backend: $cuda_out_file ====="
+              nvcc -shared \
+                   -O3 \
+                   -Xcompiler -fPIC \
+                   -Xcompiler -static-libstdc++ \
+                   -Xcompiler -static-libgcc \
+                   -D_GLIBCXX_USE_CXX11_ABI=0 \
+                   -cudart static \
+                   -o "$cuda_out_file" "$cu_file"
 
-          echo ""
-          echo "Required GLIBC versions:"
-          objdump -T "$out_file" | grep -o 'GLIBC_[0-9.]*' | sort -V | uniq || true
+              if [ ! -f "$cuda_out_file" ]; then
+                echo "Build failed: $cuda_out_file was not generated"
+                exit 1
+              fi
 
-          echo ""
-          echo "Required GLIBCXX versions:"
-          strings "$out_file" | grep -o 'GLIBCXX_[0-9.]*' | sort -V | uniq || true
+              echo "===== Compile CPU backend: $cpu_out_file ====="
+              cc -std=c99 \
+                 -O3 \
+                 -fopenmp \
+                 -fPIC \
+                 -shared \
+                 -static-libgcc \
+                 -o "$cpu_out_file" "$c_file"
 
-          echo ""
-          echo "Checking that GLIBC_2.34 is not required..."
-          if objdump -T "$out_file" | grep -q 'GLIBC_2\.34'; then
-            echo "ERROR: $out_file still requires GLIBC_2.34."
-            echo "This means the .so is not compatible with older Linux systems."
-            exit 1
-          fi
+              if [ ! -f "$cpu_out_file" ]; then
+                echo "Build failed: $cpu_out_file was not generated"
+                exit 1
+              fi
 
-          echo "Compatibility check passed: GLIBC_2.34 was not found."
+              echo "===== Built Linux libraries ====="
+              ls -lh "$cuda_out_file" "$cpu_out_file"
 
-      # ==================== Windows Build ====================
+              echo "===== Check CUDA backend dependencies ====="
+              ldd "$cuda_out_file" || true
+
+              echo ""
+              echo "Required GLIBC versions for $cuda_out_file:"
+              objdump -T "$cuda_out_file" | grep -o "GLIBC_[0-9.]*" | sort -V | uniq || true
+
+              echo ""
+              echo "Required GLIBCXX versions for $cuda_out_file:"
+              strings "$cuda_out_file" | grep -o "GLIBCXX_[0-9.]*" | sort -V | uniq || true
+
+              echo ""
+              echo "Checking that GLIBC_2.34 is not required by $cuda_out_file..."
+              if objdump -T "$cuda_out_file" | grep -q "GLIBC_2\.34"; then
+                echo "ERROR: $cuda_out_file still requires GLIBC_2.34."
+                echo "This means the .so is not compatible with older Linux systems."
+                exit 1
+              fi
+
+              echo ""
+              echo "===== Check CPU backend dependencies ====="
+              ldd "$cpu_out_file" || true
+
+              echo ""
+              echo "Required GLIBC versions for $cpu_out_file:"
+              objdump -T "$cpu_out_file" | grep -o "GLIBC_[0-9.]*" | sort -V | uniq || true
+
+              echo ""
+              echo "Required GLIBCXX versions for $cpu_out_file:"
+              strings "$cpu_out_file" | grep -o "GLIBCXX_[0-9.]*" | sort -V | uniq || true
+
+              echo ""
+              echo "Checking that GLIBC_2.34 is not required by $cpu_out_file..."
+              if objdump -T "$cpu_out_file" | grep -q "GLIBC_2\.34"; then
+                echo "ERROR: $cpu_out_file still requires GLIBC_2.34."
+                echo "This means the CPU .so is not compatible with older Linux systems."
+                exit 1
+              fi
+
+              echo ""
+              echo "===== Check exported Linux symbols ====="
+              nm -D "$cuda_out_file" | grep -E "forward|backward" || {
+                echo "ERROR: expected CUDA backend symbols were not found."
+                exit 1
+              }
+
+              nm -D "$cpu_out_file" | grep -E "forward|backward|set_fdtd_order" || {
+                echo "ERROR: expected CPU backend symbols were not found."
+                exit 1
+              }
+
+              echo "Linux build and compatibility checks passed."
+            '
+
+      # ============================================================
+      # Windows Build
+      # ============================================================
       - name: Compile CUDA extension on Windows
         if: matrix.platform == 'windows'
         shell: pwsh
@@ -160,6 +241,8 @@ jobs:
 
           $cu_file = "src\DeepGPR\lib\deepgpr.cu"
           $out_file = "src\DeepGPR\lib\deepgpr.dll"
+          $lib_file = "src\DeepGPR\lib\deepgpr.lib"
+          $exp_file = "src\DeepGPR\lib\deepgpr.exp"
 
           if (-not (Test-Path $cu_file)) {
             throw "CUDA source file not found: $cu_file"
@@ -169,7 +252,29 @@ jobs:
             Remove-Item $out_file -Force
           }
 
-          nvcc -shared -cudart static -o $out_file $cu_file
+          if (Test-Path $lib_file) {
+            Remove-Item $lib_file -Force
+          }
+
+          if (Test-Path $exp_file) {
+            Remove-Item $exp_file -Force
+          }
+
+          Write-Host "===== Build CUDA DLL ====="
+
+          $nvccArgs = @(
+            "-shared",
+            "-O3",
+            "-std=c++17",
+            "-cudart", "static",
+            "-Xcompiler", "/MD",
+            "-Xcompiler", "/O2",
+            "-Xcompiler", "/EHsc",
+            "-o", $out_file,
+            $cu_file
+          )
+
+          & nvcc @nvccArgs
 
           if ($LASTEXITCODE -ne 0) {
             throw "nvcc failed with exit code $LASTEXITCODE"
@@ -182,35 +287,27 @@ jobs:
           Write-Host "Built: $out_file"
           Get-Item $out_file | Format-List Name, Length, LastWriteTime
 
-      # ==================== Symbol Check on Linux ====================
-      - name: Check exported symbols on Linux
-        if: matrix.platform == 'linux'
-        shell: bash
-        run: |
-          set -e
-          echo "Exported symbols:"
-          nm -D src/DeepGPR/lib/deepgpr.so | grep -E "forward|backward"
-
-      # ==================== Symbol Check on Windows ====================
-      - name: Check exported symbols on Windows
+      # ============================================================
+      # Windows Symbol Check
+      # ============================================================
+      - name: Check exported symbols on Windows CUDA DLL
         if: matrix.platform == 'windows'
         shell: pwsh
         run: |
-          dumpbin /exports src\DeepGPR\lib\deepgpr.dll
+          $ErrorActionPreference = "Stop"
 
-      # ==================== CPU C Build ====================
-      - name: Compile CPU backend on Linux
-        if: matrix.platform == 'linux'
-        shell: bash
-        run: |
-          set -e
+          $dll_file = "src\DeepGPR\lib\deepgpr.dll"
 
-          c_file="src/DeepGPR/lib/deepgpr_cpu.c"
-          out_file="src/DeepGPR/lib/deepgpr_cpu.so"
+          if (-not (Test-Path $dll_file)) {
+            throw "DLL not found: $dll_file"
+          }
 
-          cc -std=c99 -O3 -fopenmp -fPIC -shared -o "$out_file" "$c_file"
-          nm -D "$out_file" | grep -E "forward|backward|set_fdtd_order"
+          Write-Host "===== Exported symbols from $dll_file ====="
+          dumpbin /exports $dll_file
 
+      # ============================================================
+      # Windows CPU Build
+      # ============================================================
       - name: Compile CPU backend on Windows
         if: matrix.platform == 'windows'
         shell: pwsh
@@ -219,11 +316,51 @@ jobs:
 
           $c_file = "src\DeepGPR\lib\deepgpr_cpu.c"
           $out_file = "src\DeepGPR\lib\deepgpr_cpu.dll"
+          $lib_file = "src\DeepGPR\lib\deepgpr_cpu.lib"
+          $exp_file = "src\DeepGPR\lib\deepgpr_cpu.exp"
+          $obj_file = "deepgpr_cpu.obj"
 
-          cl /LD /O2 /openmp /Fe:$out_file $c_file
+          if (-not (Test-Path $c_file)) {
+            throw "CPU source file not found: $c_file"
+          }
+
+          if (Test-Path $out_file) {
+            Remove-Item $out_file -Force
+          }
+
+          if (Test-Path $lib_file) {
+            Remove-Item $lib_file -Force
+          }
+
+          if (Test-Path $exp_file) {
+            Remove-Item $exp_file -Force
+          }
+
+          if (Test-Path $obj_file) {
+            Remove-Item $obj_file -Force
+          }
+
+          Write-Host "===== Build CPU DLL ====="
+
+          & cl /LD /O2 /openmp /MD "/Fe:$out_file" $c_file
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "cl failed with exit code $LASTEXITCODE"
+          }
+
+          if (-not (Test-Path $out_file)) {
+            throw "Build failed: $out_file was not generated"
+          }
+
+          Write-Host "Built: $out_file"
+          Get-Item $out_file | Format-List Name, Length, LastWriteTime
+
+          Write-Host "===== Exported symbols from $out_file ====="
           dumpbin /exports $out_file
 
-      # ==================== Upload Artifacts ====================
+      # ============================================================
+      # Upload Artifacts
+      # ============================================================
       - name: Upload shared library artifact
         uses: actions/upload-artifact@v4
         with:
@@ -249,11 +386,18 @@ jobs:
       - name: Compile CPU backend on macOS
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           c_file="src/DeepGPR/lib/deepgpr_cpu.c"
           out_file="src/DeepGPR/lib/deepgpr_cpu.dylib"
           libomp_prefix="$(brew --prefix libomp)"
+
+          if [ ! -f "$c_file" ]; then
+            echo "CPU source file not found: $c_file"
+            exit 1
+          fi
+
+          rm -f "$out_file"
 
           cc -std=c99 -O3 \
              -Xpreprocessor -fopenmp \
@@ -264,6 +408,12 @@ jobs:
              -fPIC -shared \
              -o "$out_file" "$c_file" \
              -lomp
+
+          if [ ! -f "$out_file" ]; then
+            echo "Build failed: $out_file was not generated"
+            exit 1
+          fi
+
           nm -gU "$out_file" | grep -E "forward|backward|set_fdtd_order"
 
       - name: Upload macOS CPU artifact
@@ -309,6 +459,8 @@ jobs:
             found="$(find built-libs -type f -name "$name" | head -n 1)"
             if [ -z "$found" ]; then
               echo "Missing built library: $name"
+              echo "Current downloaded files:"
+              find built-libs -type f -maxdepth 5 -print || true
               exit 1
             fi
             cp "$found" "src/DeepGPR/lib/$name"
@@ -320,6 +472,7 @@ jobs:
           copy_artifact deepgpr_cpu.dll
           copy_artifact deepgpr_cpu.dylib
 
+          echo "===== Copied libraries ====="
           ls -lh src/DeepGPR/lib/deepgpr* src/DeepGPR/lib/libdeepgpr* 2>/dev/null || true
 
       - name: Commit generated libraries

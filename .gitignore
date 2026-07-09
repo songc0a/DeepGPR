@@ -5,3 +5,5 @@ build/
 .vscode/
 *.egg-info/
 pyproject.toml
+.DS_Store
+/src/.DS_Store
