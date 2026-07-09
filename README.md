@@ -11,22 +11,24 @@ Gradients of the output receiver data can be computed with respect to model para
 
 Utilizes CPML, allowing the width of the PML layer to be configured independently for each boundary.
 
-All operations are executed on the GPU.
+The compute backend can run on CUDA GPUs or on CPU. The CPU backend is implemented in C and is selected automatically when `device='cpu'`.
+
+The FDTD spatial finite-difference order can be selected with `fdtd_order=2`, `4`, or `8` (default: `2`).
 
 Supports techniques such as checkpointing, DDP, and the utilization of CPU memory to minimize GPU memory consumption, thereby enabling the execution of large-scale models.
 
 
 ## System Requirements
 
-- **OS**: Linux and Windows
-- **Environment**: Python 3.8+, CUDA Toolkit 
-- **Libraries**: `torch` (with CUDA support), `numpy`, `scipy`, `matplotlib`
-- **Hardware**: NVIDIA GPU with sufficient VRAM for 3D computational grids.
+- **OS**: Linux, Windows, and macOS for CPU execution; Linux and Windows for CUDA execution
+- **Environment**: Python 3.8+, CUDA Toolkit for CUDA execution
+- **Libraries**: `torch`, `numpy`, `scipy`, `matplotlib`
+- **Hardware**: NVIDIA GPU with sufficient VRAM for CUDA execution; CPU execution works without a GPU.
 
 
 ## Start
 
-Before use, you must ensure that you have an NVIDIA graphics card and have installed a CUDA-enabled version of PyTorch.
+Before CUDA use, you must ensure that you have an NVIDIA graphics card and have installed a CUDA-enabled version of PyTorch. For CPU use, install a CPU build of PyTorch and include a compiled `deepgpr_cpu` shared library in `src/DeepGPR/lib`.
 
 DeepGPR can then be installed using
 
@@ -44,7 +46,7 @@ import DeepGPR
 import matplotlib.pyplot as plt
 
 # Set up the parameters and models
-device=torch.device("cuda")
+device=torch.device("cuda" if torch.cuda.is_available() else "cpu")
 dx=0.02
 dt=3e-11
 nt=2000
@@ -66,7 +68,8 @@ r = DeepGPR.compute(
     source_amplitudes=source_amplitudes,
     source_location=source_location, 
     receiver_location=receiver_location, 
-    er=er, se=se
+    er=er, se=se,
+    fdtd_order=2
 )
 
 (r[-1]**2).sum().backward()
@@ -120,16 +123,18 @@ def compute(device, dx=None, dt=None,
             E=None, H=None, PML=None,
             pmlthick=10, source_direction=2, reciever_direction=2,
             model_gradient_sampling_interval=1,
-            use_async_offload=False):
+            use_async_offload=False,
+            fdtd_order=2):
 ```
 ## 📥 Input Parameters
 ### 1. Basic Physics & Grid Parameters
 
 | Parameter | Data Type | Description |
 | :--- | :--- | :--- |
-| **`device`** | `torch.device` / `str` | PyTorch computation device, e.g., `'cuda:0'`. Determines where the computation takes place. |
+| **`device`** | `torch.device` / `str` | PyTorch computation device, e.g., `'cuda:0'` or `'cpu'`. CUDA loads `deepgpr.so/.dll`; CPU loads `deepgpr_cpu.so/.dll/.dylib`. |
 | **`dx`** | `float` | Spatial grid step size (assuming an isotropic grid, i.e., $dx = dy = dz$). Typically in meters (m). |
 | **`dt`** | `float` | Time step size. **Note**: Must strictly satisfy the CFL (Courant-Friedrichs-Lewy) stability condition, or an exception will be raised. Typically in seconds (s). |
+| **`fdtd_order`** | `int` | Spatial finite-difference order used by the FDTD field updates. Supported values are `2`, `4`, and `8`; default is `2` for compatibility with earlier versions. |
 ### 2. Medium Model Parameters
 
 This section defines the electromagnetic properties of the simulation space. For 2D simulations, set `nz=1`.
@@ -166,7 +171,27 @@ This section defines the geometric observation system (coordinates) and the exci
 | :--- | :--- | :--- | :--- |
 | **`pmlthick`** | `int` / `list` / `Tensor`| Scalar or list of 6 | Thickness (in grid layers) of the PML (Perfectly Matched Layer) absorbing boundaries.<br>- Integer `p`: All six boundaries have thickness `p` (Z-boundaries are ignored in 2D).<br>- List `[x0, xm, y0, ym, z0, zm]`: Specific thicknesses for the 6 boundaries. |
 | **`model_gradient_sampling_interval`**| `int` | Scalar | Wavefield sampling interval during forward propagation (Default: 1).<br>A larger integer reduces the VRAM usage for the saved `Eall` tensor, but may decrease the accuracy of backpropagated gradients. |
-| **`use_async_offload`** | `bool` | Scalar | VRAM optimization flag (Default: `False`).<br>If `True`, the internal full wavefield tensor (`Eall`) is asynchronously offloaded to page-locked host memory (`pin_memory` CPU RAM). This drastically reduces GPU VRAM consumption at the cost of slightly slower computation times due to PCIe data transfer latency. |
+| **`use_async_offload`** | `bool` | Scalar | CUDA-only VRAM optimization flag (Default: `False`).<br>If `True`, the internal full wavefield tensor (`Eall`) is asynchronously offloaded to page-locked host memory (`pin_memory` CPU RAM). This drastically reduces GPU VRAM consumption at the cost of slightly slower computation times due to PCIe data transfer latency. On CPU this option is ignored. |
+
+## CPU Backend Build
+
+The CPU backend is a plain C shared library and is built with OpenMP by default. Build it into `src/DeepGPR/lib` before running with `device='cpu'`. You can control CPU thread count with `OMP_NUM_THREADS`.
+
+```bash
+# Linux
+cc -std=c99 -O3 -fopenmp -fPIC -shared -o src/DeepGPR/lib/deepgpr_cpu.so src/DeepGPR/lib/deepgpr_cpu.c
+
+# macOS
+brew install libomp
+LIBOMP_PREFIX="$(brew --prefix libomp)"
+cc -std=c99 -O3 -Xpreprocessor -fopenmp -DDEEPGPR_USE_OPENMP -I"$LIBOMP_PREFIX/include" -Wl,-rpath,"$LIBOMP_PREFIX/lib" -L"$LIBOMP_PREFIX/lib" -fPIC -shared -o src/DeepGPR/lib/deepgpr_cpu.dylib src/DeepGPR/lib/deepgpr_cpu.c -lomp
+```
+
+On Windows, build `src\DeepGPR\lib\deepgpr_cpu.dll` with MSVC:
+
+```powershell
+cl /LD /O2 /openmp /Fe:src\DeepGPR\lib\deepgpr_cpu.dll src\DeepGPR\lib\deepgpr_cpu.c
+```
 
 ### 5. Field Variable States (Checkpoints / Initial Fields)
 

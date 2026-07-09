@@ -1,4 +1,4 @@
-name: Build CUDA Extension
+name: Build Native Libraries
 
 on:
   push:
@@ -7,22 +7,25 @@ on:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   build:
     strategy:
       fail-fast: false
-        matrix:
-          include:
-            - os: ubuntu-22.04
-              platform: linux
-              lib_ext: .so
-              cuda: '12.6.3'
-              python: '3.10'
-            - os: windows-latest
-              platform: windows
-              lib_ext: .dll
-              cuda: '12.6.3'
-              python: '3.10'
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            platform: linux
+            lib_ext: .so
+            cuda: '12.6.3'
+            python: '3.10'
+          - os: windows-latest
+            platform: windows
+            lib_ext: .dll
+            cuda: '12.6.3'
+            python: '3.10'
 
     runs-on: ${{ matrix.os }}
     name: Build on ${{ matrix.platform }}
@@ -195,11 +198,149 @@ jobs:
         run: |
           dumpbin /exports src\DeepGPR\lib\deepgpr.dll
 
+      # ==================== CPU C Build ====================
+      - name: Compile CPU backend on Linux
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: |
+          set -e
+
+          c_file="src/DeepGPR/lib/deepgpr_cpu.c"
+          out_file="src/DeepGPR/lib/deepgpr_cpu.so"
+
+          cc -std=c99 -O3 -fopenmp -fPIC -shared -o "$out_file" "$c_file"
+          nm -D "$out_file" | grep -E "forward|backward|set_fdtd_order"
+
+      - name: Compile CPU backend on Windows
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $c_file = "src\DeepGPR\lib\deepgpr_cpu.c"
+          $out_file = "src\DeepGPR\lib\deepgpr_cpu.dll"
+
+          cl /LD /O2 /openmp /Fe:$out_file $c_file
+          dumpbin /exports $out_file
+
       # ==================== Upload Artifacts ====================
       - name: Upload shared library artifact
         uses: actions/upload-artifact@v4
         with:
           name: deepgpr-${{ matrix.platform }}-cuda${{ matrix.cuda }}
-          path: src/DeepGPR/lib/deepgpr${{ matrix.lib_ext }}
+          path: |
+            src/DeepGPR/lib/deepgpr${{ matrix.lib_ext }}
+            src/DeepGPR/lib/deepgpr_cpu${{ matrix.lib_ext }}
           if-no-files-found: error
           retention-days: 30
+
+  build-cpu-macos:
+    runs-on: macos-latest
+    name: Build CPU backend on macOS
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install OpenMP runtime
+        shell: bash
+        run: brew install libomp
+
+      - name: Compile CPU backend on macOS
+        shell: bash
+        run: |
+          set -e
+
+          c_file="src/DeepGPR/lib/deepgpr_cpu.c"
+          out_file="src/DeepGPR/lib/deepgpr_cpu.dylib"
+          libomp_prefix="$(brew --prefix libomp)"
+
+          cc -std=c99 -O3 \
+             -Xpreprocessor -fopenmp \
+             -DDEEPGPR_USE_OPENMP \
+             -I"$libomp_prefix/include" \
+             -Wl,-rpath,"$libomp_prefix/lib" \
+             -L"$libomp_prefix/lib" \
+             -fPIC -shared \
+             -o "$out_file" "$c_file" \
+             -lomp
+          nm -gU "$out_file" | grep -E "forward|backward|set_fdtd_order"
+
+      - name: Upload macOS CPU artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: deepgpr-macos-cpu
+          path: src/DeepGPR/lib/deepgpr_cpu.dylib
+          if-no-files-found: error
+          retention-days: 30
+
+  commit-built-libraries:
+    if: github.event_name == 'workflow_dispatch' && github.ref_type == 'branch'
+    needs:
+      - build
+      - build-cpu-macos
+    runs-on: ubuntu-latest
+    name: Commit built libraries to lib folder
+    permissions:
+      actions: read
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download built library artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: built-libs
+          pattern: deepgpr-*
+          merge-multiple: true
+
+      - name: Copy libraries into package lib folder
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p src/DeepGPR/lib
+
+          copy_artifact() {
+            local name="$1"
+            local found
+            found="$(find built-libs -type f -name "$name" | head -n 1)"
+            if [ -z "$found" ]; then
+              echo "Missing built library: $name"
+              exit 1
+            fi
+            cp "$found" "src/DeepGPR/lib/$name"
+          }
+
+          copy_artifact deepgpr.so
+          copy_artifact deepgpr.dll
+          copy_artifact deepgpr_cpu.so
+          copy_artifact deepgpr_cpu.dll
+          copy_artifact deepgpr_cpu.dylib
+
+          ls -lh src/DeepGPR/lib/deepgpr* src/DeepGPR/lib/libdeepgpr* 2>/dev/null || true
+
+      - name: Commit generated libraries
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add \
+            src/DeepGPR/lib/deepgpr.so \
+            src/DeepGPR/lib/deepgpr.dll \
+            src/DeepGPR/lib/deepgpr_cpu.so \
+            src/DeepGPR/lib/deepgpr_cpu.dll \
+            src/DeepGPR/lib/deepgpr_cpu.dylib
+
+          if git diff --cached --quiet; then
+            echo "No generated library changes to commit."
+            exit 0
+          fi
+
+          git commit -m "Build native DeepGPR libraries [skip ci]"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
