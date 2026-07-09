@@ -20,7 +20,7 @@ def _candidate_library_paths(kind: str) -> list[Path]:
         if _SYSTEM_NAME == "Windows":
             return [_LIB_DIR / "deepgpr.dll"]
         if _SYSTEM_NAME == "Linux":
-            return [_LIB_DIR / "libdeepgpr.so", _LIB_DIR / "deepgpr.so"]
+            return [_LIB_DIR / "deepgpr.so", _LIB_DIR / "libdeepgpr.so"]
         return []
 
     if kind == "cpu":
@@ -29,7 +29,7 @@ def _candidate_library_paths(kind: str) -> list[Path]:
         if _SYSTEM_NAME == "Darwin":
             return [_LIB_DIR / "libdeepgpr_cpu.dylib", _LIB_DIR / "deepgpr_cpu.dylib"]
         if _SYSTEM_NAME == "Linux":
-            return [_LIB_DIR / "libdeepgpr_cpu.so", _LIB_DIR / "deepgpr_cpu.so"]
+            return [_LIB_DIR / "deepgpr_cpu.so", _LIB_DIR / "libdeepgpr_cpu.so"]
         return []
 
     raise ValueError(f"Unknown DeepGPR library kind: {kind}")
@@ -171,6 +171,7 @@ def _load_deepgpr_library(kind: str) -> ctypes.CDLL:
 
         _require_exported_symbols(lib, ("forward", "backward"), path)
         _configure_deepgpr_library(lib)
+        lib._deepgpr_path = str(path.resolve())
         _LOADED_LIBS[kind] = lib
         return lib
 

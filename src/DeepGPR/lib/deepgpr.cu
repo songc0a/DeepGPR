@@ -2,6 +2,7 @@
 #include <iostream>
 #include <stdio.h>
 #include <cfloat>
+#include <cstdlib>
 
 
 #ifdef _WIN32
@@ -15,14 +16,16 @@ __constant__ float m0 = 1.25663706212e-06;
 
 #define CEIL_DIV(x,y) (((x)+(y)-1)/(y))
 
-#define CUDA_CHECK() {\
-    cudaError_t err = cudaGetLastError();\
-    if (err != cudaSuccess) {\
-        std::cerr << "CUDA Error: " << cudaGetErrorString(err) \
-                  << " at " << __FILE__ << ":" << __LINE__ << std::endl;\
-        exit(EXIT_FAILURE);\
-    }\
-}
+#define CUDA_CHECK(call) do { \
+    cudaError_t err__ = (call); \
+    if (err__ != cudaSuccess) { \
+        std::cerr << "CUDA Error: " << cudaGetErrorString(err__) \
+                  << " at " << __FILE__ << ":" << __LINE__ << std::endl; \
+        std::abort(); \
+    } \
+} while (0)
+
+#define CUDA_CHECK_LAST() CUDA_CHECK(cudaPeekAtLastError())
 
 static int g_fdtd_order = 2;
 
@@ -747,10 +750,10 @@ DEEPGPR_API void forward(const float* __restrict__ er, const float* __restrict__
     cudaStream_t stream_comp = 0, stream_trans = 0;
     cudaEvent_t event_comp;
     if (use_async) {
-        cudaStreamCreate(&stream_comp);
-        cudaStreamCreate(&stream_trans);
-        cudaEventCreate(&event_comp);
-        cudaMalloc(&d_E_buf, 2 * snap_size * sizeof(float)); 
+        CUDA_CHECK(cudaStreamCreate(&stream_comp));
+        CUDA_CHECK(cudaStreamCreate(&stream_trans));
+        CUDA_CHECK(cudaEventCreate(&event_comp));
+        CUDA_CHECK(cudaMalloc(&d_E_buf, 2 * snap_size * sizeof(float)));
     }
 
     long long blockSize = 256;
@@ -758,6 +761,7 @@ DEEPGPR_API void forward(const float* __restrict__ er, const float* __restrict__
     dim3 grid_fields(CEIL_DIV(total_fields, blockSize));
 
     ucgetforward<<<grid_fields, blockSize, 0, stream_comp>>>(er, se, mr, uE0, uE1, uE4, uH0, uH1, uH4, NX_FIELDS, NY_FIELDS, NZ_FIELDS, dt, dx);
+    CUDA_CHECK_LAST();
   
     dim3 grid_rx(CEIL_DIV(nrx, blockSize));
     dim3 grid_src(CEIL_DIV(nsrc, blockSize));
@@ -768,43 +772,51 @@ DEEPGPR_API void forward(const float* __restrict__ er, const float* __restrict__
         long long rx_total = step * nrx;
         long long gridSize_rx = (rx_total + blockSize - 1) / blockSize;
         store_outputs<<<gridSize_rx, blockSize, 0, stream_comp>>>(step, nrx, i, receiverlocation, rxs, Ex, Ey, Ez, Hx, Hy, Hz, NX_FIELDS, NY_FIELDS, NZ_FIELDS, nt);
+        CUDA_CHECK_LAST();
 
         fused_h_fields_updates_gpu<<<grid_fields, blockSize, 0, stream_comp>>>(
             uH0, uH1, Ex, Ey, Ez, Hx, Hy, Hz, dx, dx, dx, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
             pml0, pml1, pml2, pml3, pml4, pml5, x0HR, xmHR, y0HR, ymHR, z0HR, zmHR, uH4, 
             x0HPhi1, x0HPhi2, xmHPhi1, xmHPhi2, y0HPhi1, y0HPhi2, ymHPhi1, ymHPhi2, z0HPhi1, z0HPhi2, zmHPhi1, zmHPhi2,
             fdtd_order);
+        CUDA_CHECK_LAST();
 
         fused_e_fields_updates_gpu<<<grid_fields, blockSize, 0, stream_comp>>>(
             uE0, uE1, Ex, Ey, Ez, Hx, Hy, Hz, dx, dx, dx, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
             pml0, pml1, pml2, pml3, pml4, pml5, x0ER, xmER, y0ER, ymER, z0ER, zmER, uE4,
             x0EPhi1, x0EPhi2, xmEPhi1, xmEPhi2, y0EPhi1, y0EPhi2, ymEPhi1, ymEPhi2, z0EPhi1, z0EPhi2, zmEPhi1, zmEPhi2,
             fdtd_order);
+        CUDA_CHECK_LAST();
 
         Update_hertzian_dipole<<<grid_src, blockSize, 0, stream_comp>>>(step, i, dx, sourcelocation, srcwaveforms, Ex, Ey, Ez, uE4, NX_FIELDS, NY_FIELDS, NZ_FIELDS, nsrc, polarisation, nt);
+        CUDA_CHECK_LAST();
         
         if (i % sampling_interval == 0) {
             int t_saved = i / sampling_interval;
             if (use_async) {
                 int buf_idx = t_saved % 2; 
-                cudaStreamSynchronize(stream_trans);
+                CUDA_CHECK(cudaStreamSynchronize(stream_trans));
                 copy_to_Eall_single<<<grid_copy, blockSize, 0, stream_comp>>>(d_E_buf, buf_idx, Ez, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
-                cudaEventRecord(event_comp, stream_comp);
-                cudaStreamWaitEvent(stream_trans, event_comp, 0);
-                cudaMemcpyAsync(Eall_ptr + t_saved * snap_size, d_E_buf + buf_idx * snap_size, snap_size * sizeof(float), cudaMemcpyDeviceToHost, stream_trans);
+                CUDA_CHECK_LAST();
+                CUDA_CHECK(cudaEventRecord(event_comp, stream_comp));
+                CUDA_CHECK(cudaStreamWaitEvent(stream_trans, event_comp, 0));
+                CUDA_CHECK(cudaMemcpyAsync(Eall_ptr + t_saved * snap_size, d_E_buf + buf_idx * snap_size, snap_size * sizeof(float), cudaMemcpyDeviceToHost, stream_trans));
             } else {
                 copy_to_Eall_single<<<grid_copy, blockSize, 0, stream_comp>>>(Eall_ptr, t_saved, Ez, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
+                CUDA_CHECK_LAST();
             }
         }
     }
 
+    CUDA_CHECK(cudaDeviceSynchronize());
+
     if (use_async) {
-        cudaStreamSynchronize(stream_comp);
-        cudaStreamSynchronize(stream_trans);
-        cudaFree(d_E_buf); 
-        cudaEventDestroy(event_comp);
-        cudaStreamDestroy(stream_comp);
-        cudaStreamDestroy(stream_trans);
+        CUDA_CHECK(cudaStreamSynchronize(stream_comp));
+        CUDA_CHECK(cudaStreamSynchronize(stream_trans));
+        CUDA_CHECK(cudaFree(d_E_buf));
+        CUDA_CHECK(cudaEventDestroy(event_comp));
+        CUDA_CHECK(cudaStreamDestroy(stream_comp));
+        CUDA_CHECK(cudaStreamDestroy(stream_trans));
     }
 }
 
@@ -852,10 +864,10 @@ DEEPGPR_API void backward(const float* __restrict__ er, const float* __restrict_
     cudaStream_t stream_comp = 0, stream_trans = 0;
     cudaEvent_t event_trans;
     if (use_async) {
-        cudaStreamCreate(&stream_comp);
-        cudaStreamCreate(&stream_trans);
-        cudaEventCreate(&event_trans);
-        cudaMalloc(&d_E_buf, 3 * snap_size * sizeof(float)); 
+        CUDA_CHECK(cudaStreamCreate(&stream_comp));
+        CUDA_CHECK(cudaStreamCreate(&stream_trans));
+        CUDA_CHECK(cudaEventCreate(&event_trans));
+        CUDA_CHECK(cudaMalloc(&d_E_buf, 3 * snap_size * sizeof(float)));
     }
 
     long long blockSize = 256;
@@ -863,6 +875,7 @@ DEEPGPR_API void backward(const float* __restrict__ er, const float* __restrict_
     dim3 grid_fields(CEIL_DIV(total_fields, blockSize));
 
     ucgetbackward<<<grid_fields, blockSize, 0, stream_comp>>>(er, se, mr, uE0, uE1, uE4, uH0, uH1, uH4, NX_FIELDS, NY_FIELDS, NZ_FIELDS, dt, dx);
+    CUDA_CHECK_LAST();
 
     long long total_src = step * nsrc;                           
     long long src_blocks = (total_src + blockSize - 1) / blockSize;        
@@ -881,47 +894,53 @@ DEEPGPR_API void backward(const float* __restrict__ er, const float* __restrict_
         for(int k = 0; k < 3; k++) {
             int t_load = max_t_needed - k;
             if(t_load >= 0) {
-                cudaMemcpyAsync(d_E_buf + (t_load % 3) * snap_size, Eall_ptr + t_load * snap_size, snap_size * sizeof(float), cudaMemcpyHostToDevice, stream_trans);
+                CUDA_CHECK(cudaMemcpyAsync(d_E_buf + (t_load % 3) * snap_size, Eall_ptr + t_load * snap_size, snap_size * sizeof(float), cudaMemcpyHostToDevice, stream_trans));
             }
         }
-        cudaStreamSynchronize(stream_trans);
+        CUDA_CHECK(cudaStreamSynchronize(stream_trans));
     }
 
     for (int i = nt-1; i > 0; i--) {
         if (use_async) {
             int needed_t_min = (i - 1) / sampling_interval;
             if (needed_t_min < lowest_t_loaded && needed_t_min >= 0) {
-                cudaStreamSynchronize(stream_trans); 
-                cudaMemcpyAsync(d_E_buf + (needed_t_min % 3) * snap_size, Eall_ptr + needed_t_min * snap_size, snap_size * sizeof(float), cudaMemcpyHostToDevice, stream_trans);
+                CUDA_CHECK(cudaStreamSynchronize(stream_trans));
+                CUDA_CHECK(cudaMemcpyAsync(d_E_buf + (needed_t_min % 3) * snap_size, Eall_ptr + needed_t_min * snap_size, snap_size * sizeof(float), cudaMemcpyHostToDevice, stream_trans));
                 lowest_t_loaded = needed_t_min;
             }
-            cudaEventRecord(event_trans, stream_trans);
-            cudaStreamWaitEvent(stream_comp, event_trans, 0);
+            CUDA_CHECK(cudaEventRecord(event_trans, stream_trans));
+            CUDA_CHECK(cudaStreamWaitEvent(stream_comp, event_trans, 0));
         }
 
         Back_source<<<grid_src, blockSize, 0, stream_comp>>>(step, i, dx, sourcelocation, srcwaveforms, Ex, Ey, Ez, uE4, NX_FIELDS, NY_FIELDS, NZ_FIELDS, nsrc, polarisation, nt);
+        CUDA_CHECK_LAST();
         
         fused_e_fields_updates_gpu<<<grid_fields, blockSize, 0, stream_comp>>>(
             uE0, uE1, Ex, Ey, Ez, Hx, Hy, Hz, dx, dx, dx, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
             pml0, pml1, pml2, pml3, pml4, pml5, x0ER, xmER, y0ER, ymER, z0ER, zmER, uE4,
             x0EPhi1, x0EPhi2, xmEPhi1, xmEPhi2, y0EPhi1, y0EPhi2, ymEPhi1, ymEPhi2, z0EPhi1, z0EPhi2, zmEPhi1, zmEPhi2,
             fdtd_order);
+        CUDA_CHECK_LAST();
 
         fused_h_fields_updates_gpu<<<grid_fields, blockSize, 0, stream_comp>>>(
             uH0, uH1, Ex, Ey, Ez, Hx, Hy, Hz, dx, dx, dx, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
             pml0, pml1, pml2, pml3, pml4, pml5, x0HR, xmHR, y0HR, ymHR, z0HR, zmHR, uH4, 
             x0HPhi1, x0HPhi2, xmHPhi1, xmHPhi2, y0HPhi1, y0HPhi2, ymHPhi1, ymHPhi2, z0HPhi1, z0HPhi2, zmHPhi1, zmHPhi2,
             fdtd_order);
+        CUDA_CHECK_LAST();
 
         accumulate_gradients<<<grid_grad, blockSize, 0, stream_comp>>>(Ez, Eall_ptr, d_E_buf, grad_er, grad_se, i, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, dt, errequiregrad, serequiregrad, sampling_interval, nt_saved, use_async);
+        CUDA_CHECK_LAST();
     }
 
+    CUDA_CHECK(cudaDeviceSynchronize());
+
     if (use_async) {
-        cudaStreamSynchronize(stream_comp);
-        cudaStreamSynchronize(stream_trans);
-        cudaFree(d_E_buf); 
-        cudaEventDestroy(event_trans);
-        cudaStreamDestroy(stream_comp);
-        cudaStreamDestroy(stream_trans);
+        CUDA_CHECK(cudaStreamSynchronize(stream_comp));
+        CUDA_CHECK(cudaStreamSynchronize(stream_trans));
+        CUDA_CHECK(cudaFree(d_E_buf));
+        CUDA_CHECK(cudaEventDestroy(event_trans));
+        CUDA_CHECK(cudaStreamDestroy(stream_comp));
+        CUDA_CHECK(cudaStreamDestroy(stream_trans));
     }
 }

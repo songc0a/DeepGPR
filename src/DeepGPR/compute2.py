@@ -3,6 +3,12 @@ import ctypes
 from . import get_deepgpr_lib, set_library_fdtd_order
 from .common import initialization,build_pml_phi,create_or_separate,buildpmlcoeffs,check_tensors_for_nan_inf
 
+
+def _sync_cuda_device(device):
+    if device.type == "cuda":
+        torch.cuda.set_device(device)
+        torch.cuda.synchronize(device)
+
 def compute(device, dx=None, dt=None, 
             source_amplitudes=None,
             source_location=None, 
@@ -82,6 +88,7 @@ class DeepGPR(torch.autograd.Function):
         receiver_amplitudes = torch.zeros((nstep, 6, nt, nrx),device=device, dtype=dtype).contiguous()
         pml = [int(pmlthick[i]) for i in range(6)]
 
+        _sync_cuda_device(device)
         c_lib.forward(
                 ctypes.cast(ere.data_ptr(), ctypes.POINTER(ctypes.c_float)), 
                 ctypes.cast(see.data_ptr(), ctypes.POINTER(ctypes.c_float)), 
@@ -127,6 +134,7 @@ class DeepGPR(torch.autograd.Function):
                 ctypes.cast(source_location.data_ptr(), ctypes.POINTER(ctypes.c_int)), ctypes.cast(source_amplitudes.data_ptr(), ctypes.POINTER(ctypes.c_float)),
                 source_direction,
                 model_gradient_sampling_interval)
+        _sync_cuda_device(device)
 
         check_tensors_for_nan_inf(d="forward",
             Ex=Ex, Ey=Ey, Ez=Ez,
@@ -252,6 +260,7 @@ class DeepGPR(torch.autograd.Function):
 
         pml = [int(pmlthick[i]) for i in range(6)]
 
+        _sync_cuda_device(device)
         c_lib.backward(
                 ctypes.cast(ere.data_ptr(), ctypes.POINTER(ctypes.c_float)), 
                 ctypes.cast(see.data_ptr(), ctypes.POINTER(ctypes.c_float)), 
@@ -297,6 +306,7 @@ class DeepGPR(torch.autograd.Function):
                 2,
                 ctypes.cast(grad_er.data_ptr(), ctypes.POINTER(ctypes.c_float)), ctypes.cast(grad_se.data_ptr(), ctypes.POINTER(ctypes.c_float)),errequiregrad,serequiregrad,
                 model_gradient_sampling_interval)  
+        _sync_cuda_device(device)
         
         check_tensors_for_nan_inf(d="backward",
             gEx=gEx, gEy=gEy, gEz=gEz,
