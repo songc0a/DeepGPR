@@ -103,9 +103,10 @@ static void ucgetforward_cpu(const float* RESTRICT er, const float* RESTRICT se,
 {
     long long total = (long long)NX_FIELDS * NY_FIELDS * NZ_FIELDS;
     long long ny_nz = (long long)NY_FIELDS * NZ_FIELDS;
+    long long idx;
 
     DEEPGPR_OMP_PARALLEL_FOR
-    for (long long idx = 0; idx < total; ++idx) {
+    for (idx = 0; idx < total; ++idx) {
         long long i = idx / ny_nz;
         long long rem = idx % ny_nz;
         long long j = rem / NZ_FIELDS;
@@ -141,9 +142,10 @@ static void ucgetbackward_cpu(const float* RESTRICT er, const float* RESTRICT se
 {
     long long total = (long long)NX_FIELDS * NY_FIELDS * NZ_FIELDS;
     long long ny_nz = (long long)NY_FIELDS * NZ_FIELDS;
+    long long idx;
 
     DEEPGPR_OMP_PARALLEL_FOR
-    for (long long idx = 0; idx < total; ++idx) {
+    for (idx = 0; idx < total; ++idx) {
         long long i = idx / ny_nz;
         long long rem = idx % ny_nz;
         long long j = rem / NZ_FIELDS;
@@ -177,9 +179,10 @@ static void store_outputs_cpu(
     int NX, int NY, int NZ, int N_ITER)
 {
     long long field_stride = (long long)NX * NY * NZ;
+    long long rx;
 
     DEEPGPR_OMP_PARALLEL_FOR
-    for (long long rx = 0; rx < NRX; ++rx) {
+    for (rx = 0; rx < NRX; ++rx) {
         for (int s = 0; s < step; ++s) {
             long long i = receiverlocation[s * NRX * 3 + rx * 3 + 0];
             long long j = receiverlocation[s * NRX * 3 + rx * 3 + 1];
@@ -204,9 +207,10 @@ static void Update_hertzian_dipole_cpu(
     int NX, int NY, int NZ, int nsrc, int polarisation, int nt)
 {
     long long field_stride = (long long)NX * NY * NZ;
+    long long src;
 
     DEEPGPR_OMP_PARALLEL_FOR
-    for (long long src = 0; src < nsrc; ++src) {
+    for (src = 0; src < nsrc; ++src) {
         float waveform_value = srcwaveforms[src * nt + iteration];
         float scale = waveform_value * dx / (dx * dx * dx);
 
@@ -253,9 +257,10 @@ static void fused_e_fields_updates_cpu(
 {
     long long ny_nz = (long long)NY_FIELDS * NZ_FIELDS;
     long long field_stride = (long long)NX_FIELDS * ny_nz;
+    long long idx;
 
     DEEPGPR_OMP_PARALLEL_FOR
-    for (long long idx = 0; idx < field_stride; ++idx) {
+    for (idx = 0; idx < field_stride; ++idx) {
         long long i = idx / ny_nz;
         long long rem = idx % ny_nz;
         long long j = rem / NZ_FIELDS;
@@ -434,9 +439,10 @@ static void fused_h_fields_updates_cpu(
 {
     long long ny_nz = (long long)NY_FIELDS * NZ_FIELDS;
     long long field_stride = (long long)NX_FIELDS * ny_nz;
+    long long idx;
 
     DEEPGPR_OMP_PARALLEL_FOR
-    for (long long idx = 0; idx < field_stride; ++idx) {
+    for (idx = 0; idx < field_stride; ++idx) {
         long long i = idx / ny_nz;
         long long rem = idx % ny_nz;
         long long j = rem / NZ_FIELDS;
@@ -602,9 +608,10 @@ static void Back_source_cpu(
 {
     long long field_stride = (long long)NX * NY * NZ;
     long long index_stride = (long long)iterations * nsr;
+    long long src;
 
     DEEPGPR_OMP_PARALLEL_FOR
-    for (long long src = 0; src < nsr; ++src) {
+    for (src = 0; src < nsr; ++src) {
         long long index = (long long)iteration * nsr + src;
 
         for (int s = 0; s < step; ++s) {
@@ -638,9 +645,10 @@ static void copy_to_Eall_single_cpu(
     long long nx1 = NX - 1, ny1 = NY - 1, nz1 = NZ - 1;
     long long total = nx1 * ny1 * nz1;
     long long field_stride = (long long)NX * NY * NZ;
+    long long idx;
 
     DEEPGPR_OMP_PARALLEL_FOR
-    for (long long idx = 0; idx < total; ++idx) {
+    for (idx = 0; idx < total; ++idx) {
         long long i = idx / (ny1 * nz1);
         long long rem = idx % (ny1 * nz1);
         long long j = rem / nz1;
@@ -670,9 +678,10 @@ static void accumulate_gradients_cpu(
 {
     long long sx = NX - 1, sy = NY - 1, sz = NZ - 1;
     long long total_cells = sx * sy * sz;
+    long long idx;
 
     DEEPGPR_OMP_PARALLEL_FOR
-    for (long long idx = 0; idx < total_cells; ++idx) {
+    for (idx = 0; idx < total_cells; ++idx) {
         long long ix = idx / (sy * sz);
         long long rem = idx % (sy * sz);
         long long iy = rem / sz;
