@@ -265,12 +265,12 @@ __global__ void fused_e_fields_updates_gpu(
     bool do_ey = (((NX_FIELDS-1) != 1 || (NZ_FIELDS-1) != 1) && i > 0 && i < (NX_FIELDS-1) && j < (NY_FIELDS-1) && k > 0 && k < (NZ_FIELDS-1));
     bool do_ez = (((NX_FIELDS-1) != 1 || (NY_FIELDS-1) != 1) && i > 0 && i < (NX_FIELDS-1) && j > 0 && j < (NY_FIELDS-1) && k < (NZ_FIELDS-1));
 
-    bool in_x0 = (pml0 > 0 && i <= pml0 && j < NY_FIELDS && k < NZ_FIELDS);
-    bool in_xm = (pml1 > 0 && i >= NX_FIELDS - 1 - pml1 && i < NX_FIELDS && j < NY_FIELDS && k < NZ_FIELDS);
-    bool in_y0 = (pml2 > 0 && i < NX_FIELDS && j <= pml2 && k < NZ_FIELDS);
-    bool in_ym = (pml3 > 0 && i < NX_FIELDS && j >= NY_FIELDS - 1 - pml3 && j < NY_FIELDS && k < NZ_FIELDS);
-    bool in_z0 = (pml4 > 0 && i < NX_FIELDS && j < NY_FIELDS && k <= pml4);
-    bool in_zm = (pml5 > 0 && i < NX_FIELDS && j < NY_FIELDS && k >= NZ_FIELDS - 1 - pml5 && k < NZ_FIELDS);
+    bool in_x0 = (pml0 > 0 && i > 0 && i <= pml0 && j < NY_FIELDS && k < NZ_FIELDS);
+    bool in_xm = (pml1 > 0 && i >= NX_FIELDS - 1 - pml1 && i < NX_FIELDS - 1 && j < NY_FIELDS && k < NZ_FIELDS);
+    bool in_y0 = (pml2 > 0 && i < NX_FIELDS && j > 0 && j <= pml2 && k < NZ_FIELDS);
+    bool in_ym = (pml3 > 0 && i < NX_FIELDS && j >= NY_FIELDS - 1 - pml3 && j < NY_FIELDS - 1 && k < NZ_FIELDS);
+    bool in_z0 = (pml4 > 0 && i < NX_FIELDS && j < NY_FIELDS && k > 0 && k <= pml4);
+    bool in_zm = (pml5 > 0 && i < NX_FIELDS && j < NY_FIELDS && k >= NZ_FIELDS - 1 - pml5 && k < NZ_FIELDS - 1);
 
     float ue0 = uE0[idx];
     float ue1 = uE1[idx];
