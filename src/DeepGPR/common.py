@@ -8,11 +8,31 @@ m0 = 4.0 * math.pi * 1e-7
 e0 = 1.0 / (m0 * c * c)
 
 def _require_finite_tensor(name, tensor):
+    """Validate that a tensor contains only finite values.
+
+    Args:
+        name: Name used in the error message.
+        tensor: Tensor to check, or None to skip the check.
+    """
     if tensor is not None and not torch.isfinite(tensor).all().item():
         raise ValueError(f"`{name}` contains NaN or Inf values.")
 
 
 def initialization(device, er,se,mr,source_amplitudes,source_location,receiver_location,dx,dt,pmlthick):
+    """Validate inputs and prepare model, source, receiver, and PML metadata.
+
+    Args:
+        device: PyTorch device where tensors will be stored.
+        er: Relative permittivity tensor with shape (nx, ny) or (nx, ny, nz).
+        se: Electrical conductivity tensor with the same shape as er.
+        mr: Relative permeability tensor, or None to use ones.
+        source_amplitudes: Source waveform tensor with shape (nwaveforms, nt, 1).
+        source_location: Source coordinates with shape (nstep, nsr, 3).
+        receiver_location: Receiver coordinates with shape (nstep, nrx, 3).
+        dx: Spatial grid spacing.
+        dt: Time step size.
+        pmlthick: PML thickness as an int, list, or tensor.
+    """
     dtype=torch.float32
     _require_finite_tensor("er", er)
     _require_finite_tensor("se", se)
@@ -112,6 +132,15 @@ def initialization(device, er,se,mr,source_amplitudes,source_location,receiver_l
 
 
 def check_cfl(dx, dt, nx,ny,nz):
+    """Check the CFL stability condition for the simulation grid.
+
+    Args:
+        dx: Spatial grid spacing.
+        dt: Time step size.
+        nx: Number of cells along the x axis.
+        ny: Number of cells along the y axis.
+        nz: Number of cells along the z axis.
+    """
 
     dy=dx
     dz=dx
@@ -130,6 +159,12 @@ def check_cfl(dx, dt, nx,ny,nz):
 
 
 def pmlthick_revert(p, er):
+    """Convert user PML thickness input to a six-boundary tensor.
+
+    Args:
+        p: PML thickness as an int, list, or tensor.
+        er: Relative permittivity tensor used to detect 2D or 3D mode.
+    """
     if isinstance(p, int):  
         if er.shape[2] == 1:
             return torch.tensor([p, p, p, p, 0, 0], dtype=torch.int32)
@@ -151,14 +186,32 @@ def pmlthick_revert(p, er):
 
 
 class TVRegularization(nn.Module):
-    # tv_criterion = TVRegularization(weight_ep=1,weight_sigma=0.1).to(device)
+    """Total variation regularization for permittivity and conductivity models.
+
+    Args:
+        weight_ep: Weight applied to the permittivity TV loss.
+        weight_sigma: Weight applied to the conductivity TV loss.
+        method: TV variant, either "anisotropic" or another value for isotropic.
+    """
     def __init__(self, weight_ep=1, weight_sigma=0.001, method='anisotropic'):
+        """Create a TV regularization module.
+
+        Args:
+            weight_ep: Weight applied to the permittivity TV loss.
+            weight_sigma: Weight applied to the conductivity TV loss.
+            method: TV variant, either "anisotropic" or another value for isotropic.
+        """
         super(TVRegularization, self).__init__()
         self.weight_ep = weight_ep
         self.weight_sigma = weight_sigma
         self.method = method
 
     def _compute_tv(self, data):
+        """Compute total variation for one tensor.
+
+        Args:
+            data: 2D, 3D, or batched tensor to regularize.
+        """
         if data.dim() == 3 and data.shape[-1] == 1:
             data = data.squeeze(-1)
             
@@ -200,13 +253,17 @@ class TVRegularization(nn.Module):
         return total_tv 
 
     def forward(self, ep=None, sigma=None):
+        """Return the weighted TV loss for model parameters.
+
+        Args:
+            ep: Relative permittivity tensor, or None to skip it.
+            sigma: Conductivity tensor, or None to skip it.
+        """
         loss = torch.tensor(0.0, device=ep.device if ep is not None else sigma.device)
-        
-        # 计算 ep (介电常数) 的 TV
+
         if ep is not None and self.weight_ep > 0:
             loss += self.weight_ep * self._compute_tv(ep)
-            
-        # 计算 sigma (电导率) 的 TV
+
         if sigma is not None and self.weight_sigma > 0:
             loss += self.weight_sigma * self._compute_tv(sigma)
             
@@ -215,6 +272,17 @@ class TVRegularization(nn.Module):
 
 def create_or_separate(tuple:tuple, nx,ny,nz,nstep,device: torch.device,
                   dtype: torch.dtype):
+    """Create zero field components or validate existing field components.
+
+    Args:
+        tuple: Existing (x, y, z) field tensors, or None to allocate zeros.
+        nx: Number of model cells along the x axis.
+        ny: Number of model cells along the y axis.
+        nz: Number of model cells along the z axis.
+        nstep: Number of shots or simulations in the batch.
+        device: PyTorch device for allocated tensors.
+        dtype: PyTorch dtype for allocated tensors.
+    """
     if tuple == None:
         return torch.zeros((nstep,nx+1,ny+1,nz+1), device=device, dtype=dtype).contiguous(),torch.zeros((nstep,nx+1,ny+1,nz+1), device=device, dtype=dtype).contiguous(),torch.zeros((nstep,nx+1,ny+1,nz+1), device=device, dtype=dtype).contiguous()
     # else:
@@ -251,12 +319,11 @@ def create_or_separate(tuple:tuple, nx,ny,nz,nstep,device: torch.device,
 
 
 def check_tensors_for_nan_inf(d,**tensors):
-    """
-        check_tensors_for_nan_inf(
-            gEx=gEx, gEy=gEy, gEz=gEz,
-            gHx=gHx, gHy=gHy, gHz=gHz,
-            gx0EPhi1=gx0EPhi1, ...
-        )
+    """Check multiple named tensors for NaN or Inf values.
+
+    Args:
+        d: Label describing the current calculation stage.
+        **tensors: Named tensors to validate.
     """
     found_issue = False
 
@@ -286,6 +353,20 @@ def check_tensors_for_nan_inf(d,**tensors):
 
 
 def buildpmlcoeffs(er,mr,dt,dx,nx,ny,nz,pmlthick,device,dtype):
+    """Build CPML region descriptors and update coefficients.
+
+    Args:
+        er: Relative permittivity tensor.
+        mr: Relative permeability tensor.
+        dt: Time step size.
+        dx: Spatial grid spacing.
+        nx: Number of model cells along the x axis.
+        ny: Number of model cells along the y axis.
+        nz: Number of model cells along the z axis.
+        pmlthick: Six-boundary PML thickness tensor.
+        device: PyTorch device for output tensors.
+        dtype: PyTorch dtype for output tensors.
+    """
     averageer=torch.zeros(6, device=device, dtype=dtype)
     averagemr=torch.zeros(6, device=device, dtype=dtype)
     lencfs=1
@@ -365,9 +446,27 @@ def buildpmlcoeffs(er,mr,dt,dx,nx,ny,nz,pmlthick,device,dtype):
 
 
 class CFSParameter(object):
+    """Parameter settings for complex frequency shifted PML profiles.
+
+    Args:
+        ID: Parameter name, such as "alpha", "kappa", or "sigma".
+        scaling: Scaling family used to generate the profile.
+        scalingprofile: Profile order name used by polynomial scaling.
+        min: Minimum value of the profile.
+        max: Maximum value of the profile.
+    """
     scalingprofiles = {'constant': 0, 'linear': 1, 'quadratic': 2, 'cubic': 3, 'quartic': 4, 'quintic': 5, 'sextic': 6, 'septic': 7, 'octic': 8}
 
     def __init__(self,ID =None, scaling='polynomial', scalingprofile=None, min=0, max=0):
+        """Create one CFS profile parameter.
+
+        Args:
+            ID: Parameter name, such as "alpha", "kappa", or "sigma".
+            scaling: Scaling family used to generate the profile.
+            scalingprofile: Profile order name used by polynomial scaling.
+            min: Minimum value of the profile.
+            max: Maximum value of the profile.
+        """
         self.ID = ID
         self.scaling = scaling
         self.scalingprofile = scalingprofile
@@ -376,26 +475,56 @@ class CFSParameter(object):
 
 
 class CFS(object):
+    """Complex frequency shifted PML coefficient generator.
+
+    Args:
+        device: PyTorch device where generated profiles are stored.
+    """
 
     def __init__(self, device):
+        """Create a CFS parameter container.
+
+        Args:
+            device: PyTorch device where generated profiles are stored.
+        """
         self.alpha = CFSParameter(ID='alpha', scalingprofile='constant')
         self.kappa = CFSParameter(ID='kappa', scalingprofile='constant', min=1, max=1)
         self.sigma = CFSParameter(ID='sigma', scalingprofile='quartic', min=0, max=None)
         self.device = device
 
     def calculate_sigmamax(self, d, er, mr):
+        """Calculate the maximum PML sigma value.
+
+        Args:
+            d: Spatial grid spacing normal to the PML boundary.
+            er: Average relative permittivity near the boundary.
+            mr: Average relative permeability near the boundary.
+        """
         with torch.no_grad():
             m = CFSParameter.scalingprofiles[self.sigma.scalingprofile]
             self.sigma.max = (0.8 * (m + 1)) / (((m0 / e0) ** 0.5) * d * torch.sqrt(er * mr))
 
 
     def scaling_polynomial(self, order, Evalues, Hvalues):
+        """Create staggered electric and magnetic polynomial profiles.
+
+        Args:
+            order: Polynomial order index.
+            Evalues: Electric profile tensor to fill.
+            Hvalues: Magnetic profile tensor to fill.
+        """
         tmp = (torch.linspace(0, (len(Evalues) - 1) + 0.5, steps=2 * len(Evalues)) / (len(Evalues) - 1)) ** order
         Evalues = tmp[0:-1:2].to(self.device)
         Hvalues = tmp[1::2].to(self.device)
         return Evalues, Hvalues
 
     def calculate_values(self, thickness, parameter):
+        """Calculate electric and magnetic CFS values for one parameter.
+
+        Args:
+            thickness: PML thickness in grid cells.
+            parameter: CFSParameter object to evaluate.
+        """
 
         Evalues = torch.zeros(thickness + 1, device=self.device)
         Hvalues = torch.zeros(thickness + 1, device=self.device)
@@ -420,6 +549,18 @@ class CFS(object):
         return Evalues, Hvalues
 
 def calculate_pml_update_coeffs(cfs,R1,R2, aver, avmr, dt,d,thickness):
+    """Fill PML electric and magnetic update coefficient tensors.
+
+    Args:
+        cfs: CFS coefficient generator.
+        R1: Electric-field PML coefficient tensor to fill.
+        R2: Magnetic-field PML coefficient tensor to fill.
+        aver: Average relative permittivity near the boundary.
+        avmr: Average relative permeability near the boundary.
+        dt: Time step size.
+        d: Spatial grid spacing normal to the PML boundary.
+        thickness: PML thickness in grid cells.
+    """
     if not cfs.sigma.max:
         cfs.calculate_sigmamax(d, aver, avmr)
 
@@ -445,6 +586,19 @@ def calculate_pml_update_coeffs(cfs,R1,R2, aver, avmr, dt,d,thickness):
 
 
 def build_pml_phi(x0,xm,y0,ym,z0,zm,nstep,PML,device):
+    """Create or reuse CPML auxiliary phi tensors.
+
+    Args:
+        x0: Descriptor for the low-x PML boundary.
+        xm: Descriptor for the high-x PML boundary.
+        y0: Descriptor for the low-y PML boundary.
+        ym: Descriptor for the high-y PML boundary.
+        z0: Descriptor for the low-z PML boundary.
+        zm: Descriptor for the high-z PML boundary.
+        nstep: Number of shots or simulations in the batch.
+        PML: Existing tuple of 24 PML phi tensors, or None.
+        device: PyTorch device for allocated tensors.
+    """
    
     (x0EPhi1, x0EPhi2, x0HPhi1, x0HPhi2,
     xmEPhi1, xmEPhi2, xmHPhi1, xmHPhi2,
@@ -531,6 +685,21 @@ def checkpoint_initial_field(device=None,per_nstep=None, dx=None, dt=None,
             receiver_location=None, 
             er=None, se=None,mr=None, 
             pmlthick=10):
+    """Create initial electric, magnetic, and PML field checkpoints.
+
+    Args:
+        device: PyTorch device where tensors will be allocated.
+        per_nstep: Optional number of shots to keep from the initialized fields.
+        dx: Spatial grid spacing.
+        dt: Time step size.
+        source_amplitudes: Source waveform tensor.
+        source_location: Source coordinates with shape (nstep, nsr, 3).
+        receiver_location: Receiver coordinates with shape (nstep, nrx, 3).
+        er: Relative permittivity tensor.
+        se: Electrical conductivity tensor.
+        mr: Relative permeability tensor, or None to use ones.
+        pmlthick: PML thickness as an int, list, or tensor.
+    """
     E=None
     H=None
     PML=None
@@ -560,4 +729,9 @@ def checkpoint_initial_field(device=None,per_nstep=None, dx=None, dt=None,
 
 
 def zero_field(*tensors):
+    """Return zero tensors with the same shapes as the input tensors.
+
+    Args:
+        *tensors: Tensors to zero, or None values to preserve.
+    """
     return tuple(torch.zeros_like(t) if t is not None else None for t in tensors)

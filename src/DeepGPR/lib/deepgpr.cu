@@ -35,11 +35,23 @@ __constant__ float m0 = 1.25663706212e-06;
 
 static int g_fdtd_order = 2;
 
+/*
+ * Set the spatial FDTD finite-difference order.
+ *
+ * Parameters:
+ *   order: Requested order; 2 is used unless order is 4 or 8.
+ */
 DEEPGPR_API void set_fdtd_order(int order)
 {
     g_fdtd_order = (order == 4 || order == 8) ? order : 2;
 }
 
+/*
+ * Return the finite-difference stencil radius for an FDTD order.
+ *
+ * Parameters:
+ *   order: Spatial finite-difference order.
+ */
 __device__ __forceinline__ int fdtd_radius_for_order(int order)
 {
     if (order >= 8) return 4;
@@ -47,6 +59,13 @@ __device__ __forceinline__ int fdtd_radius_for_order(int order)
     return 1;
 }
 
+/*
+ * Return one staggered finite-difference coefficient.
+ *
+ * Parameters:
+ *   radius: Stencil radius.
+ *   r: Coefficient index within the stencil.
+ */
 __device__ __forceinline__ float fdtd_coeff(int radius, int r)
 {
     if (radius >= 4) {
@@ -67,6 +86,14 @@ __device__ __forceinline__ float fdtd_coeff(int radius, int r)
     return 1.0f;
 }
 
+/*
+ * Clamp the backward-difference radius near model boundaries.
+ *
+ * Parameters:
+ *   coord: Current grid coordinate along the derivative axis.
+ *   n: Grid size along the derivative axis.
+ *   requested: Requested stencil radius.
+ */
 __device__ __forceinline__ int usable_backward_radius(long long coord, long long n, int requested)
 {
     int radius = requested;
@@ -74,6 +101,14 @@ __device__ __forceinline__ int usable_backward_radius(long long coord, long long
     return radius;
 }
 
+/*
+ * Clamp the forward-difference radius near model boundaries.
+ *
+ * Parameters:
+ *   coord: Current grid coordinate along the derivative axis.
+ *   n: Grid size along the derivative axis.
+ *   requested: Requested stencil radius.
+ */
 __device__ __forceinline__ int usable_forward_radius(long long coord, long long n, int requested)
 {
     int radius = requested;
@@ -81,6 +116,17 @@ __device__ __forceinline__ int usable_forward_radius(long long coord, long long 
     return radius;
 }
 
+/*
+ * Compute a staggered backward spatial difference.
+ *
+ * Parameters:
+ *   f: Field array to differentiate.
+ *   id: Linear index of the current field sample.
+ *   stride: Linear stride along the derivative axis.
+ *   coord: Current grid coordinate along the derivative axis.
+ *   n: Grid size along the derivative axis.
+ *   order: Spatial finite-difference order.
+ */
 __device__ __forceinline__ float staggered_backward_diff(
     const float* __restrict__ f, long long id, long long stride,
     long long coord, long long n, int order)
@@ -95,6 +141,17 @@ __device__ __forceinline__ float staggered_backward_diff(
     return acc;
 }
 
+/*
+ * Compute a staggered forward spatial difference.
+ *
+ * Parameters:
+ *   f: Field array to differentiate.
+ *   id: Linear index of the current field sample.
+ *   stride: Linear stride along the derivative axis.
+ *   coord: Current grid coordinate along the derivative axis.
+ *   n: Grid size along the derivative axis.
+ *   order: Spatial finite-difference order.
+ */
 __device__ __forceinline__ float staggered_forward_diff(
     const float* __restrict__ f, long long id, long long stride,
     long long coord, long long n, int order)
@@ -109,6 +166,19 @@ __device__ __forceinline__ float staggered_forward_diff(
     return acc;
 }
 
+/*
+ * Build forward-update coefficients for electric and magnetic fields.
+ *
+ * Parameters:
+ *   er: Padded relative permittivity array.
+ *   se: Padded electrical conductivity array.
+ *   mr: Padded relative permeability array.
+ *   uE0, uE1, uE4: Output electric-field update coefficient arrays.
+ *   uH0, uH1, uH4: Output magnetic-field update coefficient arrays.
+ *   NX_FIELDS, NY_FIELDS, NZ_FIELDS: Padded field grid sizes.
+ *   dt: Time step size.
+ *   dx: Spatial grid spacing.
+ */
 __global__ void ucgetforward(const float* __restrict__ er, const float* __restrict__ se, const float* __restrict__ mr,
     float* __restrict__ uE0, float* __restrict__ uE1, float* __restrict__ uE4,
     float* __restrict__ uH0, float* __restrict__ uH1, float* __restrict__ uH4,
@@ -143,6 +213,19 @@ __global__ void ucgetforward(const float* __restrict__ er, const float* __restri
     }
 }
 
+/*
+ * Build backward-update coefficients for electric and magnetic fields.
+ *
+ * Parameters:
+ *   er: Padded relative permittivity array.
+ *   se: Padded electrical conductivity array.
+ *   mr: Padded relative permeability array.
+ *   uE0, uE1, uE4: Output electric-field update coefficient arrays.
+ *   uH0, uH1, uH4: Output magnetic-field update coefficient arrays.
+ *   NX_FIELDS, NY_FIELDS, NZ_FIELDS: Padded field grid sizes.
+ *   dt: Time step size.
+ *   dx: Spatial grid spacing.
+ */
 __global__ void ucgetbackward(const float* __restrict__ er, const float* __restrict__ se, const float* __restrict__ mr,
     float* __restrict__ uE0, float* __restrict__ uE1, float* __restrict__ uE4,
     float* __restrict__ uH0, float* __restrict__ uH1, float* __restrict__ uH4,
@@ -175,6 +258,20 @@ __global__ void ucgetbackward(const float* __restrict__ er, const float* __restr
 }
 
 
+/*
+ * Store receiver samples for all six field components.
+ *
+ * Parameters:
+ *   step: Number of shots or simulations in the batch.
+ *   NRX: Number of receivers per shot.
+ *   iteration: Current time-step index.
+ *   receiverlocation: Receiver coordinates with shape (step, NRX, 3).
+ *   rxs: Output receiver sample array.
+ *   Ex, Ey, Ez: Electric field component arrays.
+ *   Hx, Hy, Hz: Magnetic field component arrays.
+ *   NX, NY, NZ: Padded field grid sizes.
+ *   N_ITER: Total number of time steps.
+ */
 __global__ void store_outputs(
     int step, int NRX, int iteration,
     const int* __restrict__ receiverlocation, float* __restrict__ rxs,
@@ -204,6 +301,22 @@ __global__ void store_outputs(
 }
 
 
+/*
+ * Inject a Hertzian dipole source into one electric-field component.
+ *
+ * Parameters:
+ *   step: Number of shots or simulations in the batch.
+ *   iteration: Current time-step index.
+ *   dx: Spatial grid spacing.
+ *   sourcelocation: Source coordinates with shape (step, nsrc, 3).
+ *   srcwaveforms: Source waveform array.
+ *   Ex, Ey, Ez: Electric field component arrays to update.
+ *   uE4: Electric source scaling coefficient array.
+ *   NX, NY, NZ: Padded field grid sizes.
+ *   nsrc: Number of sources per shot.
+ *   polarisation: Source component, 0 for x, 1 for y, 2 for z.
+ *   nt: Total number of time steps.
+ */
 __global__ void Update_hertzian_dipole(
     int step, int iteration, float dx, 
     const int* __restrict__ sourcelocation, const float* __restrict__ srcwaveforms,
@@ -232,6 +345,24 @@ __global__ void Update_hertzian_dipole(
 }
 
 
+/*
+ * Update electric fields and electric CPML auxiliary fields.
+ *
+ * Parameters:
+ *   uE0, uE1: Electric-field update coefficient arrays.
+ *   Ex, Ey, Ez: Electric field component arrays to update.
+ *   Hx, Hy, Hz: Magnetic field component arrays used by the curl update.
+ *   dx, dy, dz: Spatial grid spacings.
+ *   step: Number of shots or simulations in the batch.
+ *   NX_FIELDS, NY_FIELDS, NZ_FIELDS: Padded field grid sizes.
+ *   pml0, pml1, pml2, pml3, pml4, pml5: PML thickness for x0, xm, y0, ym, z0, zm.
+ *   x0ER, xmER, y0ER, ymER, z0ER, zmER: Electric PML coefficient arrays.
+ *   updatecoeffsE: Electric PML scaling coefficient array.
+ *   x0EPhi1, x0EPhi2, xmEPhi1, xmEPhi2: X-boundary electric PML auxiliary arrays.
+ *   y0EPhi1, y0EPhi2, ymEPhi1, ymEPhi2: Y-boundary electric PML auxiliary arrays.
+ *   z0EPhi1, z0EPhi2, zmEPhi1, zmEPhi2: Z-boundary electric PML auxiliary arrays.
+ *   fdtd_order: Spatial finite-difference order.
+ */
 __global__ void fused_e_fields_updates_gpu(
     const float* __restrict__ uE0, const float* __restrict__ uE1,  
     float* __restrict__ Ex, float* __restrict__ Ey, float* __restrict__ Ez,  
@@ -414,6 +545,24 @@ __global__ void fused_e_fields_updates_gpu(
 }
 
 
+/*
+ * Update magnetic fields and magnetic CPML auxiliary fields.
+ *
+ * Parameters:
+ *   uH0, uH1: Magnetic-field update coefficient arrays.
+ *   Ex, Ey, Ez: Electric field component arrays used by the curl update.
+ *   Hx, Hy, Hz: Magnetic field component arrays to update.
+ *   dx, dy, dz: Spatial grid spacings.
+ *   step: Number of shots or simulations in the batch.
+ *   NX_FIELDS, NY_FIELDS, NZ_FIELDS: Padded field grid sizes.
+ *   pml0, pml1, pml2, pml3, pml4, pml5: PML thickness for x0, xm, y0, ym, z0, zm.
+ *   x0HR, xmHR, y0HR, ymHR, z0HR, zmHR: Magnetic PML coefficient arrays.
+ *   updatecoeffsH: Magnetic PML scaling coefficient array.
+ *   x0HPhi1, x0HPhi2, xmHPhi1, xmHPhi2: X-boundary magnetic PML auxiliary arrays.
+ *   y0HPhi1, y0HPhi2, ymHPhi1, ymHPhi2: Y-boundary magnetic PML auxiliary arrays.
+ *   z0HPhi1, z0HPhi2, zmHPhi1, zmHPhi2: Z-boundary magnetic PML auxiliary arrays.
+ *   fdtd_order: Spatial finite-difference order.
+ */
 __global__ void fused_h_fields_updates_gpu(
     const float* __restrict__ uH0, const float* __restrict__ uH1,
     const float* __restrict__ Ex, const float* __restrict__ Ey, const float* __restrict__ Ez,
@@ -596,6 +745,22 @@ __global__ void fused_h_fields_updates_gpu(
 }
 
 
+/*
+ * Inject the adjoint source into one electric-field component.
+ *
+ * Parameters:
+ *   step: Number of shots or simulations in the batch.
+ *   iteration: Current reverse time-step index.
+ *   dx: Spatial grid spacing.
+ *   sourcelocation: Adjoint source coordinates with shape (step, nsr, 3).
+ *   srcwaveforms: Adjoint source waveform array.
+ *   Ex, Ey, Ez: Electric field component arrays to update.
+ *   uE4: Electric source scaling coefficient array.
+ *   NX, NY, NZ: Padded field grid sizes.
+ *   nsr: Number of adjoint sources per shot.
+ *   polarisation: Source component, 0 for x, 1 for y, 2 for z.
+ *   iterations: Total number of time steps.
+ */
 __global__ void Back_source(
     int step, int iteration, float dx,
     const int* __restrict__ sourcelocation, const float* __restrict__ srcwaveforms,
@@ -625,6 +790,16 @@ __global__ void Back_source(
 }
 
 
+/*
+ * Copy one electric-field component snapshot into the saved wavefield buffer.
+ *
+ * Parameters:
+ *   dst_ptr: Destination wavefield buffer.
+ *   t_idx: Saved time index.
+ *   E: Electric field component array to copy.
+ *   step: Number of shots or simulations in the batch.
+ *   NX, NY, NZ: Padded field grid sizes.
+ */
 __global__ void copy_to_Eall_single(
     float* __restrict__ dst_ptr, int t_idx, const float* __restrict__ E, 
     int step, int NX, int NY, int NZ)
@@ -651,15 +826,39 @@ __global__ void copy_to_Eall_single(
 }
 
 
+/*
+ * Accumulate model gradients from saved forward fields and adjoint fields.
+ *
+ * Parameters:
+ *   Ex, Ey, Ez: Adjoint electric field component arrays.
+ *   Eall_ptr: Saved forward electric field history.
+ *   d_E_buf: Device-side staging buffer for async-offloaded Eall snapshots.
+ *   grader: Output relative permittivity gradient array.
+ *   gradse: Output conductivity gradient array.
+ *   i: Current reverse time-step index.
+ *   step: Number of shots or simulations in the batch.
+ *   NX, NY, NZ: Padded field grid sizes.
+ *   dt: Time step size.
+ *   errequiregrad: Whether to accumulate grader.
+ *   serequiregrad: Whether to accumulate gradse.
+ *   S: Forward wavefield sampling interval.
+ *   nt_saved: Number of saved forward snapshots.
+ *   use_async_offload: Whether Eall is read through d_E_buf.
+ *   fwi_mode: Gradient mode; 2 uses Ez only, 3 uses Ex, Ey, and Ez.
+ */
 __global__ void accumulate_gradients(
-    const float* __restrict__ Ez, const float* __restrict__ Eall_ptr, const float* __restrict__ d_E_buf,
+    const float* __restrict__ Ex, const float* __restrict__ Ey, const float* __restrict__ Ez,
+    const float* __restrict__ Eall_ptr, const float* __restrict__ d_E_buf,
     float* __restrict__ grader, float* __restrict__ gradse,
     int i, int step, int NX, int NY, int NZ, float dt,int errequiregrad,int serequiregrad,
-    int S, int nt_saved, int use_async_offload
+    int S, int nt_saved, int use_async_offload, int fwi_mode
 ) {
     long long idx = blockIdx.x * blockDim.x + threadIdx.x;
     long long sx = (NX - 1), sy = (NY - 1), sz = (NZ - 1);
     long long total_cells = sx * sy * sz;
+    long long snap_stride = (long long)step * total_cells;
+    long long component_stride = (long long)nt_saved * snap_stride;
+    int components = (fwi_mode == 3) ? 3 : 1;
 
     if (idx >= total_cells) return;
 
@@ -668,7 +867,7 @@ __global__ void accumulate_gradients(
     long long iy = rem / sz;
     long long iz = rem % sz;
 
-    long long idx_Ez = ix * NY * NZ + iy * NZ + iz;
+    long long idx_E = ix * NY * NZ + iy * NZ + iz;
     
     long long idx0_curr = i / S;
     long long idx1_curr = min(idx0_curr + 1, (long long)nt_saved - 1);
@@ -680,35 +879,44 @@ __global__ void accumulate_gradients(
     float w1_prev = (float)((i - 1) % S) / S;
     float w0_prev = 1.0f - w1_prev;
 
-    long long ez_stride = (long long)NX * NY * NZ;
+    long long e_stride = (long long)NX * NY * NZ;
     float local_grader = 0.0f;
     float local_gradse = 0.0f;
 
     for (int s = 0; s < step; ++s) {
         long long base_idx = (long long)s * total_cells + idx;
-        float e0_c, e1_c, e0_p, e1_p;
+        float adjoint_values[3];
+        adjoint_values[0] = Ex[idx_E];
+        adjoint_values[1] = Ey[idx_E];
+        adjoint_values[2] = Ez[idx_E];
 
-        if (use_async_offload) {
-            e0_c = d_E_buf[(idx0_curr % 3) * step * total_cells + base_idx];
-            e1_c = d_E_buf[(idx1_curr % 3) * step * total_cells + base_idx];
-            e0_p = d_E_buf[(idx0_prev % 3) * step * total_cells + base_idx];
-            e1_p = d_E_buf[(idx1_prev % 3) * step * total_cells + base_idx];
-        } else {
-            e0_c = Eall_ptr[idx0_curr * step * total_cells + base_idx];
-            e1_c = Eall_ptr[idx1_curr * step * total_cells + base_idx];
-            e0_p = Eall_ptr[idx0_prev * step * total_cells + base_idx];
-            e1_p = Eall_ptr[idx1_prev * step * total_cells + base_idx];
+        for (int c = 0; c < components; ++c) {
+            long long comp_offset = (fwi_mode == 3) ? (long long)c * component_stride : 0;
+            long long ring_offset = (long long)c * snap_stride;
+            float e0_c, e1_c, e0_p, e1_p;
+
+            if (use_async_offload) {
+                long long ring_stride = (long long)components * snap_stride;
+                e0_c = d_E_buf[(idx0_curr % 3) * ring_stride + ring_offset + base_idx];
+                e1_c = d_E_buf[(idx1_curr % 3) * ring_stride + ring_offset + base_idx];
+                e0_p = d_E_buf[(idx0_prev % 3) * ring_stride + ring_offset + base_idx];
+                e1_p = d_E_buf[(idx1_prev % 3) * ring_stride + ring_offset + base_idx];
+            } else {
+                e0_c = Eall_ptr[comp_offset + idx0_curr * snap_stride + base_idx];
+                e1_c = Eall_ptr[comp_offset + idx1_curr * snap_stride + base_idx];
+                e0_p = Eall_ptr[comp_offset + idx0_prev * snap_stride + base_idx];
+                e1_p = Eall_ptr[comp_offset + idx1_prev * snap_stride + base_idx];
+            }
+
+            float e_curr = e0_c * w0_curr + e1_c * w1_curr;
+            float e_prev = e0_p * w0_prev + e1_p * w1_prev;
+            float adjoint_val = adjoint_values[(fwi_mode == 3) ? c : 2];
+
+            if (errequiregrad == 1) local_grader += (e_curr - e_prev) * adjoint_val / dt;
+            if (serequiregrad == 1) local_gradse += e_curr * adjoint_val * dt;
         }
 
-        float e_curr = e0_c * w0_curr + e1_c * w1_curr;
-        float e_prev = e0_p * w0_prev + e1_p * w1_prev;
-
-        float ez_val = Ez[idx_Ez];
-
-        if (errequiregrad == 1) local_grader += (e_curr - e_prev) * ez_val / dt;
-        if (serequiregrad == 1) local_gradse += e_curr * ez_val * dt;
-
-        idx_Ez += ez_stride;
+        idx_E += e_stride;
     }
 
     if (errequiregrad == 1) atomicAdd(&grader[idx], local_grader);
@@ -716,6 +924,40 @@ __global__ void accumulate_gradients(
 }
 
 
+/*
+ * Run CUDA forward FDTD modeling.
+ *
+ * Parameters:
+ *   er, se, mr: Padded material property arrays.
+ *   Eall_ptr: Saved forward electric field history buffer.
+ *   Ex, Ey, Ez: Electric field component arrays.
+ *   Hx, Hy, Hz: Magnetic field component arrays.
+ *   uE0, uE1, uE4: Electric-field update coefficient arrays.
+ *   uH0, uH1, uH4: Magnetic-field update coefficient arrays.
+ *   x0EPhi1, x0EPhi2, x0HPhi1, x0HPhi2: Low-x PML auxiliary arrays.
+ *   xmEPhi1, xmEPhi2, xmHPhi1, xmHPhi2: High-x PML auxiliary arrays.
+ *   y0EPhi1, y0EPhi2, y0HPhi1, y0HPhi2: Low-y PML auxiliary arrays.
+ *   ymEPhi1, ymEPhi2, ymHPhi1, ymHPhi2: High-y PML auxiliary arrays.
+ *   z0EPhi1, z0EPhi2, z0HPhi1, z0HPhi2: Low-z PML auxiliary arrays.
+ *   zmEPhi1, zmEPhi2, zmHPhi1, zmHPhi2: High-z PML auxiliary arrays.
+ *   pml0, pml1, pml2, pml3, pml4, pml5: PML thickness for each boundary.
+ *   x0ER, xmER, y0ER, ymER, z0ER, zmER: Electric PML coefficient arrays.
+ *   x0HR, xmHR, y0HR, ymHR, z0HR, zmHR: Magnetic PML coefficient arrays.
+ *   dt: Time step size.
+ *   nt: Number of time steps.
+ *   step: Number of shots or simulations in the batch.
+ *   nrx: Number of receivers per shot.
+ *   dx: Spatial grid spacing.
+ *   receiverlocation: Receiver coordinates with shape (step, nrx, 3).
+ *   rxs: Output receiver sample array.
+ *   NX_FIELDS, NY_FIELDS, NZ_FIELDS: Padded field grid sizes.
+ *   nsrc: Number of sources per shot.
+ *   sourcelocation: Source coordinates with shape (step, nsrc, 3).
+ *   srcwaveforms: Source waveform array.
+ *   polarisation: Source component, 0 for x, 1 for y, 2 for z.
+ *   sampling_interval: Forward wavefield sampling interval.
+ *   fwi_mode: Gradient mode; 2 saves Ez only, 3 saves Ex, Ey, and Ez.
+ */
 DEEPGPR_API void forward(const float* __restrict__ er, const float* __restrict__ se, const float* __restrict__ mr,  
              float* __restrict__ Eall_ptr, 
              float* __restrict__ Ex,  float* __restrict__ Ey, float* __restrict__ Ez,  
@@ -741,7 +983,7 @@ DEEPGPR_API void forward(const float* __restrict__ er, const float* __restrict__
 
              int NX_FIELDS, int NY_FIELDS, int NZ_FIELDS, int nsrc, 
              const int* __restrict__ sourcelocation, const float* __restrict__ srcwaveforms, int polarisation,
-             int sampling_interval) 
+             int sampling_interval, int fwi_mode)
 {
     cudaPointerAttributes attr;
     cudaError_t err = cudaPointerGetAttributes(&attr, Eall_ptr);
@@ -753,9 +995,12 @@ DEEPGPR_API void forward(const float* __restrict__ er, const float* __restrict__
         use_async = 1; 
     }
     int fdtd_order = g_fdtd_order;
+    int e_components = (fwi_mode == 3) ? 3 : 1;
+    int nt_saved = (nt + sampling_interval - 1) / sampling_interval;
 
     float* d_E_buf = nullptr;
     long long snap_size = (long long)step * (NX_FIELDS - 1) * (NY_FIELDS - 1) * (NZ_FIELDS - 1);
+    long long component_stride = (long long)nt_saved * snap_size;
     
     cudaStream_t stream_comp = 0, stream_trans = 0;
     cudaEvent_t event_comp;
@@ -763,7 +1008,7 @@ DEEPGPR_API void forward(const float* __restrict__ er, const float* __restrict__
         CUDA_CHECK(cudaStreamCreate(&stream_comp));
         CUDA_CHECK(cudaStreamCreate(&stream_trans));
         CUDA_CHECK(cudaEventCreate(&event_comp));
-        CUDA_CHECK(cudaMalloc(&d_E_buf, 2 * snap_size * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&d_E_buf, 2 * e_components * snap_size * sizeof(float)));
     }
 
     long long blockSize = 256;
@@ -805,15 +1050,40 @@ DEEPGPR_API void forward(const float* __restrict__ er, const float* __restrict__
             int t_saved = i / sampling_interval;
             if (use_async) {
                 int buf_idx = t_saved % 2; 
+                long long buf_base = (long long)buf_idx * e_components * snap_size;
                 CUDA_CHECK(cudaStreamSynchronize(stream_trans));
-                copy_to_Eall_single<<<grid_copy, blockSize, 0, stream_comp>>>(d_E_buf, buf_idx, Ez, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
-                CUDA_CHECK_LAST();
+                if (fwi_mode == 3) {
+                    copy_to_Eall_single<<<grid_copy, blockSize, 0, stream_comp>>>(d_E_buf + buf_base, 0, Ex, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
+                    CUDA_CHECK_LAST();
+                    copy_to_Eall_single<<<grid_copy, blockSize, 0, stream_comp>>>(d_E_buf + buf_base + snap_size, 0, Ey, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
+                    CUDA_CHECK_LAST();
+                    copy_to_Eall_single<<<grid_copy, blockSize, 0, stream_comp>>>(d_E_buf + buf_base + 2 * snap_size, 0, Ez, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
+                    CUDA_CHECK_LAST();
+                } else {
+                    copy_to_Eall_single<<<grid_copy, blockSize, 0, stream_comp>>>(d_E_buf + buf_base, 0, Ez, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
+                    CUDA_CHECK_LAST();
+                }
                 CUDA_CHECK(cudaEventRecord(event_comp, stream_comp));
                 CUDA_CHECK(cudaStreamWaitEvent(stream_trans, event_comp, 0));
-                CUDA_CHECK(cudaMemcpyAsync(Eall_ptr + t_saved * snap_size, d_E_buf + buf_idx * snap_size, snap_size * sizeof(float), cudaMemcpyDeviceToHost, stream_trans));
+                if (fwi_mode == 3) {
+                    CUDA_CHECK(cudaMemcpyAsync(Eall_ptr + t_saved * snap_size, d_E_buf + buf_base, snap_size * sizeof(float), cudaMemcpyDeviceToHost, stream_trans));
+                    CUDA_CHECK(cudaMemcpyAsync(Eall_ptr + component_stride + t_saved * snap_size, d_E_buf + buf_base + snap_size, snap_size * sizeof(float), cudaMemcpyDeviceToHost, stream_trans));
+                    CUDA_CHECK(cudaMemcpyAsync(Eall_ptr + 2 * component_stride + t_saved * snap_size, d_E_buf + buf_base + 2 * snap_size, snap_size * sizeof(float), cudaMemcpyDeviceToHost, stream_trans));
+                } else {
+                    CUDA_CHECK(cudaMemcpyAsync(Eall_ptr + t_saved * snap_size, d_E_buf + buf_base, snap_size * sizeof(float), cudaMemcpyDeviceToHost, stream_trans));
+                }
             } else {
-                copy_to_Eall_single<<<grid_copy, blockSize, 0, stream_comp>>>(Eall_ptr, t_saved, Ez, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
-                CUDA_CHECK_LAST();
+                if (fwi_mode == 3) {
+                    copy_to_Eall_single<<<grid_copy, blockSize, 0, stream_comp>>>(Eall_ptr, t_saved, Ex, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
+                    CUDA_CHECK_LAST();
+                    copy_to_Eall_single<<<grid_copy, blockSize, 0, stream_comp>>>(Eall_ptr + component_stride, t_saved, Ey, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
+                    CUDA_CHECK_LAST();
+                    copy_to_Eall_single<<<grid_copy, blockSize, 0, stream_comp>>>(Eall_ptr + 2 * component_stride, t_saved, Ez, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
+                    CUDA_CHECK_LAST();
+                } else {
+                    copy_to_Eall_single<<<grid_copy, blockSize, 0, stream_comp>>>(Eall_ptr, t_saved, Ez, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
+                    CUDA_CHECK_LAST();
+                }
             }
         }
     }
@@ -828,6 +1098,42 @@ DEEPGPR_API void forward(const float* __restrict__ er, const float* __restrict__
     }
 }
 
+/*
+ * Run CUDA adjoint FDTD modeling and accumulate model gradients.
+ *
+ * Parameters:
+ *   er, se, mr: Padded material property arrays.
+ *   Eall_ptr: Saved forward electric field history buffer.
+ *   Ex, Ey, Ez: Adjoint electric field component arrays.
+ *   Hx, Hy, Hz: Adjoint magnetic field component arrays.
+ *   uE0, uE1, uE4: Electric-field update coefficient arrays.
+ *   uH0, uH1, uH4: Magnetic-field update coefficient arrays.
+ *   x0EPhi1, x0EPhi2, x0HPhi1, x0HPhi2: Low-x PML auxiliary arrays.
+ *   xmEPhi1, xmEPhi2, xmHPhi1, xmHPhi2: High-x PML auxiliary arrays.
+ *   y0EPhi1, y0EPhi2, y0HPhi1, y0HPhi2: Low-y PML auxiliary arrays.
+ *   ymEPhi1, ymEPhi2, ymHPhi1, ymHPhi2: High-y PML auxiliary arrays.
+ *   z0EPhi1, z0EPhi2, z0HPhi1, z0HPhi2: Low-z PML auxiliary arrays.
+ *   zmEPhi1, zmEPhi2, zmHPhi1, zmHPhi2: High-z PML auxiliary arrays.
+ *   pml0, pml1, pml2, pml3, pml4, pml5: PML thickness for each boundary.
+ *   x0ER, xmER, y0ER, ymER, z0ER, zmER: Electric PML coefficient arrays.
+ *   x0HR, xmHR, y0HR, ymHR, z0HR, zmHR: Magnetic PML coefficient arrays.
+ *   dt: Time step size.
+ *   nt: Number of time steps.
+ *   step: Number of shots or simulations in the batch.
+ *   nrx: Number of receivers per shot.
+ *   dx: Spatial grid spacing.
+ *   NX_FIELDS, NY_FIELDS, NZ_FIELDS: Padded field grid sizes.
+ *   nsrc: Number of adjoint sources per shot.
+ *   sourcelocation: Adjoint source coordinates with shape (step, nsrc, 3).
+ *   srcwaveforms: Adjoint source waveform array.
+ *   polarisation: Adjoint source component, 0 for x, 1 for y, 2 for z.
+ *   grad_er: Output relative permittivity gradient array.
+ *   grad_se: Output conductivity gradient array.
+ *   errequiregrad: Whether grad_er should be accumulated.
+ *   serequiregrad: Whether grad_se should be accumulated.
+ *   sampling_interval: Forward wavefield sampling interval.
+ *   fwi_mode: Gradient mode; 2 uses Ez only, 3 uses Ex, Ey, and Ez.
+ */
 DEEPGPR_API void backward(const float* __restrict__ er, const float* __restrict__ se, const float* __restrict__ mr,  
              const float* __restrict__ Eall_ptr,
              float* __restrict__ Ex,  float* __restrict__ Ey, float* __restrict__ Ez,  
@@ -853,7 +1159,7 @@ DEEPGPR_API void backward(const float* __restrict__ er, const float* __restrict_
              int nsrc, const int* __restrict__ sourcelocation, const float* __restrict__ srcwaveforms,
              int polarisation, 
              float*__restrict__ grad_er,float*__restrict__ grad_se, int errequiregrad, int serequiregrad,
-             int sampling_interval) 
+             int sampling_interval, int fwi_mode)
 {
     cudaPointerAttributes attr;
     cudaError_t err = cudaPointerGetAttributes(&attr, Eall_ptr);
@@ -865,6 +1171,7 @@ DEEPGPR_API void backward(const float* __restrict__ er, const float* __restrict_
         use_async = 1;
     }
     int fdtd_order = g_fdtd_order;
+    int e_components = (fwi_mode == 3) ? 3 : 1;
 
     float* d_E_buf = nullptr;
     long long snap_size = (long long)step * (NX_FIELDS - 1) * (NY_FIELDS - 1) * (NZ_FIELDS - 1);
@@ -875,7 +1182,7 @@ DEEPGPR_API void backward(const float* __restrict__ er, const float* __restrict_
         CUDA_CHECK(cudaStreamCreate(&stream_comp));
         CUDA_CHECK(cudaStreamCreate(&stream_trans));
         CUDA_CHECK(cudaEventCreate(&event_trans));
-        CUDA_CHECK(cudaMalloc(&d_E_buf, 3 * snap_size * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&d_E_buf, 3 * e_components * snap_size * sizeof(float)));
     }
 
     long long blockSize = 256;
@@ -893,6 +1200,7 @@ DEEPGPR_API void backward(const float* __restrict__ er, const float* __restrict_
     dim3 grid_grad(CEIL_DIV(total_grad, blockSize));
   
     int nt_saved = (nt + sampling_interval - 1) / sampling_interval;
+    long long component_stride = (long long)nt_saved * snap_size;
 
     int max_t_needed = (nt - 1) / sampling_interval;
     max_t_needed = min(max_t_needed + 1, nt_saved - 1);
@@ -902,7 +1210,11 @@ DEEPGPR_API void backward(const float* __restrict__ er, const float* __restrict_
         for(int k = 0; k < 3; k++) {
             int t_load = max_t_needed - k;
             if(t_load >= 0) {
-                CUDA_CHECK(cudaMemcpyAsync(d_E_buf + (t_load % 3) * snap_size, Eall_ptr + t_load * snap_size, snap_size * sizeof(float), cudaMemcpyHostToDevice, stream_trans));
+                long long ring_base = (long long)(t_load % 3) * e_components * snap_size;
+                for (int c = 0; c < e_components; ++c) {
+                    long long comp_offset = (fwi_mode == 3) ? (long long)c * component_stride : 0;
+                    CUDA_CHECK(cudaMemcpyAsync(d_E_buf + ring_base + (long long)c * snap_size, Eall_ptr + comp_offset + (long long)t_load * snap_size, snap_size * sizeof(float), cudaMemcpyHostToDevice, stream_trans));
+                }
             }
         }
         CUDA_CHECK(cudaStreamSynchronize(stream_trans));
@@ -913,7 +1225,11 @@ DEEPGPR_API void backward(const float* __restrict__ er, const float* __restrict_
             int needed_t_min = (i - 1) / sampling_interval;
             if (needed_t_min < lowest_t_loaded && needed_t_min >= 0) {
                 CUDA_CHECK(cudaStreamSynchronize(stream_trans));
-                CUDA_CHECK(cudaMemcpyAsync(d_E_buf + (needed_t_min % 3) * snap_size, Eall_ptr + needed_t_min * snap_size, snap_size * sizeof(float), cudaMemcpyHostToDevice, stream_trans));
+                long long ring_base = (long long)(needed_t_min % 3) * e_components * snap_size;
+                for (int c = 0; c < e_components; ++c) {
+                    long long comp_offset = (fwi_mode == 3) ? (long long)c * component_stride : 0;
+                    CUDA_CHECK(cudaMemcpyAsync(d_E_buf + ring_base + (long long)c * snap_size, Eall_ptr + comp_offset + (long long)needed_t_min * snap_size, snap_size * sizeof(float), cudaMemcpyHostToDevice, stream_trans));
+                }
                 lowest_t_loaded = needed_t_min;
             }
             CUDA_CHECK(cudaEventRecord(event_trans, stream_trans));
@@ -937,7 +1253,7 @@ DEEPGPR_API void backward(const float* __restrict__ er, const float* __restrict_
             fdtd_order);
         CUDA_CHECK_LAST();
 
-        accumulate_gradients<<<grid_grad, blockSize, 0, stream_comp>>>(Ez, Eall_ptr, d_E_buf, grad_er, grad_se, i, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, dt, errequiregrad, serequiregrad, sampling_interval, nt_saved, use_async);
+        accumulate_gradients<<<grid_grad, blockSize, 0, stream_comp>>>(Ex, Ey, Ez, Eall_ptr, d_E_buf, grad_er, grad_se, i, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, dt, errequiregrad, serequiregrad, sampling_interval, nt_saved, use_async, fwi_mode);
         CUDA_CHECK_LAST();
     }
 

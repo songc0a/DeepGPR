@@ -5,6 +5,11 @@ from .common import initialization,build_pml_phi,create_or_separate,buildpmlcoef
 
 
 def _sync_cuda_device(device):
+    """Synchronize a CUDA device when the selected backend is CUDA.
+
+    Args:
+        device: PyTorch device object to synchronize.
+    """
     if device.type != "cuda":
         return
 
@@ -17,6 +22,13 @@ def _sync_cuda_device(device):
 
 
 def _check_nonzero_source_created_fields(c_lib, source_amplitudes, *fields):
+    """Check that a nonzero source creates at least one nonzero field.
+
+    Args:
+        c_lib: Loaded native DeepGPR library.
+        source_amplitudes: Source waveform tensor.
+        *fields: Field tensors returned by the native backend.
+    """
     if source_amplitudes.abs().max().item() == 0.0:
         return
 
@@ -44,12 +56,38 @@ def compute(device, dx=None, dt=None,
             pmlthick=10, source_direction=2, reciever_direction=2,
             model_gradient_sampling_interval=1,
             use_async_offload=False,
-            fdtd_order=2):
+            fdtd_order=2,
+            mode=2):
+    """Run DeepGPR FDTD forward modeling with autograd support.
+
+    Args:
+        device: PyTorch device or device string, such as "cpu" or "cuda".
+        dx: Spatial grid spacing.
+        dt: Time step size.
+        source_amplitudes: Source waveform tensor with shape (nwaveforms, nt, 1).
+        source_location: Source coordinates with shape (nstep, nsr, 3).
+        receiver_location: Receiver coordinates with shape (nstep, nrx, 3).
+        er: Relative permittivity tensor with shape (nx, ny) or (nx, ny, nz).
+        se: Electrical conductivity tensor with the same shape as er.
+        mr: Relative permeability tensor, or None to use ones.
+        E: Optional initial electric field tuple (Ex, Ey, Ez).
+        H: Optional initial magnetic field tuple (Hx, Hy, Hz).
+        PML: Optional tuple of 24 PML auxiliary tensors.
+        pmlthick: PML thickness as an int, list, or tensor.
+        source_direction: Source electric-field polarization, 0 for x, 1 for y, 2 for z.
+        reciever_direction: Receiver component to return, 0 for x, 1 for y, 2 for z.
+        model_gradient_sampling_interval: Forward wavefield sampling interval for FWI gradients.
+        use_async_offload: Whether CUDA should offload saved wavefields to pinned CPU memory.
+        fdtd_order: Spatial finite-difference order, supported values are 2, 4, and 8.
+        mode: FWI gradient mode; 2 uses Ez only, 3 uses Ex, Ey, and Ez.
+    """
     device = torch.device(device)
     if fdtd_order not in (2, 4, 8):
         raise ValueError("fdtd_order must be one of 2, 4, or 8.")
+    if mode not in (2, 3):
+        raise ValueError("mode must be 2 or 3.")
 
-    er,se,nx,ny,nz,nt,nstep,nsr,nrx,ere,see,mr,mode,dtype,pmlthick,source_amplitudes=initialization(device,er,se,mr,source_amplitudes,source_location,receiver_location,dx,dt,pmlthick)
+    er,se,nx,ny,nz,nt,nstep,nsr,nrx,ere,see,mr,spatial_mode,dtype,pmlthick,source_amplitudes=initialization(device,er,se,mr,source_amplitudes,source_location,receiver_location,dx,dt,pmlthick)
 
     Ex,Ey,Ez=create_or_separate(E,nx,ny,nz,nstep,device,dtype)
     Hx,Hy,Hz=create_or_separate(H,nx,ny,nz,nstep,device,dtype)
@@ -59,12 +97,14 @@ def compute(device, dx=None, dt=None,
     x0EPhi1,x0EPhi2,x0HPhi1,x0HPhi2,xmEPhi1,xmEPhi2,xmHPhi1,xmHPhi2,y0EPhi1,y0EPhi2,y0HPhi1,y0HPhi2,ymEPhi1,ymEPhi2,ymHPhi1,ymHPhi2,z0EPhi1,z0EPhi2,z0HPhi1,z0HPhi2,zmEPhi1,zmEPhi2,zmHPhi1,zmHPhi2=build_pml_phi(x0,xm,y0,ym,z0,zm,nstep,PML,device)
 
     Ex,Ey,Ez,Hx,Hy,Hz,x0EPhi1,x0EPhi2,x0HPhi1,x0HPhi2,xmEPhi1,xmEPhi2,xmHPhi1,xmHPhi2,y0EPhi1,y0EPhi2,y0HPhi1,y0HPhi2,ymEPhi1,ymEPhi2,ymHPhi1,ymHPhi2,z0EPhi1,z0EPhi2,z0HPhi1,z0HPhi2,zmEPhi1,zmEPhi2,zmHPhi1,zmHPhi2,Eall,receiver_amplitudes = DeepGPR.apply(
-        er, se,Ex,Ey,Ez,Hx,Hy,Hz,x0EPhi1,x0EPhi2,x0HPhi1,x0HPhi2,xmEPhi1,xmEPhi2,xmHPhi1,xmHPhi2,y0EPhi1,y0EPhi2,y0HPhi1,y0HPhi2,ymEPhi1,ymEPhi2,ymHPhi1,ymHPhi2,z0EPhi1,z0EPhi2,z0HPhi1,z0HPhi2,zmEPhi1,zmEPhi2,zmHPhi1,zmHPhi2, mr,dx,nx,ny,nz,dt,nt,nstep,source_amplitudes,source_location,receiver_location,pmlthick,nsr,nrx,device,dtype,x0,xm,y0,ym,z0,zm,x01,x02,xm1,xm2,y01,y02,ym1,ym2,z01,z02,zm1,zm2,ere,see,source_direction, reciever_direction, model_gradient_sampling_interval, use_async_offload, fdtd_order)
+        er, se,Ex,Ey,Ez,Hx,Hy,Hz,x0EPhi1,x0EPhi2,x0HPhi1,x0HPhi2,xmEPhi1,xmEPhi2,xmHPhi1,xmHPhi2,y0EPhi1,y0EPhi2,y0HPhi1,y0HPhi2,ymEPhi1,ymEPhi2,ymHPhi1,ymHPhi2,z0EPhi1,z0EPhi2,z0HPhi1,z0HPhi2,zmEPhi1,zmEPhi2,zmHPhi1,zmHPhi2, mr,dx,nx,ny,nz,dt,nt,nstep,source_amplitudes,source_location,receiver_location,pmlthick,nsr,nrx,device,dtype,x0,xm,y0,ym,z0,zm,x01,x02,xm1,xm2,y01,y02,ym1,ym2,z01,z02,zm1,zm2,ere,see,source_direction, reciever_direction, model_gradient_sampling_interval, use_async_offload, fdtd_order, mode)
 
     return Eall,(Ex,Ey,Ez),(Hx,Hy,Hz),(x0EPhi1,x0EPhi2,x0HPhi1,x0HPhi2,xmEPhi1,xmEPhi2,xmHPhi1,xmHPhi2,y0EPhi1,y0EPhi2,y0HPhi1,y0HPhi2,ymEPhi1,ymEPhi2,ymHPhi1,ymHPhi2,z0EPhi1,z0EPhi2,z0HPhi1,z0HPhi2,zmEPhi1,zmEPhi2,zmHPhi1,zmHPhi2),receiver_amplitudes
 
 
 class DeepGPR(torch.autograd.Function):
+    """PyTorch autograd bridge for the native DeepGPR backends."""
+
     @staticmethod
     def forward(ctx, er, se,Ex,Ey,Ez,Hx,Hy,Hz,x0EPhi1,x0EPhi2,x0HPhi1,x0HPhi2,xmEPhi1,xmEPhi2,xmHPhi1,xmHPhi2,y0EPhi1,y0EPhi2,y0HPhi1,y0HPhi2,ymEPhi1,ymEPhi2,ymHPhi1,ymHPhi2,z0EPhi1,z0EPhi2,z0HPhi1,z0HPhi2,zmEPhi1,zmEPhi2,zmHPhi1,zmHPhi2, mr,dx,nx,ny,nz,dt,
                 nt,nstep,source_amplitudes,source_location,receiver_location,
@@ -72,7 +112,50 @@ class DeepGPR(torch.autograd.Function):
                 y0,ym,z0,zm,x01,x02,xm1,xm2,
                 y01,y02,ym1,ym2,z01,z02,zm1,zm2,
                 ere,see,source_direction, reciever_direction, 
-                model_gradient_sampling_interval, use_async_offload, fdtd_order):
+                model_gradient_sampling_interval, use_async_offload, fdtd_order, mode):
+        """Call the native forward solver and save tensors for backward.
+
+        Args:
+            ctx: PyTorch autograd context.
+            er: Trainable relative permittivity tensor.
+            se: Trainable electrical conductivity tensor.
+            Ex, Ey, Ez: Electric field component tensors.
+            Hx, Hy, Hz: Magnetic field component tensors.
+            x0EPhi1, x0EPhi2, x0HPhi1, x0HPhi2: Low-x PML auxiliary tensors.
+            xmEPhi1, xmEPhi2, xmHPhi1, xmHPhi2: High-x PML auxiliary tensors.
+            y0EPhi1, y0EPhi2, y0HPhi1, y0HPhi2: Low-y PML auxiliary tensors.
+            ymEPhi1, ymEPhi2, ymHPhi1, ymHPhi2: High-y PML auxiliary tensors.
+            z0EPhi1, z0EPhi2, z0HPhi1, z0HPhi2: Low-z PML auxiliary tensors.
+            zmEPhi1, zmEPhi2, zmHPhi1, zmHPhi2: High-z PML auxiliary tensors.
+            mr: Padded relative permeability tensor.
+            dx: Spatial grid spacing.
+            nx: Number of model cells along the x axis.
+            ny: Number of model cells along the y axis.
+            nz: Number of model cells along the z axis.
+            dt: Time step size.
+            nt: Number of time steps.
+            nstep: Number of shots or simulations in the batch.
+            source_amplitudes: Source waveform tensor.
+            source_location: Source coordinates with shape (nstep, nsr, 3).
+            receiver_location: Receiver coordinates with shape (nstep, nrx, 3).
+            pmlthick: Six-boundary PML thickness tensor.
+            nsr: Number of sources per shot.
+            nrx: Number of receivers per shot.
+            device: PyTorch device used by the solver.
+            dtype: PyTorch dtype used by allocated tensors.
+            x0, xm, y0, ym, z0, zm: PML boundary descriptor tensors.
+            x01, x02, xm1, xm2: X-boundary PML coefficient tensors.
+            y01, y02, ym1, ym2: Y-boundary PML coefficient tensors.
+            z01, z02, zm1, zm2: Z-boundary PML coefficient tensors.
+            ere: Padded relative permittivity tensor.
+            see: Padded electrical conductivity tensor.
+            source_direction: Source electric-field polarization, 0 for x, 1 for y, 2 for z.
+            reciever_direction: Receiver component to return, 0 for x, 1 for y, 2 for z.
+            model_gradient_sampling_interval: Forward wavefield sampling interval.
+            use_async_offload: Whether CUDA should offload saved wavefields to pinned CPU memory.
+            fdtd_order: Spatial finite-difference order.
+            mode: FWI gradient mode; 2 uses Ez only, 3 uses Ex, Ey, and Ez.
+        """
         
         source_amplitudes = source_amplitudes.contiguous()
         source_location=source_location.to(torch.int32).contiguous()
@@ -95,13 +178,20 @@ class DeepGPR(torch.autograd.Function):
         ctx.model_gradient_sampling_interval = model_gradient_sampling_interval
         ctx.use_async_offload = bool(use_async_offload and device.type == "cuda")
         ctx.fdtd_order = fdtd_order
+        ctx.mode = mode
 
         nt_saved = (nt + model_gradient_sampling_interval - 1) // model_gradient_sampling_interval
+        e_components = 3 if mode == 3 else 1
         
-        if ctx.use_async_offload:
-            Eall = torch.zeros((nt_saved, nstep, nx, ny, nz), device='cpu', dtype=dtype).pin_memory()
+        if mode == 3:
+            eall_shape = (e_components, nt_saved, nstep, nx, ny, nz)
         else:
-            Eall = torch.zeros((nt_saved, nstep, nx, ny, nz), device=device, dtype=dtype).contiguous()
+            eall_shape = (nt_saved, nstep, nx, ny, nz)
+
+        if ctx.use_async_offload:
+            Eall = torch.zeros(eall_shape, device='cpu', dtype=dtype).pin_memory()
+        else:
+            Eall = torch.zeros(eall_shape, device=device, dtype=dtype).contiguous()
 
         Eupdatecoffs0=torch.zeros((nx+1,ny+1,nz+1), device=device, dtype=dtype)
         Eupdatecoffs1=torch.zeros((nx+1,ny+1,nz+1), device=device, dtype=dtype)
@@ -158,7 +248,8 @@ class DeepGPR(torch.autograd.Function):
                 nx+1, ny+1, nz+1, nsr,
                 ctypes.cast(source_location.data_ptr(), ctypes.POINTER(ctypes.c_int)), ctypes.cast(source_amplitudes.data_ptr(), ctypes.POINTER(ctypes.c_float)),
                 source_direction,
-                model_gradient_sampling_interval)
+                model_gradient_sampling_interval,
+                mode)
         _sync_cuda_device(device)
 
         check_tensors_for_nan_inf(d="forward",
@@ -184,6 +275,21 @@ class DeepGPR(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx,gEx,gEy,gEz,gHx,gHy,gHz,gx0EPhi1,gx0EPhi2,gx0HPhi1,gx0HPhi2,gxmEPhi1,gxmEPhi2,gxmHPhi1,gxmHPhi2,gy0EPhi1,gy0EPhi2,gy0HPhi1,gy0HPhi2,gymEPhi1,gymEPhi2,gymHPhi1,gymHPhi2,gz0EPhi1,gz0EPhi2,gz0HPhi1,gz0HPhi2,gzmEPhi1,gzmEPhi2,gzmHPhi1,gzmHPhi2,gEall,gezreciver):
+        """Call the native adjoint solver and return gradients.
+
+        Args:
+            ctx: PyTorch autograd context saved by forward.
+            gEx, gEy, gEz: Incoming gradients for electric field components.
+            gHx, gHy, gHz: Incoming gradients for magnetic field components.
+            gx0EPhi1, gx0EPhi2, gx0HPhi1, gx0HPhi2: Gradients for low-x PML tensors.
+            gxmEPhi1, gxmEPhi2, gxmHPhi1, gxmHPhi2: Gradients for high-x PML tensors.
+            gy0EPhi1, gy0EPhi2, gy0HPhi1, gy0HPhi2: Gradients for low-y PML tensors.
+            gymEPhi1, gymEPhi2, gymHPhi1, gymHPhi2: Gradients for high-y PML tensors.
+            gz0EPhi1, gz0EPhi2, gz0HPhi1, gz0HPhi2: Gradients for low-z PML tensors.
+            gzmEPhi1, gzmEPhi2, gzmHPhi1, gzmHPhi2: Gradients for high-z PML tensors.
+            gEall: Incoming gradient for the saved forward electric field history.
+            gezreciver: Incoming gradient for receiver amplitudes.
+        """
         
         sourceamp=gezreciver
         er, se, mr,receiver_location,x0,xm,y0,ym,z0,zm,x01,x02,xm1,xm2,y01,y02,ym1,ym2,z01,z02,zm1,zm2,ere,see=ctx.saved_tensors
@@ -331,7 +437,8 @@ class DeepGPR(torch.autograd.Function):
                 ctypes.cast(receiver_location.data_ptr(), ctypes.POINTER(ctypes.c_int)), ctypes.cast(sourceamp.data_ptr(), ctypes.POINTER(ctypes.c_float)),
                 2,
                 ctypes.cast(grad_er.data_ptr(), ctypes.POINTER(ctypes.c_float)), ctypes.cast(grad_se.data_ptr(), ctypes.POINTER(ctypes.c_float)),errequiregrad,serequiregrad,
-                model_gradient_sampling_interval)  
+                model_gradient_sampling_interval,
+                ctx.mode)
         _sync_cuda_device(device)
         
         tensors_to_check = dict(
@@ -374,5 +481,5 @@ class DeepGPR(torch.autograd.Function):
                     None, None, None, None, None, None, None, None,
                     None, None, None, None, None, None, None, None, 
                     None, None, None, None, None, None, None, None, 
-                    None, None
+                    None, None, None
                 )

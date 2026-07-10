@@ -15,6 +15,8 @@ The compute backend can run on CUDA GPUs or on CPU. The CPU backend is implement
 
 The FDTD spatial finite-difference order can be selected with `fdtd_order=2`, `4`, or `8` (default: `2`).
 
+The FWI gradient mode can be selected with `mode=2` or `mode=3`. `mode=2` keeps the previous Ez-only gradient behavior, while `mode=3` uses Ex, Ey, and Ez forward/adjoint electric-field contributions for relative permittivity and conductivity gradients.
+
 Supports techniques such as checkpointing, DDP, and the utilization of CPU memory to minimize GPU memory consumption, thereby enabling the execution of large-scale models.
 
 
@@ -124,7 +126,8 @@ def compute(device, dx=None, dt=None,
             pmlthick=10, source_direction=2, reciever_direction=2,
             model_gradient_sampling_interval=1,
             use_async_offload=False,
-            fdtd_order=2):
+            fdtd_order=2,
+            mode=2):
 ```
 ## 📥 Input Parameters
 ### 1. Basic Physics & Grid Parameters
@@ -135,6 +138,7 @@ def compute(device, dx=None, dt=None,
 | **`dx`** | `float` | Spatial grid step size (assuming an isotropic grid, i.e., $dx = dy = dz$). Typically in meters (m). |
 | **`dt`** | `float` | Time step size. **Note**: Must strictly satisfy the CFL (Courant-Friedrichs-Lewy) stability condition, or an exception will be raised. Typically in seconds (s). |
 | **`fdtd_order`** | `int` | Spatial finite-difference order used by the FDTD field updates. Supported values are `2`, `4`, and `8`; default is `2` for compatibility with earlier versions. |
+| **`mode`** | `int` | FWI gradient mode. `2` keeps the previous Ez-only model-gradient calculation. `3` uses Ex, Ey, and Ez electric-field contributions for relative permittivity and conductivity gradients. |
 ### 2. Medium Model Parameters
 
 This section defines the electromagnetic properties of the simulation space. For 2D simulations, set `nz=1`.
@@ -153,7 +157,7 @@ This section defines the geometric observation system (coordinates) and the exci
 
 | Parameter | Data Type | Shape | Description |
 | :--- | :--- | :--- | :--- |
-| **`source_amplitudes`** | `Tensor` (float) | `(num_waveforms, nt)` | Source excitation waveforms. `nt` is the total number of time steps.<br>- If `num_waveforms == 1`: All sources share this single waveform.<br>- If `num_waveforms == nsr`: Each source uses its corresponding waveform. |
+| **`source_amplitudes`** | `Tensor` (float) | `(num_waveforms, nt, 1)` | Source excitation waveforms. `nt` is the total number of time steps.<br>- If `num_waveforms == 1`: All sources share this single waveform.<br>- If `num_waveforms == nsr`: Each source uses its corresponding waveform. |
 | **`source_location`** | `Tensor` (int) | `(nstep, nsr, 3)` | Grid coordinate indices of the sources.<br>The last dimension corresponds to `[x_idx, y_idx, z_idx]`. |
 | **`receiver_location`** | `Tensor` (int) | `(nstep, nrx, 3)` | Grid coordinate indices of the receivers.<br>The last dimension corresponds to `[x_idx, y_idx, z_idx]`. |
 | **`source_direction`** | `int` | Scalar | Polarization direction/component of the source excitation.<br>`0` = X, `1` = Y, `2` = Z (e.g., exciting $E_z$). |
@@ -172,6 +176,13 @@ This section defines the geometric observation system (coordinates) and the exci
 | **`pmlthick`** | `int` / `list` / `Tensor`| Scalar or list of 6 | Thickness (in grid layers) of the PML (Perfectly Matched Layer) absorbing boundaries.<br>- Integer `p`: All six boundaries have thickness `p` (Z-boundaries are ignored in 2D).<br>- List `[x0, xm, y0, ym, z0, zm]`: Specific thicknesses for the 6 boundaries. |
 | **`model_gradient_sampling_interval`**| `int` | Scalar | Wavefield sampling interval during forward propagation (Default: 1).<br>A larger integer reduces the VRAM usage for the saved `Eall` tensor, but may decrease the accuracy of backpropagated gradients. |
 | **`use_async_offload`** | `bool` | Scalar | CUDA-only VRAM optimization flag (Default: `False`).<br>If `True`, the internal full wavefield tensor (`Eall`) is asynchronously offloaded to page-locked host memory (`pin_memory` CPU RAM). This drastically reduces GPU VRAM consumption at the cost of slightly slower computation times due to PCIe data transfer latency. On CPU this option is ignored. |
+
+### 4.1 FWI Gradient Mode
+
+`mode` only changes how the model gradients are accumulated during backpropagation:
+
+- `mode=2` (default): Saves Ez in `Eall` and computes relative permittivity/conductivity gradients from Ez only. This keeps the old behavior.
+- `mode=3`: Saves Ex, Ey, and Ez in `Eall` and computes relative permittivity/conductivity gradients from all three electric-field components. This is intended for complete 3D Maxwell FWI. The adjoint source polarization is not changed by this option.
 
 ## CPU Backend Build
 
@@ -213,8 +224,10 @@ The function returns a tuple of 5 elements. These are used to extract synthetic 
 return Eall, (Ex, Ey, Ez), (Hx, Hy, Hz), (x0EPhi1...zmHPhi2), receiver_amplitudes
 ```
 
-1.  **`Eall`**: The global electric field history saved for gradient calculation.
-    *   **Shape**: `(nt_saved, nstep, nx, ny, nz)` (where `nt_saved` depends on `nt` and `model_gradient_sampling_interval`).
+1.  **`Eall`**: The electric field history saved for gradient calculation.
+    *   **Shape when `mode=2`**: `(nt_saved, nstep, nx, ny, nz)`, storing Ez only.
+    *   **Shape when `mode=3`**: `(3, nt_saved, nstep, nx, ny, nz)`, storing components in `[Ex, Ey, Ez]` order.
+    *   `nt_saved` depends on `nt` and `model_gradient_sampling_interval`.
 2.  **`(Ex, Ey, Ez)`**: The 3D electric field state at the final time step. 
 3.  **`(Hx, Hy, Hz)`**: The 3D magnetic field state at the final time step.
 4.  **`(PML_Tuple)`**: A tuple of 24 Tensors recording the final time step state of the PML auxiliary $\Phi$ variables.

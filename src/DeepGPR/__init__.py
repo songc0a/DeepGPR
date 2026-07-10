@@ -16,6 +16,11 @@ _LOADED_LIBS: dict[str, ctypes.CDLL] = {}
 
 
 def _candidate_library_paths(kind: str) -> list[Path]:
+    """Return platform-specific native library candidates.
+
+    Args:
+        kind: Backend kind, either "cuda" or "cpu".
+    """
     if kind == "cuda":
         if _SYSTEM_NAME == "Windows":
             return [_LIB_DIR / "deepgpr.dll"]
@@ -36,12 +41,22 @@ def _candidate_library_paths(kind: str) -> list[Path]:
 
 
 def _available_library_files() -> list[str]:
+    """Return native library filenames currently present in the package.
+
+    Args:
+        None.
+    """
     if not _LIB_DIR.is_dir():
         return []
     return sorted(p.name for p in _LIB_DIR.iterdir())
 
 
 def _add_windows_dll_search_paths() -> None:
+    """Add Windows DLL search paths for CUDA, conda, and package libraries.
+
+    Args:
+        None.
+    """
     if _SYSTEM_NAME != "Windows" or not hasattr(os, "add_dll_directory"):
         return
 
@@ -74,6 +89,13 @@ def _add_windows_dll_search_paths() -> None:
 
 
 def _require_exported_symbols(lib: ctypes.CDLL, symbols: tuple[str, ...], path: Path) -> None:
+    """Validate that a loaded native library exports required symbols.
+
+    Args:
+        lib: Loaded ctypes library object.
+        symbols: Symbol names that must be exported.
+        path: Filesystem path of the loaded library.
+    """
     missing = [name for name in symbols if not hasattr(lib, name)]
     if missing:
         raise RuntimeError(
@@ -83,6 +105,11 @@ def _require_exported_symbols(lib: ctypes.CDLL, symbols: tuple[str, ...], path: 
 
 
 def _configure_deepgpr_library(lib: ctypes.CDLL) -> None:
+    """Configure ctypes signatures for the native DeepGPR library.
+
+    Args:
+        lib: Loaded ctypes library object to configure.
+    """
     if getattr(lib, "_deepgpr_argtypes_configured", False):
         return
 
@@ -111,7 +138,7 @@ def _configure_deepgpr_library(lib: ctypes.CDLL) -> None:
         _INT_P, _FLOAT_P,
         ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
         _INT_P, _FLOAT_P,
-        ctypes.c_int, ctypes.c_int,
+        ctypes.c_int, ctypes.c_int, ctypes.c_int,
     ]
     lib.forward.restype = None
 
@@ -141,7 +168,7 @@ def _configure_deepgpr_library(lib: ctypes.CDLL) -> None:
         _INT_P, _FLOAT_P,
         ctypes.c_int,
         _FLOAT_P, _FLOAT_P,
-        ctypes.c_int, ctypes.c_int, ctypes.c_int,
+        ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
     ]
     lib.backward.restype = None
 
@@ -153,6 +180,11 @@ def _configure_deepgpr_library(lib: ctypes.CDLL) -> None:
 
 
 def _load_deepgpr_library(kind: str) -> ctypes.CDLL:
+    """Load and configure a native DeepGPR backend library.
+
+    Args:
+        kind: Backend kind, either "cuda" or "cpu".
+    """
     if kind in _LOADED_LIBS:
         return _LOADED_LIBS[kind]
 
@@ -187,6 +219,11 @@ def _load_deepgpr_library(kind: str) -> ctypes.CDLL:
 
 
 def _device_type(device) -> str:
+    """Convert a PyTorch device or device string to a backend name.
+
+    Args:
+        device: PyTorch device object or device string.
+    """
     device_type = getattr(device, "type", None)
     if device_type is not None:
         return str(device_type).lower()
@@ -194,6 +231,11 @@ def _device_type(device) -> str:
 
 
 def get_deepgpr_lib(device) -> ctypes.CDLL:
+    """Return the native library for the requested device.
+
+    Args:
+        device: PyTorch device object or device string.
+    """
     device_type = _device_type(device)
     if device_type == "cpu":
         return _load_deepgpr_library("cpu")
@@ -203,10 +245,21 @@ def get_deepgpr_lib(device) -> ctypes.CDLL:
 
 
 def get_deepgpr_library_path(device) -> str:
+    """Return the loaded native library path for a device.
+
+    Args:
+        device: PyTorch device object or device string.
+    """
     return str(getattr(get_deepgpr_lib(device), "_deepgpr_path", ""))
 
 
 def set_library_fdtd_order(lib: ctypes.CDLL, fdtd_order: int) -> None:
+    """Set the FDTD spatial order on a native library.
+
+    Args:
+        lib: Loaded ctypes library object.
+        fdtd_order: Spatial finite-difference order, supported values are 2, 4, and 8.
+    """
     if fdtd_order not in (2, 4, 8):
         raise ValueError("fdtd_order must be one of 2, 4, or 8.")
 

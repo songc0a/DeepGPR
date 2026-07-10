@@ -2,6 +2,13 @@
 import torch
 
 def design_fir_filter(cutoff: float, fs: float, numtaps: int) -> torch.Tensor:
+    """Create a low-pass FIR filter with a Hamming window.
+
+    Args:
+        cutoff: Cutoff frequency of the filter.
+        fs: Sampling frequency of the input signal.
+        numtaps: Number of FIR coefficients.
+    """
     n = torch.arange(numtaps, dtype=torch.float32)
     window = 0.54 - 0.46 * torch.cos(2 * torch.pi * n / (numtaps - 1))
     sinc = torch.sin(2 * torch.pi * (cutoff/fs) * (n - (numtaps-1)/2)) / (torch.pi * (n - (numtaps-1)/2))
@@ -12,6 +19,13 @@ def design_fir_filter(cutoff: float, fs: float, numtaps: int) -> torch.Tensor:
     return h / h.sum()
 
 def apply_filter(data: torch.Tensor, fs: float, cutoff: float) -> torch.Tensor:
+    """Apply a low-pass FIR filter to 1D or receiver data.
+
+    Args:
+        data: Input tensor, either 1D or shape (nstep, nt, nrx).
+        fs: Sampling frequency of the input signal.
+        cutoff: Cutoff frequency of the low-pass filter.
+    """
     numtaps = int(1 * (fs / cutoff))
     fir_coeff = design_fir_filter(cutoff, fs, numtaps)
     fir_coeff = fir_coeff.to(data.device)
@@ -41,6 +55,12 @@ def apply_filter(data: torch.Tensor, fs: float, cutoff: float) -> torch.Tensor:
         raise ValueError(f"Data dimension: {data.ndim}。expected 1D or 3D tensor。")
     
 def hilbert_transform(data_in, p=1):
+  """Compute a Hilbert-envelope style transform along the time axis.
+
+  Args:
+      data_in: Input tensor with shape (ns, nt, nr).
+      p: Power applied to the output envelope.
+  """
   ns, nt, nr = data_in.shape
   transforms = torch.fft.fftn(data_in,dim=1)
   #print(transforms.shape)
