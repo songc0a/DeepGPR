@@ -5,9 +5,15 @@ from .common import initialization,build_pml_phi,create_or_separate,buildpmlcoef
 
 
 def _sync_cuda_device(device):
-    if device.type == "cuda":
-        torch.cuda.set_device(device)
-        torch.cuda.synchronize(device)
+    if device.type != "cuda":
+        return
+
+    if device.index is None:
+        torch.cuda.synchronize()
+        return
+
+    torch.cuda.set_device(device.index)
+    torch.cuda.synchronize(device.index)
 
 def compute(device, dx=None, dt=None, 
             source_amplitudes=None,

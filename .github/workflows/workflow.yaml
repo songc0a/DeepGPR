@@ -413,7 +413,7 @@ jobs:
           retention-days: 30
 
   commit-built-libraries:
-    if: github.event_name == 'workflow_dispatch' && github.ref_type == 'branch'
+    if: github.event_name != 'pull_request' && github.ref_type == 'branch'
     needs:
       - build
       - build-cpu-macos
