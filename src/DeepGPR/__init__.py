@@ -202,6 +202,10 @@ def get_deepgpr_lib(device) -> ctypes.CDLL:
     raise ValueError(f"Unsupported DeepGPR device: {device}")
 
 
+def get_deepgpr_library_path(device) -> str:
+    return str(getattr(get_deepgpr_lib(device), "_deepgpr_path", ""))
+
+
 def set_library_fdtd_order(lib: ctypes.CDLL, fdtd_order: int) -> None:
     if fdtd_order not in (2, 4, 8):
         raise ValueError("fdtd_order must be one of 2, 4, or 8.")

@@ -76,6 +76,10 @@ static float staggered_backward_diff(
     const float* RESTRICT f, long long id, long long stride,
     long long coord, long long n, int order)
 {
+    if (order <= 2) {
+        return f[id] - f[id - stride];
+    }
+
     int radius = usable_backward_radius(coord, n, fdtd_radius_for_order(order));
     float acc = 0.0f;
     for (int r = 1; r <= radius; ++r) {
@@ -88,6 +92,10 @@ static float staggered_forward_diff(
     const float* RESTRICT f, long long id, long long stride,
     long long coord, long long n, int order)
 {
+    if (order <= 2) {
+        return f[id + stride] - f[id];
+    }
+
     int radius = usable_forward_radius(coord, n, fdtd_radius_for_order(order));
     float acc = 0.0f;
     for (int r = 1; r <= radius; ++r) {

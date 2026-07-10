@@ -7,8 +7,18 @@ c = 299792458.0
 m0 = 4.0 * math.pi * 1e-7
 e0 = 1.0 / (m0 * c * c)
 
+def _require_finite_tensor(name, tensor):
+    if tensor is not None and not torch.isfinite(tensor).all().item():
+        raise ValueError(f"`{name}` contains NaN or Inf values.")
+
+
 def initialization(device, er,se,mr,source_amplitudes,source_location,receiver_location,dx,dt,pmlthick):
     dtype=torch.float32
+    _require_finite_tensor("er", er)
+    _require_finite_tensor("se", se)
+    _require_finite_tensor("mr", mr)
+    _require_finite_tensor("source_amplitudes", source_amplitudes)
+
     if er.min()<1 :
         raise ValueError('The values of epsilon is incorrect.(should be greater than 1)')
     if se.min()<0:
@@ -270,6 +280,9 @@ def check_tensors_for_nan_inf(d,**tensors):
             if has_inf:
                 print("Inf ", end="")
             print(f"| shape={tuple(tensor.shape)} | dtype={tensor.dtype}")
+
+    if found_issue:
+        raise FloatingPointError(f"{d} produced tensors containing NaN or Inf values.")
 
 
 def buildpmlcoeffs(er,mr,dt,dx,nx,ny,nz,pmlthick,device,dtype):

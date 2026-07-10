@@ -15,6 +15,25 @@ def _sync_cuda_device(device):
     torch.cuda.set_device(device.index)
     torch.cuda.synchronize(device.index)
 
+
+def _check_nonzero_source_created_fields(c_lib, source_amplitudes, *fields):
+    if source_amplitudes.abs().max().item() == 0.0:
+        return
+
+    max_field = 0.0
+    for field in fields:
+        max_field = max(max_field, field.abs().max().item())
+
+    if max_field == 0.0:
+        lib_path = getattr(c_lib, "_deepgpr_path", "unknown")
+        raise RuntimeError(
+            "The native DeepGPR backend returned all-zero fields even though the "
+            f"source waveform is nonzero. Loaded library: {lib_path}. "
+            "This usually means the shared library is stale or incompatible with "
+            "the current source code/device. Rebuild or pull the latest generated "
+            "native libraries."
+        )
+
 def compute(device, dx=None, dt=None, 
             source_amplitudes=None,
             source_location=None, 
@@ -158,6 +177,7 @@ class DeepGPR(torch.autograd.Function):
             zmEPhi1=zmEPhi1, zmEPhi2=zmEPhi2,
             zmHPhi1=zmHPhi1, zmHPhi2=zmHPhi2
         )
+        _check_nonzero_source_created_fields(c_lib, source_amplitudes, Ex, Ey, Ez, Hx, Hy, Hz)
 
         ctx.Eall = Eall
         return (Ex,Ey,Ez,Hx,Hy,Hz,x0EPhi1,x0EPhi2,x0HPhi1,x0HPhi2,xmEPhi1,xmEPhi2,xmHPhi1,xmHPhi2,y0EPhi1,y0EPhi2,y0HPhi1,y0HPhi2,ymEPhi1,ymEPhi2,ymHPhi1,ymHPhi2,z0EPhi1,z0EPhi2,z0HPhi1,z0HPhi2,zmEPhi1,zmEPhi2,zmHPhi1,zmHPhi2,Eall,receiver_amplitudes[:,reciever_direction,:,:])
@@ -314,7 +334,7 @@ class DeepGPR(torch.autograd.Function):
                 model_gradient_sampling_interval)  
         _sync_cuda_device(device)
         
-        check_tensors_for_nan_inf(d="backward",
+        tensors_to_check = dict(
             gEx=gEx, gEy=gEy, gEz=gEz,
             gHx=gHx, gHy=gHy, gHz=gHz,
             gx0EPhi1=gx0EPhi1, gx0EPhi2=gx0EPhi2,
@@ -330,6 +350,12 @@ class DeepGPR(torch.autograd.Function):
             gzmEPhi1=gzmEPhi1, gzmEPhi2=gzmEPhi2,
             gzmHPhi1=gzmHPhi1, gzmHPhi2=gzmHPhi2
         )
+        if errequiregrad == 1:
+            tensors_to_check["grad_er"] = grad_er
+        if serequiregrad == 1:
+            tensors_to_check["grad_se"] = grad_se
+
+        check_tensors_for_nan_inf(d="backward", **tensors_to_check)
 
         ctx.Eall = None
         del Eall,er, se, mr,receiver_location,x0,xm,y0,ym,z0,zm,x01,x02,xm1,xm2,y01,y02,ym1,ym2,z01,z02,zm1,zm2,ere,see, Eupdatecoffs0, Eupdatecoffs1, Eupdatecoffs4, Hupdatecoffs0, Hupdatecoffs1, Hupdatecoffs4

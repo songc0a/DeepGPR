@@ -24,6 +24,15 @@ __constant__ float m0 = 1.25663706212e-06;
     } \
 } while (0)
 
+#define CUDA_CHECK_LAST() do { \
+    cudaError_t err__ = cudaGetLastError(); \
+    if (err__ != cudaSuccess) { \
+        std::cerr << "CUDA Error: " << cudaGetErrorString(err__) \
+                  << " at " << __FILE__ << ":" << __LINE__ << std::endl; \
+        return; \
+    } \
+} while (0)
+
 static int g_fdtd_order = 2;
 
 DEEPGPR_API void set_fdtd_order(int order)
@@ -762,6 +771,7 @@ DEEPGPR_API void forward(const float* __restrict__ er, const float* __restrict__
     dim3 grid_fields(CEIL_DIV(total_fields, blockSize));
 
     ucgetforward<<<grid_fields, blockSize, 0, stream_comp>>>(er, se, mr, uE0, uE1, uE4, uH0, uH1, uH4, NX_FIELDS, NY_FIELDS, NZ_FIELDS, dt, dx);
+    CUDA_CHECK_LAST();
   
     dim3 grid_rx(CEIL_DIV(nrx, blockSize));
     dim3 grid_src(CEIL_DIV(nsrc, blockSize));
@@ -772,20 +782,24 @@ DEEPGPR_API void forward(const float* __restrict__ er, const float* __restrict__
         long long rx_total = step * nrx;
         long long gridSize_rx = (rx_total + blockSize - 1) / blockSize;
         store_outputs<<<gridSize_rx, blockSize, 0, stream_comp>>>(step, nrx, i, receiverlocation, rxs, Ex, Ey, Ez, Hx, Hy, Hz, NX_FIELDS, NY_FIELDS, NZ_FIELDS, nt);
+        CUDA_CHECK_LAST();
 
         fused_h_fields_updates_gpu<<<grid_fields, blockSize, 0, stream_comp>>>(
             uH0, uH1, Ex, Ey, Ez, Hx, Hy, Hz, dx, dx, dx, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
             pml0, pml1, pml2, pml3, pml4, pml5, x0HR, xmHR, y0HR, ymHR, z0HR, zmHR, uH4, 
             x0HPhi1, x0HPhi2, xmHPhi1, xmHPhi2, y0HPhi1, y0HPhi2, ymHPhi1, ymHPhi2, z0HPhi1, z0HPhi2, zmHPhi1, zmHPhi2,
             fdtd_order);
+        CUDA_CHECK_LAST();
 
         fused_e_fields_updates_gpu<<<grid_fields, blockSize, 0, stream_comp>>>(
             uE0, uE1, Ex, Ey, Ez, Hx, Hy, Hz, dx, dx, dx, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
             pml0, pml1, pml2, pml3, pml4, pml5, x0ER, xmER, y0ER, ymER, z0ER, zmER, uE4,
             x0EPhi1, x0EPhi2, xmEPhi1, xmEPhi2, y0EPhi1, y0EPhi2, ymEPhi1, ymEPhi2, z0EPhi1, z0EPhi2, zmEPhi1, zmEPhi2,
             fdtd_order);
+        CUDA_CHECK_LAST();
 
         Update_hertzian_dipole<<<grid_src, blockSize, 0, stream_comp>>>(step, i, dx, sourcelocation, srcwaveforms, Ex, Ey, Ez, uE4, NX_FIELDS, NY_FIELDS, NZ_FIELDS, nsrc, polarisation, nt);
+        CUDA_CHECK_LAST();
         
         if (i % sampling_interval == 0) {
             int t_saved = i / sampling_interval;
@@ -793,11 +807,13 @@ DEEPGPR_API void forward(const float* __restrict__ er, const float* __restrict__
                 int buf_idx = t_saved % 2; 
                 CUDA_CHECK(cudaStreamSynchronize(stream_trans));
                 copy_to_Eall_single<<<grid_copy, blockSize, 0, stream_comp>>>(d_E_buf, buf_idx, Ez, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
+                CUDA_CHECK_LAST();
                 CUDA_CHECK(cudaEventRecord(event_comp, stream_comp));
                 CUDA_CHECK(cudaStreamWaitEvent(stream_trans, event_comp, 0));
                 CUDA_CHECK(cudaMemcpyAsync(Eall_ptr + t_saved * snap_size, d_E_buf + buf_idx * snap_size, snap_size * sizeof(float), cudaMemcpyDeviceToHost, stream_trans));
             } else {
                 copy_to_Eall_single<<<grid_copy, blockSize, 0, stream_comp>>>(Eall_ptr, t_saved, Ez, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
+                CUDA_CHECK_LAST();
             }
         }
     }
@@ -867,6 +883,7 @@ DEEPGPR_API void backward(const float* __restrict__ er, const float* __restrict_
     dim3 grid_fields(CEIL_DIV(total_fields, blockSize));
 
     ucgetbackward<<<grid_fields, blockSize, 0, stream_comp>>>(er, se, mr, uE0, uE1, uE4, uH0, uH1, uH4, NX_FIELDS, NY_FIELDS, NZ_FIELDS, dt, dx);
+    CUDA_CHECK_LAST();
 
     long long total_src = step * nsrc;                           
     long long src_blocks = (total_src + blockSize - 1) / blockSize;        
@@ -904,20 +921,24 @@ DEEPGPR_API void backward(const float* __restrict__ er, const float* __restrict_
         }
 
         Back_source<<<grid_src, blockSize, 0, stream_comp>>>(step, i, dx, sourcelocation, srcwaveforms, Ex, Ey, Ez, uE4, NX_FIELDS, NY_FIELDS, NZ_FIELDS, nsrc, polarisation, nt);
+        CUDA_CHECK_LAST();
         
         fused_e_fields_updates_gpu<<<grid_fields, blockSize, 0, stream_comp>>>(
             uE0, uE1, Ex, Ey, Ez, Hx, Hy, Hz, dx, dx, dx, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
             pml0, pml1, pml2, pml3, pml4, pml5, x0ER, xmER, y0ER, ymER, z0ER, zmER, uE4,
             x0EPhi1, x0EPhi2, xmEPhi1, xmEPhi2, y0EPhi1, y0EPhi2, ymEPhi1, ymEPhi2, z0EPhi1, z0EPhi2, zmEPhi1, zmEPhi2,
             fdtd_order);
+        CUDA_CHECK_LAST();
 
         fused_h_fields_updates_gpu<<<grid_fields, blockSize, 0, stream_comp>>>(
             uH0, uH1, Ex, Ey, Ez, Hx, Hy, Hz, dx, dx, dx, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
             pml0, pml1, pml2, pml3, pml4, pml5, x0HR, xmHR, y0HR, ymHR, z0HR, zmHR, uH4, 
             x0HPhi1, x0HPhi2, xmHPhi1, xmHPhi2, y0HPhi1, y0HPhi2, ymHPhi1, ymHPhi2, z0HPhi1, z0HPhi2, zmHPhi1, zmHPhi2,
             fdtd_order);
+        CUDA_CHECK_LAST();
 
         accumulate_gradients<<<grid_grad, blockSize, 0, stream_comp>>>(Ez, Eall_ptr, d_E_buf, grad_er, grad_se, i, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, dt, errequiregrad, serequiregrad, sampling_interval, nt_saved, use_async);
+        CUDA_CHECK_LAST();
     }
 
     if (use_async) {
