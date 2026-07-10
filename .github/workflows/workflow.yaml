@@ -26,7 +26,7 @@ jobs:
           - os: windows-2022
             platform: windows
             lib_ext: .dll
-            cuda: '11.8.0'
+            cuda: '12.6.3'
             python: '3.10'
 
     runs-on: ${{ matrix.os }}
