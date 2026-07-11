@@ -197,7 +197,14 @@ cc -std=c99 -O3 -fopenmp -fPIC -shared -o src/DeepGPR/lib/deepgpr_cpu.so src/Dee
 # macOS
 brew install libomp
 LIBOMP_PREFIX="$(brew --prefix libomp)"
-cc -std=c99 -O3 -Xpreprocessor -fopenmp -DDEEPGPR_USE_OPENMP -I"$LIBOMP_PREFIX/include" -Wl,-rpath,"$LIBOMP_PREFIX/lib" -L"$LIBOMP_PREFIX/lib" -fPIC -shared -o src/DeepGPR/lib/deepgpr_cpu.dylib src/DeepGPR/lib/deepgpr_cpu.c -lomp
+LIBOMP_RUNTIME_NAME="/opt/llvm-openmp/lib/libomp.dylib"
+cc -std=c99 -O3 -Xpreprocessor -fopenmp -DDEEPGPR_USE_OPENMP -I"$LIBOMP_PREFIX/include" -L"$LIBOMP_PREFIX/lib" -fPIC -shared -o src/DeepGPR/lib/deepgpr_cpu.dylib src/DeepGPR/lib/deepgpr_cpu.c -lomp
+cp "$LIBOMP_PREFIX/lib/libomp.dylib" src/DeepGPR/lib/libomp.dylib
+install_name_tool -id "$LIBOMP_RUNTIME_NAME" src/DeepGPR/lib/libomp.dylib
+LIBOMP_DEP="$(otool -L src/DeepGPR/lib/deepgpr_cpu.dylib | awk '/libomp\.dylib/ {print $1; exit}')"
+install_name_tool -change "$LIBOMP_DEP" "$LIBOMP_RUNTIME_NAME" src/DeepGPR/lib/deepgpr_cpu.dylib
+codesign --force --sign - src/DeepGPR/lib/libomp.dylib
+codesign --force --sign - src/DeepGPR/lib/deepgpr_cpu.dylib
 ```
 
 On Windows, build `src\DeepGPR\lib\deepgpr_cpu.dll` with MSVC:

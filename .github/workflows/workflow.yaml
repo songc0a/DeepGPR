@@ -407,20 +407,21 @@ jobs:
 
           c_file="src/DeepGPR/lib/deepgpr_cpu.c"
           out_file="src/DeepGPR/lib/deepgpr_cpu.dylib"
+          libomp_file="src/DeepGPR/lib/libomp.dylib"
           libomp_prefix="$(brew --prefix libomp)"
+          libomp_runtime_name="/opt/llvm-openmp/lib/libomp.dylib"
 
           if [ ! -f "$c_file" ]; then
             echo "CPU source file not found: $c_file"
             exit 1
           fi
 
-          rm -f "$out_file"
+          rm -f "$out_file" "$libomp_file"
 
           cc -std=c99 -O3 \
              -Xpreprocessor -fopenmp \
              -DDEEPGPR_USE_OPENMP \
              -I"$libomp_prefix/include" \
-             -Wl,-rpath,"$libomp_prefix/lib" \
              -L"$libomp_prefix/lib" \
              -fPIC -shared \
              -o "$out_file" "$c_file" \
@@ -431,13 +432,33 @@ jobs:
             exit 1
           fi
 
+          cp "$libomp_prefix/lib/libomp.dylib" "$libomp_file"
+          install_name_tool -id "$libomp_runtime_name" "$libomp_file"
+
+          libomp_dep="$(otool -L "$out_file" | awk '/libomp\.dylib/ {print $1; exit}')"
+          if [ -z "$libomp_dep" ]; then
+            echo "Could not find libomp dependency in $out_file"
+            otool -L "$out_file"
+            exit 1
+          fi
+          install_name_tool -change "$libomp_dep" "$libomp_runtime_name" "$out_file"
+
+          codesign --force --sign - "$libomp_file"
+          codesign --force --sign - "$out_file"
+
+          echo "===== macOS CPU dependencies ====="
+          otool -L "$out_file"
+          otool -D "$libomp_file"
+
           nm -gU "$out_file" | grep -E "forward|backward|set_fdtd_order"
 
       - name: Upload macOS CPU artifact
         uses: actions/upload-artifact@v4
         with:
           name: deepgpr-macos-cpu
-          path: src/DeepGPR/lib/deepgpr_cpu.dylib
+          path: |
+            src/DeepGPR/lib/deepgpr_cpu.dylib
+            src/DeepGPR/lib/libomp.dylib
           if-no-files-found: error
           retention-days: 30
 
@@ -488,9 +509,11 @@ jobs:
           copy_artifact deepgpr_cpu.so
           copy_artifact deepgpr_cpu.dll
           copy_artifact deepgpr_cpu.dylib
+          copy_artifact libomp.dylib
 
           echo "===== Copied libraries ====="
           ls -lh src/DeepGPR/lib/deepgpr* src/DeepGPR/lib/libdeepgpr* 2>/dev/null || true
+          ls -lh src/DeepGPR/lib/libomp.dylib 2>/dev/null || true
 
       - name: Commit generated libraries
         shell: bash
@@ -505,7 +528,8 @@ jobs:
             src/DeepGPR/lib/deepgpr.dll \
             src/DeepGPR/lib/deepgpr_cpu.so \
             src/DeepGPR/lib/deepgpr_cpu.dll \
-            src/DeepGPR/lib/deepgpr_cpu.dylib
+            src/DeepGPR/lib/deepgpr_cpu.dylib \
+            src/DeepGPR/lib/libomp.dylib
 
           if git diff --cached --quiet; then
             echo "No generated library changes to commit."

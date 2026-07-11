@@ -13,6 +13,7 @@ _PACKAGE_DIR = Path(__file__).resolve().parent
 _LIB_DIR = _PACKAGE_DIR / "lib"
 _SYSTEM_NAME = platform.system()
 _LOADED_LIBS: dict[str, ctypes.CDLL] = {}
+_OPENMP_RUNTIME: ctypes.CDLL | None = None
 
 
 def _candidate_library_paths(kind: str) -> list[Path]:
@@ -86,6 +87,46 @@ def _add_windows_dll_search_paths() -> None:
                 os.add_dll_directory(str(directory))
         except OSError:
             pass
+
+
+def _preload_macos_openmp_runtime() -> None:
+    """Preload the OpenMP runtime used by PyTorch on macOS.
+
+    Args:
+        None.
+    """
+    global _OPENMP_RUNTIME
+
+    if _SYSTEM_NAME != "Darwin" or _OPENMP_RUNTIME is not None:
+        return
+
+    candidates: list[Path] = []
+    try:
+        import torch
+
+        candidates.append(Path(torch.__file__).resolve().parent / "lib" / "libomp.dylib")
+    except Exception:
+        pass
+
+    conda_prefix = os.environ.get("CONDA_PREFIX")
+    if conda_prefix:
+        candidates.append(Path(conda_prefix) / "lib" / "libomp.dylib")
+
+    candidates.append(_LIB_DIR / "libomp.dylib")
+
+    seen = set()
+    for path in candidates:
+        path = Path(path)
+        if path in seen:
+            continue
+        seen.add(path)
+        if not path.is_file():
+            continue
+        try:
+            _OPENMP_RUNTIME = ctypes.CDLL(str(path.resolve()), mode=ctypes.RTLD_GLOBAL)
+            return
+        except OSError:
+            continue
 
 
 def _require_exported_symbols(lib: ctypes.CDLL, symbols: tuple[str, ...], path: Path) -> None:
@@ -189,6 +230,9 @@ def _load_deepgpr_library(kind: str) -> ctypes.CDLL:
         return _LOADED_LIBS[kind]
 
     _add_windows_dll_search_paths()
+    if kind == "cpu":
+        _preload_macos_openmp_runtime()
+
     candidates = _candidate_library_paths(kind)
     load_errors: list[str] = []
 
