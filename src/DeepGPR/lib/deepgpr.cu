@@ -279,25 +279,26 @@ __global__ void store_outputs(
     const float* __restrict__ Hx, const float* __restrict__ Hy, const float* __restrict__ Hz,
     int NX, int NY, int NZ, int N_ITER) 
 {
-    long long rx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (rx >= NRX) return;
-
     long long field_stride = (long long)NX * NY * NZ;
+    long long work = blockIdx.x * blockDim.x + threadIdx.x;
+    long long total = (long long)step * NRX;
+    if (work >= total) return;
 
-    for (int s = 0; s < step; ++s) {
-        long long i = receiverlocation[s * NRX * 3 + rx * 3 + 0];
-        long long j = receiverlocation[s * NRX * 3 + rx * 3 + 1];
-        long long k = receiverlocation[s * NRX * 3 + rx * 3 + 2];
+    int s = (int)(work / NRX);
+    long long rx = work % NRX;
 
-        long long id4 = s * field_stride + i * NY * NZ + j * NZ + k;
+    long long i = receiverlocation[s * NRX * 3 + rx * 3 + 0];
+    long long j = receiverlocation[s * NRX * 3 + rx * 3 + 1];
+    long long k = receiverlocation[s * NRX * 3 + rx * 3 + 2];
 
-        rxs[((s * 6 + 0) * N_ITER + iteration) * NRX + rx] = Ex[id4];
-        rxs[((s * 6 + 1) * N_ITER + iteration) * NRX + rx] = Ey[id4];
-        rxs[((s * 6 + 2) * N_ITER + iteration) * NRX + rx] = Ez[id4];
-        rxs[((s * 6 + 3) * N_ITER + iteration) * NRX + rx] = Hx[id4];
-        rxs[((s * 6 + 4) * N_ITER + iteration) * NRX + rx] = Hy[id4];
-        rxs[((s * 6 + 5) * N_ITER + iteration) * NRX + rx] = Hz[id4];
-    }
+    long long id4 = (long long)s * field_stride + i * NY * NZ + j * NZ + k;
+
+    rxs[((s * 6 + 0) * N_ITER + iteration) * NRX + rx] = Ex[id4];
+    rxs[((s * 6 + 1) * N_ITER + iteration) * NRX + rx] = Ey[id4];
+    rxs[((s * 6 + 2) * N_ITER + iteration) * NRX + rx] = Ez[id4];
+    rxs[((s * 6 + 3) * N_ITER + iteration) * NRX + rx] = Hx[id4];
+    rxs[((s * 6 + 4) * N_ITER + iteration) * NRX + rx] = Hy[id4];
+    rxs[((s * 6 + 5) * N_ITER + iteration) * NRX + rx] = Hz[id4];
 }
 
 
@@ -323,25 +324,26 @@ __global__ void Update_hertzian_dipole(
     float* __restrict__ Ex, float* __restrict__ Ey, float* __restrict__ Ez, const float* __restrict__ uE4,
     int NX, int NY, int NZ, int nsrc, int polarisation, int nt) 
 {
-    long long src = blockIdx.x * blockDim.x + threadIdx.x; 
-    if (src >= nsrc) return;
+    long long field_stride = (long long)NX * NY * NZ;
+    long long work = blockIdx.x * blockDim.x + threadIdx.x;
+    long long total = (long long)step * nsrc;
+    if (work >= total) return;
 
+    int s = (int)(work / nsrc);
+    long long src = work % nsrc;
     float waveform_value = srcwaveforms[src * nt + iteration];
     float scale = waveform_value * dx / (dx * dx * dx);  
-    long long field_stride = (long long)NX * NY * NZ;
 
-    for (int s = 0; s < step; ++s) {
-        long long i = sourcelocation[s * nsrc * 3 + src * 3 + 0];
-        long long j = sourcelocation[s * nsrc * 3 + src * 3 + 1];
-        long long k = sourcelocation[s * nsrc * 3 + src * 3 + 2];
+    long long i = sourcelocation[s * nsrc * 3 + src * 3 + 0];
+    long long j = sourcelocation[s * nsrc * 3 + src * 3 + 1];
+    long long k = sourcelocation[s * nsrc * 3 + src * 3 + 2];
 
-        long long id3 = i * NY * NZ + j * NZ + k;
-        long long id4 = s * field_stride + id3;
+    long long id3 = i * NY * NZ + j * NZ + k;
+    long long id4 = (long long)s * field_stride + id3;
 
-        if (polarisation == 0) Ex[id4] -= uE4[id3] * scale;
-        else if (polarisation == 1) Ey[id4] -= uE4[id3] * scale;
-        else if (polarisation == 2) Ez[id4] -= uE4[id3] * scale;
-    }
+    if (polarisation == 0) Ex[id4] -= uE4[id3] * scale;
+    else if (polarisation == 1) Ey[id4] -= uE4[id3] * scale;
+    else if (polarisation == 2) Ez[id4] -= uE4[id3] * scale;
 }
 
 
@@ -382,10 +384,13 @@ __global__ void fused_e_fields_updates_gpu(
     float* __restrict__ zmEPhi1, float* __restrict__ zmEPhi2,
     int fdtd_order)
 {
-    long long idx = blockIdx.x * blockDim.x + threadIdx.x;
     long long ny_nz = (long long)NY_FIELDS * NZ_FIELDS;
     long long field_stride = (long long)NX_FIELDS * ny_nz;
-    if (idx >= field_stride) return;
+    long long work = blockIdx.x * blockDim.x + threadIdx.x;
+    if (work >= (long long)step * field_stride) return;
+
+    int s = (int)(work / field_stride);
+    long long idx = work % field_stride;
 
     long long i = idx / ny_nz;
     long long rem = idx % ny_nz;
@@ -407,9 +412,9 @@ __global__ void fused_e_fields_updates_gpu(
     float ue1 = uE1[idx];
     float upd = updatecoeffsE[idx];
 
-    long long id4 = idx; 
+    long long id4 = work;
 
-    for (int s = 0; s < step; ++s) {
+    {
         if (do_ex) {
             float dHz_dy = staggered_backward_diff(Hz, id4, NZ_FIELDS, j, NY_FIELDS, fdtd_order);
             float dHy_dz = staggered_backward_diff(Hy, id4, 1, k, NZ_FIELDS, fdtd_order);
@@ -539,8 +544,6 @@ __global__ void fused_e_fields_updates_gpu(
                 zmEPhi2[p_idx] = RE0 * phi - RF0 * dHx;
             }
         }
-
-        id4 += field_stride;
     }
 }
 
@@ -582,10 +585,13 @@ __global__ void fused_h_fields_updates_gpu(
     float* __restrict__ zmHPhi1, float* __restrict__ zmHPhi2,
     int fdtd_order)
 {
-    long long idx = blockIdx.x * blockDim.x + threadIdx.x;
     long long ny_nz = (long long)NY_FIELDS * NZ_FIELDS;
     long long field_stride = (long long)NX_FIELDS * ny_nz;
-    if (idx >= field_stride) return;
+    long long work = blockIdx.x * blockDim.x + threadIdx.x;
+    if (work >= (long long)step * field_stride) return;
+
+    int s = (int)(work / field_stride);
+    long long idx = work % field_stride;
 
     long long i = idx / ny_nz;
     long long rem = idx % ny_nz;
@@ -607,9 +613,9 @@ __global__ void fused_h_fields_updates_gpu(
     float uh1 = uH1[idx];
     float upd = updatecoeffsH[idx];
 
-    long long id4 = idx; 
+    long long id4 = work;
 
-    for (int s = 0; s < step; ++s) {
+    {
         if (do_hx) {
             float dEz_dy = staggered_forward_diff(Ez, id4, NZ_FIELDS, j, NY_FIELDS, fdtd_order);
             float dEy_dz = staggered_forward_diff(Ey, id4, 1, k, NZ_FIELDS, fdtd_order);
@@ -739,8 +745,6 @@ __global__ void fused_h_fields_updates_gpu(
                 zmHPhi2[p_idx] = RE0 * phi - RF0 * dEx;
             }
         }
-
-        id4 += field_stride;
     }
 }
 
@@ -767,26 +771,25 @@ __global__ void Back_source(
     float* Ex, float* Ey, float* Ez, float* uE4,
     int NX, int NY, int NZ, int nsr, int polarisation, int iterations
 ){
-    long long src = blockIdx.x * blockDim.x + threadIdx.x;   
-    if (src >= nsr) return;
     long long field_stride = (long long)NX * NY * NZ;
-    long long index_stride = (long long)iterations * nsr;
-    long long index = (long long)iteration * nsr + src;
+    long long work = blockIdx.x * blockDim.x + threadIdx.x;
+    long long total = (long long)step * nsr;
+    if (work >= total) return;
 
-    for (int s = 0; s < step; ++s) {
-        long long i = sourcelocation[s * nsr * 3 + src * 3 + 0];
-        long long j = sourcelocation[s * nsr * 3 + src * 3 + 1];
-        long long k = sourcelocation[s * nsr * 3 + src * 3 + 2];
+    int s = (int)(work / nsr);
+    long long src = work % nsr;
 
-        float waveform_value = srcwaveforms[index];
-        long long id4 = s * field_stride + i * NY * NZ + j * NZ + k;
+    long long i = sourcelocation[s * nsr * 3 + src * 3 + 0];
+    long long j = sourcelocation[s * nsr * 3 + src * 3 + 1];
+    long long k = sourcelocation[s * nsr * 3 + src * 3 + 2];
 
-        if (polarisation == 0) Ex[id4] -= waveform_value;
-        else if (polarisation == 1) Ey[id4] -= waveform_value;
-        else if (polarisation == 2) Ez[id4] -= waveform_value;
+    long long index = (long long)s * iterations * nsr + (long long)iteration * nsr + src;
+    float waveform_value = srcwaveforms[index];
+    long long id4 = (long long)s * field_stride + i * NY * NZ + j * NZ + k;
 
-        index += index_stride;
-    }
+    if (polarisation == 0) Ex[id4] -= waveform_value;
+    else if (polarisation == 1) Ey[id4] -= waveform_value;
+    else if (polarisation == 2) Ez[id4] -= waveform_value;
 }
 
 
@@ -804,25 +807,23 @@ __global__ void copy_to_Eall_single(
     float* __restrict__ dst_ptr, int t_idx, const float* __restrict__ E, 
     int step, int NX, int NY, int NZ)
 {
-    long long idx = blockIdx.x * blockDim.x + threadIdx.x;
     long long nx1 = NX - 1, ny1 = NY - 1, nz1 = NZ - 1;
     long long total = nx1 * ny1 * nz1;
-    if (idx >= total) return;
+    long long work = blockIdx.x * blockDim.x + threadIdx.x;
+    if (work >= (long long)step * total) return;
+
+    int s = (int)(work / total);
+    long long idx = work % total;
 
     long long i = idx / (ny1 * nz1);
     long long rem = idx % (ny1 * nz1);
     long long j = rem / nz1;
     long long k = rem % nz1;
 
-    long long src_idx = i * NY * NZ + j * NZ + k;
-    long long dst_idx = (long long)t_idx * step * total + idx; 
     long long field_stride = (long long)NX * NY * NZ;
-
-    for (int s = 0; s < step; ++s) {
-        dst_ptr[dst_idx] = E[src_idx];
-        src_idx += field_stride;
-        dst_idx += total;
-    }
+    long long src_idx = (long long)s * field_stride + i * NY * NZ + j * NZ + k;
+    long long dst_idx = (long long)t_idx * step * total + (long long)s * total + idx;
+    dst_ptr[dst_idx] = E[src_idx];
 }
 
 
@@ -853,21 +854,25 @@ __global__ void accumulate_gradients(
     int i, int step, int NX, int NY, int NZ, float dt,int errequiregrad,int serequiregrad,
     int S, int nt_saved, int use_async_offload, int fwi_mode
 ) {
-    long long idx = blockIdx.x * blockDim.x + threadIdx.x;
     long long sx = (NX - 1), sy = (NY - 1), sz = (NZ - 1);
     long long total_cells = sx * sy * sz;
     long long snap_stride = (long long)step * total_cells;
     long long component_stride = (long long)nt_saved * snap_stride;
     int components = (fwi_mode == 3) ? 3 : 1;
+    long long work = blockIdx.x * blockDim.x + threadIdx.x;
 
-    if (idx >= total_cells) return;
+    if (work >= (long long)step * total_cells) return;
+
+    int s = (int)(work / total_cells);
+    long long idx = work % total_cells;
 
     long long ix = idx / (sy * sz);
     long long rem = idx % (sy * sz);
     long long iy = rem / sz;
     long long iz = rem % sz;
 
-    long long idx_E = ix * NY * NZ + iy * NZ + iz;
+    long long e_stride = (long long)NX * NY * NZ;
+    long long idx_E = (long long)s * e_stride + ix * NY * NZ + iy * NZ + iz;
     
     long long idx0_curr = i / S;
     long long idx1_curr = min(idx0_curr + 1, (long long)nt_saved - 1);
@@ -879,44 +884,39 @@ __global__ void accumulate_gradients(
     float w1_prev = (float)((i - 1) % S) / S;
     float w0_prev = 1.0f - w1_prev;
 
-    long long e_stride = (long long)NX * NY * NZ;
     float local_grader = 0.0f;
     float local_gradse = 0.0f;
 
-    for (int s = 0; s < step; ++s) {
-        long long base_idx = (long long)s * total_cells + idx;
-        float adjoint_values[3];
-        adjoint_values[0] = Ex[idx_E];
-        adjoint_values[1] = Ey[idx_E];
-        adjoint_values[2] = Ez[idx_E];
+    long long base_idx = (long long)s * total_cells + idx;
+    float adjoint_values[3];
+    adjoint_values[0] = Ex[idx_E];
+    adjoint_values[1] = Ey[idx_E];
+    adjoint_values[2] = Ez[idx_E];
 
-        for (int c = 0; c < components; ++c) {
-            long long comp_offset = (fwi_mode == 3) ? (long long)c * component_stride : 0;
-            long long ring_offset = (long long)c * snap_stride;
-            float e0_c, e1_c, e0_p, e1_p;
+    for (int c = 0; c < components; ++c) {
+        long long comp_offset = (fwi_mode == 3) ? (long long)c * component_stride : 0;
+        long long ring_offset = (long long)c * snap_stride;
+        float e0_c, e1_c, e0_p, e1_p;
 
-            if (use_async_offload) {
-                long long ring_stride = (long long)components * snap_stride;
-                e0_c = d_E_buf[(idx0_curr % 3) * ring_stride + ring_offset + base_idx];
-                e1_c = d_E_buf[(idx1_curr % 3) * ring_stride + ring_offset + base_idx];
-                e0_p = d_E_buf[(idx0_prev % 3) * ring_stride + ring_offset + base_idx];
-                e1_p = d_E_buf[(idx1_prev % 3) * ring_stride + ring_offset + base_idx];
-            } else {
-                e0_c = Eall_ptr[comp_offset + idx0_curr * snap_stride + base_idx];
-                e1_c = Eall_ptr[comp_offset + idx1_curr * snap_stride + base_idx];
-                e0_p = Eall_ptr[comp_offset + idx0_prev * snap_stride + base_idx];
-                e1_p = Eall_ptr[comp_offset + idx1_prev * snap_stride + base_idx];
-            }
-
-            float e_curr = e0_c * w0_curr + e1_c * w1_curr;
-            float e_prev = e0_p * w0_prev + e1_p * w1_prev;
-            float adjoint_val = adjoint_values[(fwi_mode == 3) ? c : 2];
-
-            if (errequiregrad == 1) local_grader += (e_curr - e_prev) * adjoint_val / dt;
-            if (serequiregrad == 1) local_gradse += e_curr * adjoint_val * dt;
+        if (use_async_offload) {
+            long long ring_stride = (long long)components * snap_stride;
+            e0_c = d_E_buf[(idx0_curr % 3) * ring_stride + ring_offset + base_idx];
+            e1_c = d_E_buf[(idx1_curr % 3) * ring_stride + ring_offset + base_idx];
+            e0_p = d_E_buf[(idx0_prev % 3) * ring_stride + ring_offset + base_idx];
+            e1_p = d_E_buf[(idx1_prev % 3) * ring_stride + ring_offset + base_idx];
+        } else {
+            e0_c = Eall_ptr[comp_offset + idx0_curr * snap_stride + base_idx];
+            e1_c = Eall_ptr[comp_offset + idx1_curr * snap_stride + base_idx];
+            e0_p = Eall_ptr[comp_offset + idx0_prev * snap_stride + base_idx];
+            e1_p = Eall_ptr[comp_offset + idx1_prev * snap_stride + base_idx];
         }
 
-        idx_E += e_stride;
+        float e_curr = e0_c * w0_curr + e1_c * w1_curr;
+        float e_prev = e0_p * w0_prev + e1_p * w1_prev;
+        float adjoint_val = adjoint_values[(fwi_mode == 3) ? c : 2];
+
+        if (errequiregrad == 1) local_grader += (e_curr - e_prev) * adjoint_val / dt;
+        if (serequiregrad == 1) local_gradse += e_curr * adjoint_val * dt;
     }
 
     if (errequiregrad == 1) atomicAdd(&grader[idx], local_grader);
@@ -1013,20 +1013,19 @@ DEEPGPR_API void forward(const float* __restrict__ er, const float* __restrict__
 
     long long blockSize = 256;
     long long total_fields = (long long)NX_FIELDS * NY_FIELDS * NZ_FIELDS;
-    dim3 grid_fields(CEIL_DIV(total_fields, blockSize));
+    dim3 grid_material(CEIL_DIV(total_fields, blockSize));
+    dim3 grid_fields(CEIL_DIV((long long)step * total_fields, blockSize));
 
-    ucgetforward<<<grid_fields, blockSize, 0, stream_comp>>>(er, se, mr, uE0, uE1, uE4, uH0, uH1, uH4, NX_FIELDS, NY_FIELDS, NZ_FIELDS, dt, dx);
+    ucgetforward<<<grid_material, blockSize, 0, stream_comp>>>(er, se, mr, uE0, uE1, uE4, uH0, uH1, uH4, NX_FIELDS, NY_FIELDS, NZ_FIELDS, dt, dx);
     CUDA_CHECK_LAST();
   
-    dim3 grid_rx(CEIL_DIV(nrx, blockSize));
-    dim3 grid_src(CEIL_DIV(nsrc, blockSize));
+    dim3 grid_rx(CEIL_DIV((long long)step * nrx, blockSize));
+    dim3 grid_src(CEIL_DIV((long long)step * nsrc, blockSize));
     long long total_copy = (long long)(NX_FIELDS - 1) * (NY_FIELDS - 1) * (NZ_FIELDS - 1); 
-    dim3 grid_copy(CEIL_DIV(total_copy, blockSize));
+    dim3 grid_copy(CEIL_DIV((long long)step * total_copy, blockSize));
 
     for (int i = 0; i < nt; i++) {
-        long long rx_total = step * nrx;
-        long long gridSize_rx = (rx_total + blockSize - 1) / blockSize;
-        store_outputs<<<gridSize_rx, blockSize, 0, stream_comp>>>(step, nrx, i, receiverlocation, rxs, Ex, Ey, Ez, Hx, Hy, Hz, NX_FIELDS, NY_FIELDS, NZ_FIELDS, nt);
+        store_outputs<<<grid_rx, blockSize, 0, stream_comp>>>(step, nrx, i, receiverlocation, rxs, Ex, Ey, Ez, Hx, Hy, Hz, NX_FIELDS, NY_FIELDS, NZ_FIELDS, nt);
         CUDA_CHECK_LAST();
 
         fused_h_fields_updates_gpu<<<grid_fields, blockSize, 0, stream_comp>>>(
@@ -1187,17 +1186,18 @@ DEEPGPR_API void backward(const float* __restrict__ er, const float* __restrict_
 
     long long blockSize = 256;
     long long total_fields = (long long)NX_FIELDS * NY_FIELDS * NZ_FIELDS;
-    dim3 grid_fields(CEIL_DIV(total_fields, blockSize));
+    dim3 grid_material(CEIL_DIV(total_fields, blockSize));
+    dim3 grid_fields(CEIL_DIV((long long)step * total_fields, blockSize));
 
-    ucgetbackward<<<grid_fields, blockSize, 0, stream_comp>>>(er, se, mr, uE0, uE1, uE4, uH0, uH1, uH4, NX_FIELDS, NY_FIELDS, NZ_FIELDS, dt, dx);
+    ucgetbackward<<<grid_material, blockSize, 0, stream_comp>>>(er, se, mr, uE0, uE1, uE4, uH0, uH1, uH4, NX_FIELDS, NY_FIELDS, NZ_FIELDS, dt, dx);
     CUDA_CHECK_LAST();
 
-    long long total_src = step * nsrc;                           
+    long long total_src = (long long)step * nsrc;
     long long src_blocks = (total_src + blockSize - 1) / blockSize;        
     dim3 grid_src(src_blocks);
 
     long long total_grad = (long long)(NX_FIELDS-1) * (NY_FIELDS-1) * (NZ_FIELDS-1);
-    dim3 grid_grad(CEIL_DIV(total_grad, blockSize));
+    dim3 grid_grad(CEIL_DIV((long long)step * total_grad, blockSize));
   
     int nt_saved = (nt + sampling_interval - 1) / sampling_interval;
     long long component_stride = (long long)nt_saved * snap_size;

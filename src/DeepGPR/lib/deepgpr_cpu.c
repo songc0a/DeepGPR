@@ -284,24 +284,25 @@ static void store_outputs_cpu(
     int NX, int NY, int NZ, int N_ITER)
 {
     long long field_stride = (long long)NX * NY * NZ;
-    long long rx;
+    long long total = (long long)step * NRX;
+    long long work;
 
     DEEPGPR_OMP_PARALLEL_FOR
-    for (rx = 0; rx < NRX; ++rx) {
-        for (int s = 0; s < step; ++s) {
-            long long i = receiverlocation[s * NRX * 3 + rx * 3 + 0];
-            long long j = receiverlocation[s * NRX * 3 + rx * 3 + 1];
-            long long k = receiverlocation[s * NRX * 3 + rx * 3 + 2];
+    for (work = 0; work < total; ++work) {
+        int s = (int)(work / NRX);
+        long long rx = work % NRX;
+        long long i = receiverlocation[s * NRX * 3 + rx * 3 + 0];
+        long long j = receiverlocation[s * NRX * 3 + rx * 3 + 1];
+        long long k = receiverlocation[s * NRX * 3 + rx * 3 + 2];
 
-            long long id4 = (long long)s * field_stride + i * NY * NZ + j * NZ + k;
+        long long id4 = (long long)s * field_stride + i * NY * NZ + j * NZ + k;
 
-            rxs[((s * 6 + 0) * N_ITER + iteration) * NRX + rx] = Ex[id4];
-            rxs[((s * 6 + 1) * N_ITER + iteration) * NRX + rx] = Ey[id4];
-            rxs[((s * 6 + 2) * N_ITER + iteration) * NRX + rx] = Ez[id4];
-            rxs[((s * 6 + 3) * N_ITER + iteration) * NRX + rx] = Hx[id4];
-            rxs[((s * 6 + 4) * N_ITER + iteration) * NRX + rx] = Hy[id4];
-            rxs[((s * 6 + 5) * N_ITER + iteration) * NRX + rx] = Hz[id4];
-        }
+        rxs[((s * 6 + 0) * N_ITER + iteration) * NRX + rx] = Ex[id4];
+        rxs[((s * 6 + 1) * N_ITER + iteration) * NRX + rx] = Ey[id4];
+        rxs[((s * 6 + 2) * N_ITER + iteration) * NRX + rx] = Ez[id4];
+        rxs[((s * 6 + 3) * N_ITER + iteration) * NRX + rx] = Hx[id4];
+        rxs[((s * 6 + 4) * N_ITER + iteration) * NRX + rx] = Hy[id4];
+        rxs[((s * 6 + 5) * N_ITER + iteration) * NRX + rx] = Hz[id4];
     }
 }
 
@@ -328,31 +329,32 @@ static void Update_hertzian_dipole_cpu(
     int NX, int NY, int NZ, int nsrc, int polarisation, int nt)
 {
     long long field_stride = (long long)NX * NY * NZ;
-    long long src;
+    long long total = (long long)step * nsrc;
+    long long work;
 
     DEEPGPR_OMP_PARALLEL_FOR
-    for (src = 0; src < nsrc; ++src) {
+    for (work = 0; work < total; ++work) {
+        int s = (int)(work / nsrc);
+        long long src = work % nsrc;
         float waveform_value = srcwaveforms[src * nt + iteration];
         float scale = waveform_value * dx / (dx * dx * dx);
 
-        for (int s = 0; s < step; ++s) {
-            long long i = sourcelocation[s * nsrc * 3 + src * 3 + 0];
-            long long j = sourcelocation[s * nsrc * 3 + src * 3 + 1];
-            long long k = sourcelocation[s * nsrc * 3 + src * 3 + 2];
+        long long i = sourcelocation[s * nsrc * 3 + src * 3 + 0];
+        long long j = sourcelocation[s * nsrc * 3 + src * 3 + 1];
+        long long k = sourcelocation[s * nsrc * 3 + src * 3 + 2];
 
-            long long id3 = i * NY * NZ + j * NZ + k;
-            long long id4 = (long long)s * field_stride + id3;
+        long long id3 = i * NY * NZ + j * NZ + k;
+        long long id4 = (long long)s * field_stride + id3;
 
-            if (polarisation == 0) {
-                DEEPGPR_OMP_ATOMIC_UPDATE
-                Ex[id4] -= uE4[id3] * scale;
-            } else if (polarisation == 1) {
-                DEEPGPR_OMP_ATOMIC_UPDATE
-                Ey[id4] -= uE4[id3] * scale;
-            } else if (polarisation == 2) {
-                DEEPGPR_OMP_ATOMIC_UPDATE
-                Ez[id4] -= uE4[id3] * scale;
-            }
+        if (polarisation == 0) {
+            DEEPGPR_OMP_ATOMIC_UPDATE
+            Ex[id4] -= uE4[id3] * scale;
+        } else if (polarisation == 1) {
+            DEEPGPR_OMP_ATOMIC_UPDATE
+            Ey[id4] -= uE4[id3] * scale;
+        } else if (polarisation == 2) {
+            DEEPGPR_OMP_ATOMIC_UPDATE
+            Ez[id4] -= uE4[id3] * scale;
         }
     }
 }
@@ -396,10 +398,13 @@ static void fused_e_fields_updates_cpu(
 {
     long long ny_nz = (long long)NY_FIELDS * NZ_FIELDS;
     long long field_stride = (long long)NX_FIELDS * ny_nz;
-    long long idx;
+    long long total_work = (long long)step * field_stride;
+    long long work;
 
     DEEPGPR_OMP_PARALLEL_FOR
-    for (idx = 0; idx < field_stride; ++idx) {
+    for (work = 0; work < total_work; ++work) {
+        int s = (int)(work / field_stride);
+        long long idx = work % field_stride;
         long long i = idx / ny_nz;
         long long rem = idx % ny_nz;
         long long j = rem / NZ_FIELDS;
@@ -419,9 +424,9 @@ static void fused_e_fields_updates_cpu(
         float ue0 = uE0[idx];
         float ue1 = uE1[idx];
         float upd = updatecoeffsE[idx];
-        long long id4 = idx;
+        long long id4 = work;
 
-        for (int s = 0; s < step; ++s) {
+        {
             if (do_ex) {
                 float dHz_dy = staggered_backward_diff(Hz, id4, NZ_FIELDS, j, NY_FIELDS, fdtd_order);
                 float dHy_dz = staggered_backward_diff(Hy, id4, 1, k, NZ_FIELDS, fdtd_order);
@@ -551,8 +556,6 @@ static void fused_e_fields_updates_cpu(
                     zmEPhi2[p_idx] = RE0 * phi - RF0 * dHx;
                 }
             }
-
-            id4 += field_stride;
         }
     }
 }
@@ -596,10 +599,13 @@ static void fused_h_fields_updates_cpu(
 {
     long long ny_nz = (long long)NY_FIELDS * NZ_FIELDS;
     long long field_stride = (long long)NX_FIELDS * ny_nz;
-    long long idx;
+    long long total_work = (long long)step * field_stride;
+    long long work;
 
     DEEPGPR_OMP_PARALLEL_FOR
-    for (idx = 0; idx < field_stride; ++idx) {
+    for (work = 0; work < total_work; ++work) {
+        int s = (int)(work / field_stride);
+        long long idx = work % field_stride;
         long long i = idx / ny_nz;
         long long rem = idx % ny_nz;
         long long j = rem / NZ_FIELDS;
@@ -619,9 +625,9 @@ static void fused_h_fields_updates_cpu(
         float uh0 = uH0[idx];
         float uh1 = uH1[idx];
         float upd = updatecoeffsH[idx];
-        long long id4 = idx;
+        long long id4 = work;
 
-        for (int s = 0; s < step; ++s) {
+        {
             if (do_hx) {
                 float dEz_dy = staggered_forward_diff(Ez, id4, NZ_FIELDS, j, NY_FIELDS, fdtd_order);
                 float dEy_dz = staggered_forward_diff(Ey, id4, 1, k, NZ_FIELDS, fdtd_order);
@@ -751,8 +757,6 @@ static void fused_h_fields_updates_cpu(
                     zmHPhi2[p_idx] = RE0 * phi - RF0 * dEx;
                 }
             }
-
-            id4 += field_stride;
         }
     }
 }
@@ -778,33 +782,31 @@ static void Back_source_cpu(
     int NX, int NY, int NZ, int nsr, int polarisation, int iterations)
 {
     long long field_stride = (long long)NX * NY * NZ;
-    long long index_stride = (long long)iterations * nsr;
-    long long src;
+    long long total = (long long)step * nsr;
+    long long work;
 
     DEEPGPR_OMP_PARALLEL_FOR
-    for (src = 0; src < nsr; ++src) {
-        long long index = (long long)iteration * nsr + src;
+    for (work = 0; work < total; ++work) {
+        int s = (int)(work / nsr);
+        long long src = work % nsr;
+        long long index = (long long)s * iterations * nsr + (long long)iteration * nsr + src;
 
-        for (int s = 0; s < step; ++s) {
-            long long i = sourcelocation[s * nsr * 3 + src * 3 + 0];
-            long long j = sourcelocation[s * nsr * 3 + src * 3 + 1];
-            long long k = sourcelocation[s * nsr * 3 + src * 3 + 2];
+        long long i = sourcelocation[s * nsr * 3 + src * 3 + 0];
+        long long j = sourcelocation[s * nsr * 3 + src * 3 + 1];
+        long long k = sourcelocation[s * nsr * 3 + src * 3 + 2];
 
-            float waveform_value = srcwaveforms[index];
-            long long id4 = (long long)s * field_stride + i * NY * NZ + j * NZ + k;
+        float waveform_value = srcwaveforms[index];
+        long long id4 = (long long)s * field_stride + i * NY * NZ + j * NZ + k;
 
-            if (polarisation == 0) {
-                DEEPGPR_OMP_ATOMIC_UPDATE
-                Ex[id4] -= waveform_value;
-            } else if (polarisation == 1) {
-                DEEPGPR_OMP_ATOMIC_UPDATE
-                Ey[id4] -= waveform_value;
-            } else if (polarisation == 2) {
-                DEEPGPR_OMP_ATOMIC_UPDATE
-                Ez[id4] -= waveform_value;
-            }
-
-            index += index_stride;
+        if (polarisation == 0) {
+            DEEPGPR_OMP_ATOMIC_UPDATE
+            Ex[id4] -= waveform_value;
+        } else if (polarisation == 1) {
+            DEEPGPR_OMP_ATOMIC_UPDATE
+            Ey[id4] -= waveform_value;
+        } else if (polarisation == 2) {
+            DEEPGPR_OMP_ATOMIC_UPDATE
+            Ez[id4] -= waveform_value;
         }
     }
 }
@@ -826,23 +828,21 @@ static void copy_to_Eall_single_cpu(
     long long nx1 = NX - 1, ny1 = NY - 1, nz1 = NZ - 1;
     long long total = nx1 * ny1 * nz1;
     long long field_stride = (long long)NX * NY * NZ;
-    long long idx;
+    long long total_work = (long long)step * total;
+    long long work;
 
     DEEPGPR_OMP_PARALLEL_FOR
-    for (idx = 0; idx < total; ++idx) {
+    for (work = 0; work < total_work; ++work) {
+        int s = (int)(work / total);
+        long long idx = work % total;
         long long i = idx / (ny1 * nz1);
         long long rem = idx % (ny1 * nz1);
         long long j = rem / nz1;
         long long k = rem % nz1;
 
-        long long src_idx = i * NY * NZ + j * NZ + k;
-        long long dst_idx = (long long)t_idx * step * total + idx;
-
-        for (int s = 0; s < step; ++s) {
-            dst_ptr[dst_idx] = E[src_idx];
-            src_idx += field_stride;
-            dst_idx += total;
-        }
+        long long src_idx = (long long)s * field_stride + i * NY * NZ + j * NZ + k;
+        long long dst_idx = (long long)t_idx * step * total + (long long)s * total + idx;
+        dst_ptr[dst_idx] = E[src_idx];
     }
 }
 
@@ -887,10 +887,13 @@ static void accumulate_gradients_cpu(
     long long total_cells = sx * sy * sz;
     long long snap_stride = (long long)step * total_cells;
     long long component_stride = (long long)nt_saved * snap_stride;
-    long long idx;
+    long long total_work = (long long)step * total_cells;
+    long long work;
 
     DEEPGPR_OMP_PARALLEL_FOR
-    for (idx = 0; idx < total_cells; ++idx) {
+    for (work = 0; work < total_work; ++work) {
+        int s = (int)(work / total_cells);
+        long long idx = work % total_cells;
         long long ix = idx / (sy * sz);
         long long rem = idx % (sy * sz);
         long long iy = rem / sz;
@@ -906,39 +909,41 @@ static void accumulate_gradients_cpu(
         float w1_prev = (float)((i - 1) % S) / (float)S;
         float w0_prev = 1.0f - w1_prev;
 
-        long long idx_E = ix * NY * NZ + iy * NZ + iz;
         long long e_stride = (long long)NX * NY * NZ;
+        long long idx_E = (long long)s * e_stride + ix * NY * NZ + iy * NZ + iz;
         float local_grader = 0.0f;
         float local_gradse = 0.0f;
 
-        for (int s = 0; s < step; ++s) {
-            long long base_idx = (long long)s * total_cells + idx;
-            int components = (fwi_mode == 3) ? 3 : 1;
-            float adjoint_values[3];
-            adjoint_values[0] = Ex[idx_E];
-            adjoint_values[1] = Ey[idx_E];
-            adjoint_values[2] = Ez[idx_E];
+        long long base_idx = (long long)s * total_cells + idx;
+        int components = (fwi_mode == 3) ? 3 : 1;
+        float adjoint_values[3];
+        adjoint_values[0] = Ex[idx_E];
+        adjoint_values[1] = Ey[idx_E];
+        adjoint_values[2] = Ez[idx_E];
 
-            for (int c = 0; c < components; ++c) {
-                long long comp_offset = (fwi_mode == 3) ? (long long)c * component_stride : 0;
-                float e0_c = Eall_ptr[comp_offset + idx0_curr * snap_stride + base_idx];
-                float e1_c = Eall_ptr[comp_offset + idx1_curr * snap_stride + base_idx];
-                float e0_p = Eall_ptr[comp_offset + idx0_prev * snap_stride + base_idx];
-                float e1_p = Eall_ptr[comp_offset + idx1_prev * snap_stride + base_idx];
+        for (int c = 0; c < components; ++c) {
+            long long comp_offset = (fwi_mode == 3) ? (long long)c * component_stride : 0;
+            float e0_c = Eall_ptr[comp_offset + idx0_curr * snap_stride + base_idx];
+            float e1_c = Eall_ptr[comp_offset + idx1_curr * snap_stride + base_idx];
+            float e0_p = Eall_ptr[comp_offset + idx0_prev * snap_stride + base_idx];
+            float e1_p = Eall_ptr[comp_offset + idx1_prev * snap_stride + base_idx];
 
-                float e_curr = e0_c * w0_curr + e1_c * w1_curr;
-                float e_prev = e0_p * w0_prev + e1_p * w1_prev;
-                float adjoint_val = adjoint_values[(fwi_mode == 3) ? c : 2];
+            float e_curr = e0_c * w0_curr + e1_c * w1_curr;
+            float e_prev = e0_p * w0_prev + e1_p * w1_prev;
+            float adjoint_val = adjoint_values[(fwi_mode == 3) ? c : 2];
 
-                if (errequiregrad == 1) local_grader += (e_curr - e_prev) * adjoint_val / dt;
-                if (serequiregrad == 1) local_gradse += e_curr * adjoint_val * dt;
-            }
-
-            idx_E += e_stride;
+            if (errequiregrad == 1) local_grader += (e_curr - e_prev) * adjoint_val / dt;
+            if (serequiregrad == 1) local_gradse += e_curr * adjoint_val * dt;
         }
 
-        if (errequiregrad == 1) grader[idx] += local_grader;
-        if (serequiregrad == 1) gradse[idx] += local_gradse;
+        if (errequiregrad == 1) {
+            DEEPGPR_OMP_ATOMIC_UPDATE
+            grader[idx] += local_grader;
+        }
+        if (serequiregrad == 1) {
+            DEEPGPR_OMP_ATOMIC_UPDATE
+            gradse[idx] += local_gradse;
+        }
     }
 }
 

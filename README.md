@@ -127,7 +127,8 @@ def compute(device, dx=None, dt=None,
             model_gradient_sampling_interval=1,
             use_async_offload=False,
             fdtd_order=2,
-            mode=2):
+            mode=2,
+            debug=False):
 ```
 ## 📥 Input Parameters
 ### 1. Basic Physics & Grid Parameters
@@ -139,6 +140,7 @@ def compute(device, dx=None, dt=None,
 | **`dt`** | `float` | Time step size. **Note**: Must strictly satisfy the CFL (Courant-Friedrichs-Lewy) stability condition, or an exception will be raised. Typically in seconds (s). |
 | **`fdtd_order`** | `int` | Spatial finite-difference order used by the FDTD field updates. Supported values are `2`, `4`, and `8`; default is `2` for compatibility with earlier versions. |
 | **`mode`** | `int` | FWI gradient mode. `2` keeps the previous Ez-only model-gradient calculation. `3` uses Ex, Ey, and Ez electric-field contributions for relative permittivity and conductivity gradients. |
+| **`debug`** | `bool` | Runs expensive NaN/Inf and zero-field validation checks when `True`. The default `False` keeps these checks disabled for faster production runs. |
 ### 2. Medium Model Parameters
 
 This section defines the electromagnetic properties of the simulation space. For 2D simulations, set `nz=1`.

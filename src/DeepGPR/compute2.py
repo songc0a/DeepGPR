@@ -57,7 +57,8 @@ def compute(device, dx=None, dt=None,
             model_gradient_sampling_interval=1,
             use_async_offload=False,
             fdtd_order=2,
-            mode=2):
+            mode=2,
+            debug=False):
     """Run DeepGPR FDTD forward modeling with autograd support.
 
     Args:
@@ -80,6 +81,7 @@ def compute(device, dx=None, dt=None,
         use_async_offload: Whether CUDA should offload saved wavefields to pinned CPU memory.
         fdtd_order: Spatial finite-difference order, supported values are 2, 4, and 8.
         mode: FWI gradient mode; 2 uses Ez only, 3 uses Ex, Ey, and Ez.
+        debug: Whether to run expensive tensor validation checks.
     """
     device = torch.device(device)
     if fdtd_order not in (2, 4, 8):
@@ -97,7 +99,7 @@ def compute(device, dx=None, dt=None,
     x0EPhi1,x0EPhi2,x0HPhi1,x0HPhi2,xmEPhi1,xmEPhi2,xmHPhi1,xmHPhi2,y0EPhi1,y0EPhi2,y0HPhi1,y0HPhi2,ymEPhi1,ymEPhi2,ymHPhi1,ymHPhi2,z0EPhi1,z0EPhi2,z0HPhi1,z0HPhi2,zmEPhi1,zmEPhi2,zmHPhi1,zmHPhi2=build_pml_phi(x0,xm,y0,ym,z0,zm,nstep,PML,device)
 
     Ex,Ey,Ez,Hx,Hy,Hz,x0EPhi1,x0EPhi2,x0HPhi1,x0HPhi2,xmEPhi1,xmEPhi2,xmHPhi1,xmHPhi2,y0EPhi1,y0EPhi2,y0HPhi1,y0HPhi2,ymEPhi1,ymEPhi2,ymHPhi1,ymHPhi2,z0EPhi1,z0EPhi2,z0HPhi1,z0HPhi2,zmEPhi1,zmEPhi2,zmHPhi1,zmHPhi2,Eall,receiver_amplitudes = DeepGPR.apply(
-        er, se,Ex,Ey,Ez,Hx,Hy,Hz,x0EPhi1,x0EPhi2,x0HPhi1,x0HPhi2,xmEPhi1,xmEPhi2,xmHPhi1,xmHPhi2,y0EPhi1,y0EPhi2,y0HPhi1,y0HPhi2,ymEPhi1,ymEPhi2,ymHPhi1,ymHPhi2,z0EPhi1,z0EPhi2,z0HPhi1,z0HPhi2,zmEPhi1,zmEPhi2,zmHPhi1,zmHPhi2, mr,dx,nx,ny,nz,dt,nt,nstep,source_amplitudes,source_location,receiver_location,pmlthick,nsr,nrx,device,dtype,x0,xm,y0,ym,z0,zm,x01,x02,xm1,xm2,y01,y02,ym1,ym2,z01,z02,zm1,zm2,ere,see,source_direction, reciever_direction, model_gradient_sampling_interval, use_async_offload, fdtd_order, mode)
+        er, se,Ex,Ey,Ez,Hx,Hy,Hz,x0EPhi1,x0EPhi2,x0HPhi1,x0HPhi2,xmEPhi1,xmEPhi2,xmHPhi1,xmHPhi2,y0EPhi1,y0EPhi2,y0HPhi1,y0HPhi2,ymEPhi1,ymEPhi2,ymHPhi1,ymHPhi2,z0EPhi1,z0EPhi2,z0HPhi1,z0HPhi2,zmEPhi1,zmEPhi2,zmHPhi1,zmHPhi2, mr,dx,nx,ny,nz,dt,nt,nstep,source_amplitudes,source_location,receiver_location,pmlthick,nsr,nrx,device,dtype,x0,xm,y0,ym,z0,zm,x01,x02,xm1,xm2,y01,y02,ym1,ym2,z01,z02,zm1,zm2,ere,see,source_direction, reciever_direction, model_gradient_sampling_interval, use_async_offload, fdtd_order, mode, debug)
 
     return Eall,(Ex,Ey,Ez),(Hx,Hy,Hz),(x0EPhi1,x0EPhi2,x0HPhi1,x0HPhi2,xmEPhi1,xmEPhi2,xmHPhi1,xmHPhi2,y0EPhi1,y0EPhi2,y0HPhi1,y0HPhi2,ymEPhi1,ymEPhi2,ymHPhi1,ymHPhi2,z0EPhi1,z0EPhi2,z0HPhi1,z0HPhi2,zmEPhi1,zmEPhi2,zmHPhi1,zmHPhi2),receiver_amplitudes
 
@@ -112,7 +114,7 @@ class DeepGPR(torch.autograd.Function):
                 y0,ym,z0,zm,x01,x02,xm1,xm2,
                 y01,y02,ym1,ym2,z01,z02,zm1,zm2,
                 ere,see,source_direction, reciever_direction, 
-                model_gradient_sampling_interval, use_async_offload, fdtd_order, mode):
+                model_gradient_sampling_interval, use_async_offload, fdtd_order, mode, debug):
         """Call the native forward solver and save tensors for backward.
 
         Args:
@@ -155,6 +157,7 @@ class DeepGPR(torch.autograd.Function):
             use_async_offload: Whether CUDA should offload saved wavefields to pinned CPU memory.
             fdtd_order: Spatial finite-difference order.
             mode: FWI gradient mode; 2 uses Ez only, 3 uses Ex, Ey, and Ez.
+            debug: Whether to run expensive tensor validation checks.
         """
         
         source_amplitudes = source_amplitudes.contiguous()
@@ -179,6 +182,7 @@ class DeepGPR(torch.autograd.Function):
         ctx.use_async_offload = bool(use_async_offload and device.type == "cuda")
         ctx.fdtd_order = fdtd_order
         ctx.mode = mode
+        ctx.debug = bool(debug)
 
         nt_saved = (nt + model_gradient_sampling_interval - 1) // model_gradient_sampling_interval
         e_components = 3 if mode == 3 else 1
@@ -252,23 +256,24 @@ class DeepGPR(torch.autograd.Function):
                 mode)
         _sync_cuda_device(device)
 
-        check_tensors_for_nan_inf(d="forward",
-            Ex=Ex, Ey=Ey, Ez=Ez,
-            Hx=Hx, Hy=Hy, Hz=Hz,
-            x0EPhi1=x0EPhi1, x0EPhi2=x0EPhi2,
-            x0HPhi1=x0HPhi1, x0HPhi2=x0HPhi2,
-            xmEPhi1=xmEPhi1, xmEPhi2=xmEPhi2,
-            xmHPhi1=xmHPhi1, xmHPhi2=xmHPhi2,
-            y0EPhi1=y0EPhi1, y0EPhi2=y0EPhi2,
-            y0HPhi1=y0HPhi1, y0HPhi2=y0HPhi2,
-            ymEPhi1=ymEPhi1, ymEPhi2=ymEPhi2,
-            ymHPhi1=ymHPhi1, ymHPhi2=ymHPhi2,
-            z0EPhi1=z0EPhi1, z0EPhi2=z0EPhi2,
-            z0HPhi1=z0HPhi1, z0HPhi2=z0HPhi2,
-            zmEPhi1=zmEPhi1, zmEPhi2=zmEPhi2,
-            zmHPhi1=zmHPhi1, zmHPhi2=zmHPhi2
-        )
-        _check_nonzero_source_created_fields(c_lib, source_amplitudes, Ex, Ey, Ez, Hx, Hy, Hz)
+        if ctx.debug:
+            check_tensors_for_nan_inf(d="forward",
+                Ex=Ex, Ey=Ey, Ez=Ez,
+                Hx=Hx, Hy=Hy, Hz=Hz,
+                x0EPhi1=x0EPhi1, x0EPhi2=x0EPhi2,
+                x0HPhi1=x0HPhi1, x0HPhi2=x0HPhi2,
+                xmEPhi1=xmEPhi1, xmEPhi2=xmEPhi2,
+                xmHPhi1=xmHPhi1, xmHPhi2=xmHPhi2,
+                y0EPhi1=y0EPhi1, y0EPhi2=y0EPhi2,
+                y0HPhi1=y0HPhi1, y0HPhi2=y0HPhi2,
+                ymEPhi1=ymEPhi1, ymEPhi2=ymEPhi2,
+                ymHPhi1=ymHPhi1, ymHPhi2=ymHPhi2,
+                z0EPhi1=z0EPhi1, z0EPhi2=z0EPhi2,
+                z0HPhi1=z0HPhi1, z0HPhi2=z0HPhi2,
+                zmEPhi1=zmEPhi1, zmEPhi2=zmEPhi2,
+                zmHPhi1=zmHPhi1, zmHPhi2=zmHPhi2
+            )
+            _check_nonzero_source_created_fields(c_lib, source_amplitudes, Ex, Ey, Ez, Hx, Hy, Hz)
 
         ctx.Eall = Eall
         return (Ex,Ey,Ez,Hx,Hy,Hz,x0EPhi1,x0EPhi2,x0HPhi1,x0HPhi2,xmEPhi1,xmEPhi2,xmHPhi1,xmHPhi2,y0EPhi1,y0EPhi2,y0HPhi1,y0HPhi2,ymEPhi1,ymEPhi2,ymHPhi1,ymHPhi2,z0EPhi1,z0EPhi2,z0HPhi1,z0HPhi2,zmEPhi1,zmEPhi2,zmHPhi1,zmHPhi2,Eall,receiver_amplitudes[:,reciever_direction,:,:])
@@ -462,7 +467,8 @@ class DeepGPR(torch.autograd.Function):
         if serequiregrad == 1:
             tensors_to_check["grad_se"] = grad_se
 
-        check_tensors_for_nan_inf(d="backward", **tensors_to_check)
+        if ctx.debug:
+            check_tensors_for_nan_inf(d="backward", **tensors_to_check)
 
         ctx.Eall = None
         del Eall,er, se, mr,receiver_location,x0,xm,y0,ym,z0,zm,x01,x02,xm1,xm2,y01,y02,ym1,ym2,z01,z02,zm1,zm2,ere,see, Eupdatecoffs0, Eupdatecoffs1, Eupdatecoffs4, Hupdatecoffs0, Hupdatecoffs1, Hupdatecoffs4
@@ -481,5 +487,5 @@ class DeepGPR(torch.autograd.Function):
                     None, None, None, None, None, None, None, None,
                     None, None, None, None, None, None, None, None, 
                     None, None, None, None, None, None, None, None, 
-                    None, None, None
+                    None, None, None, None
                 )
