@@ -166,6 +166,50 @@ __device__ __forceinline__ float staggered_forward_diff(
     return acc;
 }
 
+template<int ORDER>
+struct FdtdStaticRadius
+{
+    enum { value = (ORDER >= 8) ? 4 : ((ORDER >= 4) ? 2 : 1) };
+};
+
+template<int ORDER>
+__device__ __forceinline__ float staggered_backward_diff_static(
+    const float* __restrict__ f, long long id, long long stride,
+    long long coord, long long n)
+{
+    const int requested = FdtdStaticRadius<ORDER>::value;
+    if (requested == 1) return f[id] - f[id - stride];
+
+    int radius = usable_backward_radius(coord, n, requested);
+    float acc = 0.0f;
+#pragma unroll
+    for (int r = 1; r <= requested; ++r) {
+        if (r <= radius) {
+            acc += fdtd_coeff(radius, r) * (f[id + (long long)(r - 1) * stride] - f[id - (long long)r * stride]);
+        }
+    }
+    return acc;
+}
+
+template<int ORDER>
+__device__ __forceinline__ float staggered_forward_diff_static(
+    const float* __restrict__ f, long long id, long long stride,
+    long long coord, long long n)
+{
+    const int requested = FdtdStaticRadius<ORDER>::value;
+    if (requested == 1) return f[id + stride] - f[id];
+
+    int radius = usable_forward_radius(coord, n, requested);
+    float acc = 0.0f;
+#pragma unroll
+    for (int r = 1; r <= requested; ++r) {
+        if (r <= radius) {
+            acc += fdtd_coeff(radius, r) * (f[id + (long long)r * stride] - f[id - (long long)(r - 1) * stride]);
+        }
+    }
+    return acc;
+}
+
 /*
  * Build forward-update coefficients for electric and magnetic fields.
  *
@@ -347,26 +391,54 @@ __global__ void Update_hertzian_dipole(
 }
 
 
+template<int ORDER>
+__global__ void e_fields_base_update_gpu(
+    const float* __restrict__ uE0, const float* __restrict__ uE1,
+    float* __restrict__ Ex, float* __restrict__ Ey, float* __restrict__ Ez,
+    const float* __restrict__ Hx, const float* __restrict__ Hy, const float* __restrict__ Hz,
+    int step, int NX_FIELDS, int NY_FIELDS, int NZ_FIELDS)
+{
+    long long ny_nz = (long long)NY_FIELDS * NZ_FIELDS;
+    long long field_stride = (long long)NX_FIELDS * ny_nz;
+    long long work = blockIdx.x * blockDim.x + threadIdx.x;
+    if (work >= (long long)step * field_stride) return;
+
+    long long idx = work % field_stride;
+    long long i = idx / ny_nz;
+    long long rem = idx % ny_nz;
+    long long j = rem / NZ_FIELDS;
+    long long k = rem % NZ_FIELDS;
+    long long id4 = work;
+
+    float ue0 = uE0[idx];
+    float ue1 = uE1[idx];
+
+    bool do_ex = (((NY_FIELDS - 1) != 1 || (NZ_FIELDS - 1) != 1) && i < (NX_FIELDS - 1) && j > 0 && j < (NY_FIELDS - 1) && k > 0 && k < (NZ_FIELDS - 1));
+    bool do_ey = (((NX_FIELDS - 1) != 1 || (NZ_FIELDS - 1) != 1) && i > 0 && i < (NX_FIELDS - 1) && j < (NY_FIELDS - 1) && k > 0 && k < (NZ_FIELDS - 1));
+    bool do_ez = (((NX_FIELDS - 1) != 1 || (NY_FIELDS - 1) != 1) && i > 0 && i < (NX_FIELDS - 1) && j > 0 && j < (NY_FIELDS - 1) && k < (NZ_FIELDS - 1));
+
+    if (do_ex) {
+        float dHz_dy = staggered_backward_diff_static<ORDER>(Hz, id4, NZ_FIELDS, j, NY_FIELDS);
+        float dHy_dz = staggered_backward_diff_static<ORDER>(Hy, id4, 1, k, NZ_FIELDS);
+        Ex[id4] = ue0 * Ex[id4] + ue1 * dHz_dy - ue1 * dHy_dz;
+    }
+    if (do_ey) {
+        float dHx_dz = staggered_backward_diff_static<ORDER>(Hx, id4, 1, k, NZ_FIELDS);
+        float dHz_dx = staggered_backward_diff_static<ORDER>(Hz, id4, ny_nz, i, NX_FIELDS);
+        Ey[id4] = ue0 * Ey[id4] + ue1 * dHx_dz - ue1 * dHz_dx;
+    }
+    if (do_ez) {
+        float dHy_dx = staggered_backward_diff_static<ORDER>(Hy, id4, ny_nz, i, NX_FIELDS);
+        float dHx_dy = staggered_backward_diff_static<ORDER>(Hx, id4, NZ_FIELDS, j, NY_FIELDS);
+        Ez[id4] = ue0 * Ez[id4] + ue1 * dHy_dx - ue1 * dHx_dy;
+    }
+}
+
 /*
- * Update electric fields and electric CPML auxiliary fields.
- *
- * Parameters:
- *   uE0, uE1: Electric-field update coefficient arrays.
- *   Ex, Ey, Ez: Electric field component arrays to update.
- *   Hx, Hy, Hz: Magnetic field component arrays used by the curl update.
- *   dx, dy, dz: Spatial grid spacings.
- *   step: Number of shots or simulations in the batch.
- *   NX_FIELDS, NY_FIELDS, NZ_FIELDS: Padded field grid sizes.
- *   pml0, pml1, pml2, pml3, pml4, pml5: PML thickness for x0, xm, y0, ym, z0, zm.
- *   x0ER, xmER, y0ER, ymER, z0ER, zmER: Electric PML coefficient arrays.
- *   updatecoeffsE: Electric PML scaling coefficient array.
- *   x0EPhi1, x0EPhi2, xmEPhi1, xmEPhi2: X-boundary electric PML auxiliary arrays.
- *   y0EPhi1, y0EPhi2, ymEPhi1, ymEPhi2: Y-boundary electric PML auxiliary arrays.
- *   z0EPhi1, z0EPhi2, zmEPhi1, zmEPhi2: Z-boundary electric PML auxiliary arrays.
- *   fdtd_order: Spatial finite-difference order.
+ * Apply electric CPML boundary corrections after the base electric-field update.
  */
-__global__ void fused_e_fields_updates_gpu(
-    const float* __restrict__ uE0, const float* __restrict__ uE1,  
+template<int ORDER>
+__global__ void pml_e_fields_update_gpu(
     float* __restrict__ Ex, float* __restrict__ Ey, float* __restrict__ Ez,  
     const float* __restrict__ Hx, const float* __restrict__ Hy, const float* __restrict__ Hz,
     float dx, float dy, float dz,
@@ -381,8 +453,7 @@ __global__ void fused_e_fields_updates_gpu(
     float* __restrict__ y0EPhi1, float* __restrict__ y0EPhi2,
     float* __restrict__ ymEPhi1, float* __restrict__ ymEPhi2,
     float* __restrict__ z0EPhi1, float* __restrict__ z0EPhi2,
-    float* __restrict__ zmEPhi1, float* __restrict__ zmEPhi2,
-    int fdtd_order)
+    float* __restrict__ zmEPhi1, float* __restrict__ zmEPhi2)
 {
     long long ny_nz = (long long)NY_FIELDS * NZ_FIELDS;
     long long field_stride = (long long)NX_FIELDS * ny_nz;
@@ -397,52 +468,31 @@ __global__ void fused_e_fields_updates_gpu(
     long long j = rem / NZ_FIELDS;
     long long k = rem % NZ_FIELDS;
 
-    bool do_ex = (((NY_FIELDS-1) != 1 || (NZ_FIELDS-1) != 1) && i < (NX_FIELDS-1) && j > 0 && j < (NY_FIELDS-1) && k > 0 && k < (NZ_FIELDS-1));
-    bool do_ey = (((NX_FIELDS-1) != 1 || (NZ_FIELDS-1) != 1) && i > 0 && i < (NX_FIELDS-1) && j < (NY_FIELDS-1) && k > 0 && k < (NZ_FIELDS-1));
-    bool do_ez = (((NX_FIELDS-1) != 1 || (NY_FIELDS-1) != 1) && i > 0 && i < (NX_FIELDS-1) && j > 0 && j < (NY_FIELDS-1) && k < (NZ_FIELDS-1));
-
     bool in_x0 = (pml0 > 0 && i > 0 && i <= pml0 && j < NY_FIELDS && k < NZ_FIELDS);
     bool in_xm = (pml1 > 0 && i >= NX_FIELDS - 1 - pml1 && i < NX_FIELDS - 1 && j < NY_FIELDS && k < NZ_FIELDS);
     bool in_y0 = (pml2 > 0 && i < NX_FIELDS && j > 0 && j <= pml2 && k < NZ_FIELDS);
     bool in_ym = (pml3 > 0 && i < NX_FIELDS && j >= NY_FIELDS - 1 - pml3 && j < NY_FIELDS - 1 && k < NZ_FIELDS);
     bool in_z0 = (pml4 > 0 && i < NX_FIELDS && j < NY_FIELDS && k > 0 && k <= pml4);
     bool in_zm = (pml5 > 0 && i < NX_FIELDS && j < NY_FIELDS && k >= NZ_FIELDS - 1 - pml5 && k < NZ_FIELDS - 1);
+    if (!(in_x0 || in_xm || in_y0 || in_ym || in_z0 || in_zm)) return;
 
-    float ue0 = uE0[idx];
-    float ue1 = uE1[idx];
     float upd = updatecoeffsE[idx];
 
     long long id4 = work;
 
     {
-        if (do_ex) {
-            float dHz_dy = staggered_backward_diff(Hz, id4, NZ_FIELDS, j, NY_FIELDS, fdtd_order);
-            float dHy_dz = staggered_backward_diff(Hy, id4, 1, k, NZ_FIELDS, fdtd_order);
-            Ex[id4] = ue0 * Ex[id4] + ue1 * dHz_dy - ue1 * dHy_dz;
-        }
-        if (do_ey) {
-            float dHx_dz = staggered_backward_diff(Hx, id4, 1, k, NZ_FIELDS, fdtd_order);
-            float dHz_dx = staggered_backward_diff(Hz, id4, ny_nz, i, NX_FIELDS, fdtd_order);
-            Ey[id4] = ue0 * Ey[id4] + ue1 * dHx_dz - ue1 * dHz_dx;
-        }
-        if (do_ez) {
-            float dHy_dx = staggered_backward_diff(Hy, id4, ny_nz, i, NX_FIELDS, fdtd_order);
-            float dHx_dy = staggered_backward_diff(Hx, id4, NZ_FIELDS, j, NY_FIELDS, fdtd_order);
-            Ez[id4] = ue0 * Ez[id4] + ue1 * dHy_dx - ue1 * dHx_dy;
-        }
-
         if (in_x0) {
             long long i1 = pml0 - i;
             float RA01 = x0ER[i1] - 1.0f, RB0 = x0ER[pml0 + i1], RE0 = x0ER[2 * pml0 + i1], RF0 = x0ER[3 * pml0 + i1];
             if (j < NY_FIELDS - 1 && i > 0) {
-                float dHz = staggered_backward_diff(Hz, id4, ny_nz, i, NX_FIELDS, fdtd_order) / dx;
+                float dHz = staggered_backward_diff_static<ORDER>(Hz, id4, ny_nz, i, NX_FIELDS) / dx;
                 long long p_idx = ((long long)s * (pml0+1) * (NY_FIELDS-1) * NZ_FIELDS) + i1 * (NY_FIELDS-1) * NZ_FIELDS + j * NZ_FIELDS + k;
                 float phi = x0EPhi1[p_idx];
                 Ey[id4] -= upd * (RA01 * dHz + RB0 * phi);
                 x0EPhi1[p_idx] = RE0 * phi - RF0 * dHz;
             }
             if (k < NZ_FIELDS - 1 && i > 0) {
-                float dHy = staggered_backward_diff(Hy, id4, ny_nz, i, NX_FIELDS, fdtd_order) / dx;
+                float dHy = staggered_backward_diff_static<ORDER>(Hy, id4, ny_nz, i, NX_FIELDS) / dx;
                 long long p_idx = ((long long)s * (pml0+1) * NY_FIELDS * (NZ_FIELDS-1)) + i1 * NY_FIELDS * (NZ_FIELDS-1) + j * (NZ_FIELDS-1) + k;
                 float phi = x0EPhi2[p_idx];
                 Ez[id4] += upd * (RA01 * dHy + RB0 * phi);
@@ -454,14 +504,14 @@ __global__ void fused_e_fields_updates_gpu(
             long long i1 = i - (NX_FIELDS - 1 - pml1);
             float RA01 = xmER[i1] - 1.0f, RB0 = xmER[pml1 + i1], RE0 = xmER[2 * pml1 + i1], RF0 = xmER[3 * pml1 + i1];
             if (j < NY_FIELDS - 1 && i > 0) {
-                float dHz = staggered_backward_diff(Hz, id4, ny_nz, i, NX_FIELDS, fdtd_order) / dx;
+                float dHz = staggered_backward_diff_static<ORDER>(Hz, id4, ny_nz, i, NX_FIELDS) / dx;
                 long long p_idx = ((long long)s * (pml1+1) * (NY_FIELDS-1) * NZ_FIELDS) + i1 * (NY_FIELDS-1) * NZ_FIELDS + j * NZ_FIELDS + k;
                 float phi = xmEPhi1[p_idx];
                 Ey[id4] -= upd * (RA01 * dHz + RB0 * phi);
                 xmEPhi1[p_idx] = RE0 * phi - RF0 * dHz;
             }
             if (k < NZ_FIELDS - 1 && i > 0) {
-                float dHy = staggered_backward_diff(Hy, id4, ny_nz, i, NX_FIELDS, fdtd_order) / dx;
+                float dHy = staggered_backward_diff_static<ORDER>(Hy, id4, ny_nz, i, NX_FIELDS) / dx;
                 long long p_idx = ((long long)s * (pml1+1) * NY_FIELDS * (NZ_FIELDS-1)) + i1 * NY_FIELDS * (NZ_FIELDS-1) + j * (NZ_FIELDS-1) + k;
                 float phi = xmEPhi2[p_idx];
                 Ez[id4] += upd * (RA01 * dHy + RB0 * phi);
@@ -473,14 +523,14 @@ __global__ void fused_e_fields_updates_gpu(
             long long j1 = pml2 - j;
             float RA01 = y0ER[j1] - 1.0f, RB0 = y0ER[pml2 + j1], RE0 = y0ER[2 * pml2 + j1], RF0 = y0ER[3 * pml2 + j1];
             if (i < NX_FIELDS - 1 && j > 0) {
-                float dHz = staggered_backward_diff(Hz, id4, NZ_FIELDS, j, NY_FIELDS, fdtd_order) / dy;
+                float dHz = staggered_backward_diff_static<ORDER>(Hz, id4, NZ_FIELDS, j, NY_FIELDS) / dy;
                 long long p_idx = ((long long)s * (NX_FIELDS-1) * (pml2+1) * NZ_FIELDS) + i * (pml2+1) * NZ_FIELDS + j1 * NZ_FIELDS + k;
                 float phi = y0EPhi1[p_idx];
                 Ex[id4] += upd * (RA01 * dHz + RB0 * phi);
                 y0EPhi1[p_idx] = RE0 * phi - RF0 * dHz;
             }
             if (k < NZ_FIELDS - 1 && j > 0) {
-                float dHx = staggered_backward_diff(Hx, id4, NZ_FIELDS, j, NY_FIELDS, fdtd_order) / dy;
+                float dHx = staggered_backward_diff_static<ORDER>(Hx, id4, NZ_FIELDS, j, NY_FIELDS) / dy;
                 long long p_idx = ((long long)s * NX_FIELDS * (pml2+1) * (NZ_FIELDS-1)) + i * (pml2+1) * (NZ_FIELDS-1) + j1 * (NZ_FIELDS-1) + k;
                 float phi = y0EPhi2[p_idx];
                 Ez[id4] -= upd * (RA01 * dHx + RB0 * phi);
@@ -492,14 +542,14 @@ __global__ void fused_e_fields_updates_gpu(
             long long j1 = j - (NY_FIELDS - 1 - pml3);
             float RA01 = ymER[j1] - 1.0f, RB0 = ymER[pml3 + j1], RE0 = ymER[2 * pml3 + j1], RF0 = ymER[3 * pml3 + j1];
             if (i < NX_FIELDS - 1 && j > 0) {
-                float dHz = staggered_backward_diff(Hz, id4, NZ_FIELDS, j, NY_FIELDS, fdtd_order) / dy;
+                float dHz = staggered_backward_diff_static<ORDER>(Hz, id4, NZ_FIELDS, j, NY_FIELDS) / dy;
                 long long p_idx = ((long long)s * (NX_FIELDS-1) * (pml3+1) * NZ_FIELDS) + i * (pml3+1) * NZ_FIELDS + j1 * NZ_FIELDS + k;
                 float phi = ymEPhi1[p_idx];
                 Ex[id4] += upd * (RA01 * dHz + RB0 * phi);
                 ymEPhi1[p_idx] = RE0 * phi - RF0 * dHz;
             }
             if (k < NZ_FIELDS - 1 && j > 0) {
-                float dHx = staggered_backward_diff(Hx, id4, NZ_FIELDS, j, NY_FIELDS, fdtd_order) / dy;
+                float dHx = staggered_backward_diff_static<ORDER>(Hx, id4, NZ_FIELDS, j, NY_FIELDS) / dy;
                 long long p_idx = ((long long)s * NX_FIELDS * (pml3+1) * (NZ_FIELDS-1)) + i * (pml3+1) * (NZ_FIELDS-1) + j1 * (NZ_FIELDS-1) + k;
                 float phi = ymEPhi2[p_idx];
                 Ez[id4] -= upd * (RA01 * dHx + RB0 * phi);
@@ -511,14 +561,14 @@ __global__ void fused_e_fields_updates_gpu(
             long long k1 = pml4 - k;
             float RA01 = z0ER[k1] - 1.0f, RB0 = z0ER[pml4 + k1], RE0 = z0ER[2 * pml4 + k1], RF0 = z0ER[3 * pml4 + k1];
             if (i < NX_FIELDS - 1 && k > 0) {
-                float dHy = staggered_backward_diff(Hy, id4, 1, k, NZ_FIELDS, fdtd_order) / dz;
+                float dHy = staggered_backward_diff_static<ORDER>(Hy, id4, 1, k, NZ_FIELDS) / dz;
                 long long p_idx = ((long long)s * (NX_FIELDS-1) * NY_FIELDS * (pml4+1)) + i * NY_FIELDS * (pml4+1) + j * (pml4+1) + k1;
                 float phi = z0EPhi1[p_idx];
                 Ex[id4] -= upd * (RA01 * dHy + RB0 * phi);
                 z0EPhi1[p_idx] = RE0 * phi - RF0 * dHy;
             }
             if (j < NY_FIELDS - 1 && k > 0) {
-                float dHx = staggered_backward_diff(Hx, id4, 1, k, NZ_FIELDS, fdtd_order) / dz;
+                float dHx = staggered_backward_diff_static<ORDER>(Hx, id4, 1, k, NZ_FIELDS) / dz;
                 long long p_idx = ((long long)s * NX_FIELDS * (NY_FIELDS-1) * (pml4+1)) + i * (NY_FIELDS-1) * (pml4+1) + j * (pml4+1) + k1;
                 float phi = z0EPhi2[p_idx];
                 Ey[id4] += upd * (RA01 * dHx + RB0 * phi);
@@ -530,14 +580,14 @@ __global__ void fused_e_fields_updates_gpu(
             long long k1 = k - (NZ_FIELDS - 1 - pml5);
             float RA01 = zmER[k1] - 1.0f, RB0 = zmER[pml5 + k1], RE0 = zmER[2 * pml5 + k1], RF0 = zmER[3 * pml5 + k1];
             if (i < NX_FIELDS - 1 && k > 0) {
-                float dHy = staggered_backward_diff(Hy, id4, 1, k, NZ_FIELDS, fdtd_order) / dz;
+                float dHy = staggered_backward_diff_static<ORDER>(Hy, id4, 1, k, NZ_FIELDS) / dz;
                 long long p_idx = ((long long)s * (NX_FIELDS-1) * NY_FIELDS * (pml5+1)) + i * NY_FIELDS * (pml5+1) + j * (pml5+1) + k1;
                 float phi = zmEPhi1[p_idx];
                 Ex[id4] -= upd * (RA01 * dHy + RB0 * phi);
                 zmEPhi1[p_idx] = RE0 * phi - RF0 * dHy;
             }
             if (j < NY_FIELDS - 1 && k > 0) {
-                float dHx = staggered_backward_diff(Hx, id4, 1, k, NZ_FIELDS, fdtd_order) / dz;
+                float dHx = staggered_backward_diff_static<ORDER>(Hx, id4, 1, k, NZ_FIELDS) / dz;
                 long long p_idx = ((long long)s * NX_FIELDS * (NY_FIELDS-1) * (pml5+1)) + i * (NY_FIELDS-1) * (pml5+1) + j * (pml5+1) + k1;
                 float phi = zmEPhi2[p_idx];
                 Ey[id4] += upd * (RA01 * dHx + RB0 * phi);
@@ -548,26 +598,54 @@ __global__ void fused_e_fields_updates_gpu(
 }
 
 
-/*
- * Update magnetic fields and magnetic CPML auxiliary fields.
- *
- * Parameters:
- *   uH0, uH1: Magnetic-field update coefficient arrays.
- *   Ex, Ey, Ez: Electric field component arrays used by the curl update.
- *   Hx, Hy, Hz: Magnetic field component arrays to update.
- *   dx, dy, dz: Spatial grid spacings.
- *   step: Number of shots or simulations in the batch.
- *   NX_FIELDS, NY_FIELDS, NZ_FIELDS: Padded field grid sizes.
- *   pml0, pml1, pml2, pml3, pml4, pml5: PML thickness for x0, xm, y0, ym, z0, zm.
- *   x0HR, xmHR, y0HR, ymHR, z0HR, zmHR: Magnetic PML coefficient arrays.
- *   updatecoeffsH: Magnetic PML scaling coefficient array.
- *   x0HPhi1, x0HPhi2, xmHPhi1, xmHPhi2: X-boundary magnetic PML auxiliary arrays.
- *   y0HPhi1, y0HPhi2, ymHPhi1, ymHPhi2: Y-boundary magnetic PML auxiliary arrays.
- *   z0HPhi1, z0HPhi2, zmHPhi1, zmHPhi2: Z-boundary magnetic PML auxiliary arrays.
- *   fdtd_order: Spatial finite-difference order.
- */
-__global__ void fused_h_fields_updates_gpu(
+template<int ORDER>
+__global__ void h_fields_base_update_gpu(
     const float* __restrict__ uH0, const float* __restrict__ uH1,
+    const float* __restrict__ Ex, const float* __restrict__ Ey, const float* __restrict__ Ez,
+    float* __restrict__ Hx, float* __restrict__ Hy, float* __restrict__ Hz,
+    int step, int NX_FIELDS, int NY_FIELDS, int NZ_FIELDS)
+{
+    long long ny_nz = (long long)NY_FIELDS * NZ_FIELDS;
+    long long field_stride = (long long)NX_FIELDS * ny_nz;
+    long long work = blockIdx.x * blockDim.x + threadIdx.x;
+    if (work >= (long long)step * field_stride) return;
+
+    long long idx = work % field_stride;
+    long long i = idx / ny_nz;
+    long long rem = idx % ny_nz;
+    long long j = rem / NZ_FIELDS;
+    long long k = rem % NZ_FIELDS;
+    long long id4 = work;
+
+    float uh0 = uH0[idx];
+    float uh1 = uH1[idx];
+
+    bool do_hx = ((NX_FIELDS - 1) != 1 && i > 0 && i < (NX_FIELDS - 1) && j < (NY_FIELDS - 1) && k < (NZ_FIELDS - 1));
+    bool do_hy = ((NY_FIELDS - 1) != 1 && i < (NX_FIELDS - 1) && j > 0 && j < (NY_FIELDS - 1) && k < (NZ_FIELDS - 1));
+    bool do_hz = ((NZ_FIELDS - 1) != 1 && i < (NX_FIELDS - 1) && j < (NY_FIELDS - 1) && k > 0 && k < (NZ_FIELDS - 1));
+
+    if (do_hx) {
+        float dEz_dy = staggered_forward_diff_static<ORDER>(Ez, id4, NZ_FIELDS, j, NY_FIELDS);
+        float dEy_dz = staggered_forward_diff_static<ORDER>(Ey, id4, 1, k, NZ_FIELDS);
+        Hx[id4] = uh0 * Hx[id4] - uh1 * dEz_dy + uh1 * dEy_dz;
+    }
+    if (do_hy) {
+        float dEx_dz = staggered_forward_diff_static<ORDER>(Ex, id4, 1, k, NZ_FIELDS);
+        float dEz_dx = staggered_forward_diff_static<ORDER>(Ez, id4, ny_nz, i, NX_FIELDS);
+        Hy[id4] = uh0 * Hy[id4] - uh1 * dEx_dz + uh1 * dEz_dx;
+    }
+    if (do_hz) {
+        float dEy_dx = staggered_forward_diff_static<ORDER>(Ey, id4, ny_nz, i, NX_FIELDS);
+        float dEx_dy = staggered_forward_diff_static<ORDER>(Ex, id4, NZ_FIELDS, j, NY_FIELDS);
+        Hz[id4] = uh0 * Hz[id4] - uh1 * dEy_dx + uh1 * dEx_dy;
+    }
+}
+
+/*
+ * Apply magnetic CPML boundary corrections after the base magnetic-field update.
+ */
+template<int ORDER>
+__global__ void pml_h_fields_update_gpu(
     const float* __restrict__ Ex, const float* __restrict__ Ey, const float* __restrict__ Ez,
     float* __restrict__ Hx, float* __restrict__ Hy, float* __restrict__ Hz,
     float dx, float dy, float dz,
@@ -582,8 +660,7 @@ __global__ void fused_h_fields_updates_gpu(
     float* __restrict__ y0HPhi1, float* __restrict__ y0HPhi2,
     float* __restrict__ ymHPhi1, float* __restrict__ ymHPhi2,
     float* __restrict__ z0HPhi1, float* __restrict__ z0HPhi2,
-    float* __restrict__ zmHPhi1, float* __restrict__ zmHPhi2,
-    int fdtd_order)
+    float* __restrict__ zmHPhi1, float* __restrict__ zmHPhi2)
 {
     long long ny_nz = (long long)NY_FIELDS * NZ_FIELDS;
     long long field_stride = (long long)NX_FIELDS * ny_nz;
@@ -598,52 +675,31 @@ __global__ void fused_h_fields_updates_gpu(
     long long j = rem / NZ_FIELDS;
     long long k = rem % NZ_FIELDS;
 
-    bool do_hx = ((NX_FIELDS-1) != 1 && i > 0 && i < (NX_FIELDS-1) && j < (NY_FIELDS-1) && k < (NZ_FIELDS-1));
-    bool do_hy = ((NY_FIELDS-1) != 1 && i < (NX_FIELDS-1) && j > 0 && j < (NY_FIELDS-1) && k < (NZ_FIELDS-1));
-    bool do_hz = ((NZ_FIELDS-1) != 1 && i < (NX_FIELDS-1) && j < (NY_FIELDS-1) && k > 0 && k < (NZ_FIELDS-1));
-
     bool in_x0 = (pml0 > 0 && i < pml0 && j < NY_FIELDS && k < NZ_FIELDS);
     bool in_xm = (pml1 > 0 && i >= NX_FIELDS - 1 - pml1 && i < NX_FIELDS - 1 && j < NY_FIELDS && k < NZ_FIELDS);
     bool in_y0 = (pml2 > 0 && i < NX_FIELDS && j < pml2 && k < NZ_FIELDS);
     bool in_ym = (pml3 > 0 && i < NX_FIELDS && j >= NY_FIELDS - 1 - pml3 && j < NY_FIELDS - 1 && k < NZ_FIELDS);
     bool in_z0 = (pml4 > 0 && i < NX_FIELDS && j < NY_FIELDS && k < pml4);
     bool in_zm = (pml5 > 0 && i < NX_FIELDS && j < NY_FIELDS && k >= NZ_FIELDS - 1 - pml5 && k < NZ_FIELDS - 1);
+    if (!(in_x0 || in_xm || in_y0 || in_ym || in_z0 || in_zm)) return;
 
-    float uh0 = uH0[idx];
-    float uh1 = uH1[idx];
     float upd = updatecoeffsH[idx];
 
     long long id4 = work;
 
     {
-        if (do_hx) {
-            float dEz_dy = staggered_forward_diff(Ez, id4, NZ_FIELDS, j, NY_FIELDS, fdtd_order);
-            float dEy_dz = staggered_forward_diff(Ey, id4, 1, k, NZ_FIELDS, fdtd_order);
-            Hx[id4] = uh0 * Hx[id4] - uh1 * dEz_dy + uh1 * dEy_dz;
-        }
-        if (do_hy) {
-            float dEx_dz = staggered_forward_diff(Ex, id4, 1, k, NZ_FIELDS, fdtd_order);
-            float dEz_dx = staggered_forward_diff(Ez, id4, ny_nz, i, NX_FIELDS, fdtd_order);
-            Hy[id4] = uh0 * Hy[id4] - uh1 * dEx_dz + uh1 * dEz_dx;
-        }
-        if (do_hz) {
-            float dEy_dx = staggered_forward_diff(Ey, id4, ny_nz, i, NX_FIELDS, fdtd_order);
-            float dEx_dy = staggered_forward_diff(Ex, id4, NZ_FIELDS, j, NY_FIELDS, fdtd_order);
-            Hz[id4] = uh0 * Hz[id4] - uh1 * dEy_dx + uh1 * dEx_dy;
-        }
-
         if (in_x0) {
             long long i1 = pml0 - 1 - i;
             float RA01 = x0HR[i1] - 1.0f, RB0 = x0HR[pml0 + i1], RE0 = x0HR[2 * pml0 + i1], RF0 = x0HR[3 * pml0 + i1];
             if (k < NZ_FIELDS - 1) {
-                float dEz = staggered_forward_diff(Ez, id4, ny_nz, i, NX_FIELDS, fdtd_order) / dx;
+                float dEz = staggered_forward_diff_static<ORDER>(Ez, id4, ny_nz, i, NX_FIELDS) / dx;
                 long long p_idx = ((long long)s * pml0 * NY_FIELDS * (NZ_FIELDS-1)) + i1 * NY_FIELDS * (NZ_FIELDS-1) + j * (NZ_FIELDS-1) + k;
                 float phi = x0HPhi1[p_idx];
                 Hy[id4] += upd * (RA01 * dEz + RB0 * phi);
                 x0HPhi1[p_idx] = RE0 * phi - RF0 * dEz;
             }
             if (j < NY_FIELDS - 1) {
-                float dEy = staggered_forward_diff(Ey, id4, ny_nz, i, NX_FIELDS, fdtd_order) / dx;
+                float dEy = staggered_forward_diff_static<ORDER>(Ey, id4, ny_nz, i, NX_FIELDS) / dx;
                 long long p_idx = ((long long)s * pml0 * (NY_FIELDS-1) * NZ_FIELDS) + i1 * (NY_FIELDS-1) * NZ_FIELDS + j * NZ_FIELDS + k;
                 float phi = x0HPhi2[p_idx];
                 Hz[id4] -= upd * (RA01 * dEy + RB0 * phi);
@@ -655,14 +711,14 @@ __global__ void fused_h_fields_updates_gpu(
             long long i1 = i - (NX_FIELDS - 1 - pml1);
             float RA01 = xmHR[i1] - 1.0f, RB0 = xmHR[pml1 + i1], RE0 = xmHR[2 * pml1 + i1], RF0 = xmHR[3 * pml1 + i1];
             if (k < NZ_FIELDS - 1) {
-                float dEz = staggered_forward_diff(Ez, id4, ny_nz, i, NX_FIELDS, fdtd_order) / dx;
+                float dEz = staggered_forward_diff_static<ORDER>(Ez, id4, ny_nz, i, NX_FIELDS) / dx;
                 long long p_idx = ((long long)s * pml1 * NY_FIELDS * (NZ_FIELDS-1)) + i1 * NY_FIELDS * (NZ_FIELDS-1) + j * (NZ_FIELDS-1) + k;
                 float phi = xmHPhi1[p_idx];
                 Hy[id4] += upd * (RA01 * dEz + RB0 * phi);
                 xmHPhi1[p_idx] = RE0 * phi - RF0 * dEz;
             }
             if (j < NY_FIELDS - 1) {
-                float dEy = staggered_forward_diff(Ey, id4, ny_nz, i, NX_FIELDS, fdtd_order) / dx;
+                float dEy = staggered_forward_diff_static<ORDER>(Ey, id4, ny_nz, i, NX_FIELDS) / dx;
                 long long p_idx = ((long long)s * pml1 * (NY_FIELDS-1) * NZ_FIELDS) + i1 * (NY_FIELDS-1) * NZ_FIELDS + j * NZ_FIELDS + k;
                 float phi = xmHPhi2[p_idx];
                 Hz[id4] -= upd * (RA01 * dEy + RB0 * phi);
@@ -674,14 +730,14 @@ __global__ void fused_h_fields_updates_gpu(
             long long j1 = pml2 - 1 - j;
             float RA01 = y0HR[j1] - 1.0f, RB0 = y0HR[pml2 + j1], RE0 = y0HR[2 * pml2 + j1], RF0 = y0HR[3 * pml2 + j1];
             if (i < NX_FIELDS && k < NZ_FIELDS - 1) {
-                float dEz = staggered_forward_diff(Ez, id4, NZ_FIELDS, j, NY_FIELDS, fdtd_order) / dy;
+                float dEz = staggered_forward_diff_static<ORDER>(Ez, id4, NZ_FIELDS, j, NY_FIELDS) / dy;
                 long long p_idx = ((long long)s * NX_FIELDS * pml2 * (NZ_FIELDS-1)) + i * pml2 * (NZ_FIELDS-1) + j1 * (NZ_FIELDS-1) + k;
                 float phi = y0HPhi1[p_idx];
                 Hx[id4] -= upd * (RA01 * dEz + RB0 * phi);
                 y0HPhi1[p_idx] = RE0 * phi - RF0 * dEz;
             }
             if (i < NX_FIELDS - 1 && k < NZ_FIELDS) {
-                float dEx = staggered_forward_diff(Ex, id4, NZ_FIELDS, j, NY_FIELDS, fdtd_order) / dy;
+                float dEx = staggered_forward_diff_static<ORDER>(Ex, id4, NZ_FIELDS, j, NY_FIELDS) / dy;
                 long long p_idx = ((long long)s * (NX_FIELDS-1) * pml2 * NZ_FIELDS) + i * pml2 * NZ_FIELDS + j1 * NZ_FIELDS + k;
                 float phi = y0HPhi2[p_idx];
                 Hz[id4] += upd * (RA01 * dEx + RB0 * phi);
@@ -693,14 +749,14 @@ __global__ void fused_h_fields_updates_gpu(
             long long j1 = j - (NY_FIELDS - 1 - pml3);
             float RA01 = ymHR[j1] - 1.0f, RB0 = ymHR[pml3 + j1], RE0 = ymHR[2 * pml3 + j1], RF0 = ymHR[3 * pml3 + j1];
             if (i < NX_FIELDS && k < NZ_FIELDS - 1) {
-                float dEz = staggered_forward_diff(Ez, id4, NZ_FIELDS, j, NY_FIELDS, fdtd_order) / dy;
+                float dEz = staggered_forward_diff_static<ORDER>(Ez, id4, NZ_FIELDS, j, NY_FIELDS) / dy;
                 long long p_idx = ((long long)s * NX_FIELDS * pml3 * (NZ_FIELDS-1)) + i * pml3 * (NZ_FIELDS-1) + j1 * (NZ_FIELDS-1) + k;
                 float phi = ymHPhi1[p_idx];
                 Hx[id4] -= upd * (RA01 * dEz + RB0 * phi);
                 ymHPhi1[p_idx] = RE0 * phi - RF0 * dEz;
             }
             if (i < NX_FIELDS - 1 && k < NZ_FIELDS) {
-                float dEx = staggered_forward_diff(Ex, id4, NZ_FIELDS, j, NY_FIELDS, fdtd_order) / dy;
+                float dEx = staggered_forward_diff_static<ORDER>(Ex, id4, NZ_FIELDS, j, NY_FIELDS) / dy;
                 long long p_idx = ((long long)s * (NX_FIELDS-1) * pml3 * NZ_FIELDS) + i * pml3 * NZ_FIELDS + j1 * NZ_FIELDS + k;
                 float phi = ymHPhi2[p_idx];
                 Hz[id4] += upd * (RA01 * dEx + RB0 * phi);
@@ -712,14 +768,14 @@ __global__ void fused_h_fields_updates_gpu(
             long long k1 = pml4 - 1 - k;
             float RA01 = z0HR[k1] - 1.0f, RB0 = z0HR[pml4 + k1], RE0 = z0HR[2 * pml4 + k1], RF0 = z0HR[3 * pml4 + k1];
             if (i < NX_FIELDS && j < NY_FIELDS - 1) {
-                float dEy = staggered_forward_diff(Ey, id4, 1, k, NZ_FIELDS, fdtd_order) / dz;
+                float dEy = staggered_forward_diff_static<ORDER>(Ey, id4, 1, k, NZ_FIELDS) / dz;
                 long long p_idx = ((long long)s * NX_FIELDS * (NY_FIELDS-1) * pml4) + i * (NY_FIELDS-1) * pml4 + j * pml4 + k1;
                 float phi = z0HPhi1[p_idx];
                 Hx[id4] += upd * (RA01 * dEy + RB0 * phi);
                 z0HPhi1[p_idx] = RE0 * phi - RF0 * dEy;
             }
             if (i < NX_FIELDS - 1 && j < NY_FIELDS) {
-                float dEx = staggered_forward_diff(Ex, id4, 1, k, NZ_FIELDS, fdtd_order) / dz;
+                float dEx = staggered_forward_diff_static<ORDER>(Ex, id4, 1, k, NZ_FIELDS) / dz;
                 long long p_idx = ((long long)s * (NX_FIELDS-1) * NY_FIELDS * pml4) + i * NY_FIELDS * pml4 + j * pml4 + k1;
                 float phi = z0HPhi2[p_idx];
                 Hy[id4] -= upd * (RA01 * dEx + RB0 * phi);
@@ -731,14 +787,14 @@ __global__ void fused_h_fields_updates_gpu(
             long long k1 = k - (NZ_FIELDS - 1 - pml5);
             float RA01 = zmHR[k1] - 1.0f, RB0 = zmHR[pml5 + k1], RE0 = zmHR[2 * pml5 + k1], RF0 = zmHR[3 * pml5 + k1];
             if (i < NX_FIELDS && j < NY_FIELDS - 1) {
-                float dEy = staggered_forward_diff(Ey, id4, 1, k, NZ_FIELDS, fdtd_order) / dz;
+                float dEy = staggered_forward_diff_static<ORDER>(Ey, id4, 1, k, NZ_FIELDS) / dz;
                 long long p_idx = ((long long)s * NX_FIELDS * (NY_FIELDS-1) * pml5) + i * (NY_FIELDS-1) * pml5 + j * pml5 + k1;
                 float phi = zmHPhi1[p_idx];
                 Hx[id4] += upd * (RA01 * dEy + RB0 * phi);
                 zmHPhi1[p_idx] = RE0 * phi - RF0 * dEy;
             }
             if (i < NX_FIELDS - 1 && j < NY_FIELDS) {
-                float dEx = staggered_forward_diff(Ex, id4, 1, k, NZ_FIELDS, fdtd_order) / dz;
+                float dEx = staggered_forward_diff_static<ORDER>(Ex, id4, 1, k, NZ_FIELDS) / dz;
                 long long p_idx = ((long long)s * (NX_FIELDS-1) * NY_FIELDS * pml5) + i * NY_FIELDS * pml5 + j * pml5 + k1;
                 float phi = zmHPhi2[p_idx];
                 Hy[id4] -= upd * (RA01 * dEx + RB0 * phi);
@@ -1028,19 +1084,52 @@ DEEPGPR_API void forward(const float* __restrict__ er, const float* __restrict__
         store_outputs<<<grid_rx, blockSize, 0, stream_comp>>>(step, nrx, i, receiverlocation, rxs, Ex, Ey, Ez, Hx, Hy, Hz, NX_FIELDS, NY_FIELDS, NZ_FIELDS, nt);
         CUDA_CHECK_LAST();
 
-        fused_h_fields_updates_gpu<<<grid_fields, blockSize, 0, stream_comp>>>(
-            uH0, uH1, Ex, Ey, Ez, Hx, Hy, Hz, dx, dx, dx, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
-            pml0, pml1, pml2, pml3, pml4, pml5, x0HR, xmHR, y0HR, ymHR, z0HR, zmHR, uH4, 
-            x0HPhi1, x0HPhi2, xmHPhi1, xmHPhi2, y0HPhi1, y0HPhi2, ymHPhi1, ymHPhi2, z0HPhi1, z0HPhi2, zmHPhi1, zmHPhi2,
-            fdtd_order);
-        CUDA_CHECK_LAST();
-
-        fused_e_fields_updates_gpu<<<grid_fields, blockSize, 0, stream_comp>>>(
-            uE0, uE1, Ex, Ey, Ez, Hx, Hy, Hz, dx, dx, dx, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
-            pml0, pml1, pml2, pml3, pml4, pml5, x0ER, xmER, y0ER, ymER, z0ER, zmER, uE4,
-            x0EPhi1, x0EPhi2, xmEPhi1, xmEPhi2, y0EPhi1, y0EPhi2, ymEPhi1, ymEPhi2, z0EPhi1, z0EPhi2, zmEPhi1, zmEPhi2,
-            fdtd_order);
-        CUDA_CHECK_LAST();
+        if (fdtd_order == 8) {
+            h_fields_base_update_gpu<8><<<grid_fields, blockSize, 0, stream_comp>>>(uH0, uH1, Ex, Ey, Ez, Hx, Hy, Hz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
+            CUDA_CHECK_LAST();
+            pml_h_fields_update_gpu<8><<<grid_fields, blockSize, 0, stream_comp>>>(
+                Ex, Ey, Ez, Hx, Hy, Hz, dx, dx, dx, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
+                pml0, pml1, pml2, pml3, pml4, pml5, x0HR, xmHR, y0HR, ymHR, z0HR, zmHR, uH4,
+                x0HPhi1, x0HPhi2, xmHPhi1, xmHPhi2, y0HPhi1, y0HPhi2, ymHPhi1, ymHPhi2, z0HPhi1, z0HPhi2, zmHPhi1, zmHPhi2);
+            CUDA_CHECK_LAST();
+            e_fields_base_update_gpu<8><<<grid_fields, blockSize, 0, stream_comp>>>(uE0, uE1, Ex, Ey, Ez, Hx, Hy, Hz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
+            CUDA_CHECK_LAST();
+            pml_e_fields_update_gpu<8><<<grid_fields, blockSize, 0, stream_comp>>>(
+                Ex, Ey, Ez, Hx, Hy, Hz, dx, dx, dx, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
+                pml0, pml1, pml2, pml3, pml4, pml5, x0ER, xmER, y0ER, ymER, z0ER, zmER, uE4,
+                x0EPhi1, x0EPhi2, xmEPhi1, xmEPhi2, y0EPhi1, y0EPhi2, ymEPhi1, ymEPhi2, z0EPhi1, z0EPhi2, zmEPhi1, zmEPhi2);
+            CUDA_CHECK_LAST();
+        } else if (fdtd_order == 4) {
+            h_fields_base_update_gpu<4><<<grid_fields, blockSize, 0, stream_comp>>>(uH0, uH1, Ex, Ey, Ez, Hx, Hy, Hz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
+            CUDA_CHECK_LAST();
+            pml_h_fields_update_gpu<4><<<grid_fields, blockSize, 0, stream_comp>>>(
+                Ex, Ey, Ez, Hx, Hy, Hz, dx, dx, dx, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
+                pml0, pml1, pml2, pml3, pml4, pml5, x0HR, xmHR, y0HR, ymHR, z0HR, zmHR, uH4,
+                x0HPhi1, x0HPhi2, xmHPhi1, xmHPhi2, y0HPhi1, y0HPhi2, ymHPhi1, ymHPhi2, z0HPhi1, z0HPhi2, zmHPhi1, zmHPhi2);
+            CUDA_CHECK_LAST();
+            e_fields_base_update_gpu<4><<<grid_fields, blockSize, 0, stream_comp>>>(uE0, uE1, Ex, Ey, Ez, Hx, Hy, Hz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
+            CUDA_CHECK_LAST();
+            pml_e_fields_update_gpu<4><<<grid_fields, blockSize, 0, stream_comp>>>(
+                Ex, Ey, Ez, Hx, Hy, Hz, dx, dx, dx, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
+                pml0, pml1, pml2, pml3, pml4, pml5, x0ER, xmER, y0ER, ymER, z0ER, zmER, uE4,
+                x0EPhi1, x0EPhi2, xmEPhi1, xmEPhi2, y0EPhi1, y0EPhi2, ymEPhi1, ymEPhi2, z0EPhi1, z0EPhi2, zmEPhi1, zmEPhi2);
+            CUDA_CHECK_LAST();
+        } else {
+            h_fields_base_update_gpu<2><<<grid_fields, blockSize, 0, stream_comp>>>(uH0, uH1, Ex, Ey, Ez, Hx, Hy, Hz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
+            CUDA_CHECK_LAST();
+            pml_h_fields_update_gpu<2><<<grid_fields, blockSize, 0, stream_comp>>>(
+                Ex, Ey, Ez, Hx, Hy, Hz, dx, dx, dx, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
+                pml0, pml1, pml2, pml3, pml4, pml5, x0HR, xmHR, y0HR, ymHR, z0HR, zmHR, uH4,
+                x0HPhi1, x0HPhi2, xmHPhi1, xmHPhi2, y0HPhi1, y0HPhi2, ymHPhi1, ymHPhi2, z0HPhi1, z0HPhi2, zmHPhi1, zmHPhi2);
+            CUDA_CHECK_LAST();
+            e_fields_base_update_gpu<2><<<grid_fields, blockSize, 0, stream_comp>>>(uE0, uE1, Ex, Ey, Ez, Hx, Hy, Hz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
+            CUDA_CHECK_LAST();
+            pml_e_fields_update_gpu<2><<<grid_fields, blockSize, 0, stream_comp>>>(
+                Ex, Ey, Ez, Hx, Hy, Hz, dx, dx, dx, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
+                pml0, pml1, pml2, pml3, pml4, pml5, x0ER, xmER, y0ER, ymER, z0ER, zmER, uE4,
+                x0EPhi1, x0EPhi2, xmEPhi1, xmEPhi2, y0EPhi1, y0EPhi2, ymEPhi1, ymEPhi2, z0EPhi1, z0EPhi2, zmEPhi1, zmEPhi2);
+            CUDA_CHECK_LAST();
+        }
 
         Update_hertzian_dipole<<<grid_src, blockSize, 0, stream_comp>>>(step, i, dx, sourcelocation, srcwaveforms, Ex, Ey, Ez, uE4, NX_FIELDS, NY_FIELDS, NZ_FIELDS, nsrc, polarisation, nt);
         CUDA_CHECK_LAST();
@@ -1239,19 +1328,52 @@ DEEPGPR_API void backward(const float* __restrict__ er, const float* __restrict_
         Back_source<<<grid_src, blockSize, 0, stream_comp>>>(step, i, dx, sourcelocation, srcwaveforms, Ex, Ey, Ez, uE4, NX_FIELDS, NY_FIELDS, NZ_FIELDS, nsrc, polarisation, nt);
         CUDA_CHECK_LAST();
         
-        fused_e_fields_updates_gpu<<<grid_fields, blockSize, 0, stream_comp>>>(
-            uE0, uE1, Ex, Ey, Ez, Hx, Hy, Hz, dx, dx, dx, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
-            pml0, pml1, pml2, pml3, pml4, pml5, x0ER, xmER, y0ER, ymER, z0ER, zmER, uE4,
-            x0EPhi1, x0EPhi2, xmEPhi1, xmEPhi2, y0EPhi1, y0EPhi2, ymEPhi1, ymEPhi2, z0EPhi1, z0EPhi2, zmEPhi1, zmEPhi2,
-            fdtd_order);
-        CUDA_CHECK_LAST();
-
-        fused_h_fields_updates_gpu<<<grid_fields, blockSize, 0, stream_comp>>>(
-            uH0, uH1, Ex, Ey, Ez, Hx, Hy, Hz, dx, dx, dx, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
-            pml0, pml1, pml2, pml3, pml4, pml5, x0HR, xmHR, y0HR, ymHR, z0HR, zmHR, uH4, 
-            x0HPhi1, x0HPhi2, xmHPhi1, xmHPhi2, y0HPhi1, y0HPhi2, ymHPhi1, ymHPhi2, z0HPhi1, z0HPhi2, zmHPhi1, zmHPhi2,
-            fdtd_order);
-        CUDA_CHECK_LAST();
+        if (fdtd_order == 8) {
+            e_fields_base_update_gpu<8><<<grid_fields, blockSize, 0, stream_comp>>>(uE0, uE1, Ex, Ey, Ez, Hx, Hy, Hz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
+            CUDA_CHECK_LAST();
+            pml_e_fields_update_gpu<8><<<grid_fields, blockSize, 0, stream_comp>>>(
+                Ex, Ey, Ez, Hx, Hy, Hz, dx, dx, dx, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
+                pml0, pml1, pml2, pml3, pml4, pml5, x0ER, xmER, y0ER, ymER, z0ER, zmER, uE4,
+                x0EPhi1, x0EPhi2, xmEPhi1, xmEPhi2, y0EPhi1, y0EPhi2, ymEPhi1, ymEPhi2, z0EPhi1, z0EPhi2, zmEPhi1, zmEPhi2);
+            CUDA_CHECK_LAST();
+            h_fields_base_update_gpu<8><<<grid_fields, blockSize, 0, stream_comp>>>(uH0, uH1, Ex, Ey, Ez, Hx, Hy, Hz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
+            CUDA_CHECK_LAST();
+            pml_h_fields_update_gpu<8><<<grid_fields, blockSize, 0, stream_comp>>>(
+                Ex, Ey, Ez, Hx, Hy, Hz, dx, dx, dx, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
+                pml0, pml1, pml2, pml3, pml4, pml5, x0HR, xmHR, y0HR, ymHR, z0HR, zmHR, uH4,
+                x0HPhi1, x0HPhi2, xmHPhi1, xmHPhi2, y0HPhi1, y0HPhi2, ymHPhi1, ymHPhi2, z0HPhi1, z0HPhi2, zmHPhi1, zmHPhi2);
+            CUDA_CHECK_LAST();
+        } else if (fdtd_order == 4) {
+            e_fields_base_update_gpu<4><<<grid_fields, blockSize, 0, stream_comp>>>(uE0, uE1, Ex, Ey, Ez, Hx, Hy, Hz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
+            CUDA_CHECK_LAST();
+            pml_e_fields_update_gpu<4><<<grid_fields, blockSize, 0, stream_comp>>>(
+                Ex, Ey, Ez, Hx, Hy, Hz, dx, dx, dx, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
+                pml0, pml1, pml2, pml3, pml4, pml5, x0ER, xmER, y0ER, ymER, z0ER, zmER, uE4,
+                x0EPhi1, x0EPhi2, xmEPhi1, xmEPhi2, y0EPhi1, y0EPhi2, ymEPhi1, ymEPhi2, z0EPhi1, z0EPhi2, zmEPhi1, zmEPhi2);
+            CUDA_CHECK_LAST();
+            h_fields_base_update_gpu<4><<<grid_fields, blockSize, 0, stream_comp>>>(uH0, uH1, Ex, Ey, Ez, Hx, Hy, Hz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
+            CUDA_CHECK_LAST();
+            pml_h_fields_update_gpu<4><<<grid_fields, blockSize, 0, stream_comp>>>(
+                Ex, Ey, Ez, Hx, Hy, Hz, dx, dx, dx, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
+                pml0, pml1, pml2, pml3, pml4, pml5, x0HR, xmHR, y0HR, ymHR, z0HR, zmHR, uH4,
+                x0HPhi1, x0HPhi2, xmHPhi1, xmHPhi2, y0HPhi1, y0HPhi2, ymHPhi1, ymHPhi2, z0HPhi1, z0HPhi2, zmHPhi1, zmHPhi2);
+            CUDA_CHECK_LAST();
+        } else {
+            e_fields_base_update_gpu<2><<<grid_fields, blockSize, 0, stream_comp>>>(uE0, uE1, Ex, Ey, Ez, Hx, Hy, Hz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
+            CUDA_CHECK_LAST();
+            pml_e_fields_update_gpu<2><<<grid_fields, blockSize, 0, stream_comp>>>(
+                Ex, Ey, Ez, Hx, Hy, Hz, dx, dx, dx, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
+                pml0, pml1, pml2, pml3, pml4, pml5, x0ER, xmER, y0ER, ymER, z0ER, zmER, uE4,
+                x0EPhi1, x0EPhi2, xmEPhi1, xmEPhi2, y0EPhi1, y0EPhi2, ymEPhi1, ymEPhi2, z0EPhi1, z0EPhi2, zmEPhi1, zmEPhi2);
+            CUDA_CHECK_LAST();
+            h_fields_base_update_gpu<2><<<grid_fields, blockSize, 0, stream_comp>>>(uH0, uH1, Ex, Ey, Ez, Hx, Hy, Hz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
+            CUDA_CHECK_LAST();
+            pml_h_fields_update_gpu<2><<<grid_fields, blockSize, 0, stream_comp>>>(
+                Ex, Ey, Ez, Hx, Hy, Hz, dx, dx, dx, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
+                pml0, pml1, pml2, pml3, pml4, pml5, x0HR, xmHR, y0HR, ymHR, z0HR, zmHR, uH4,
+                x0HPhi1, x0HPhi2, xmHPhi1, xmHPhi2, y0HPhi1, y0HPhi2, ymHPhi1, ymHPhi2, z0HPhi1, z0HPhi2, zmHPhi1, zmHPhi2);
+            CUDA_CHECK_LAST();
+        }
 
         accumulate_gradients<<<grid_grad, blockSize, 0, stream_comp>>>(Ex, Ey, Ez, Eall_ptr, d_E_buf, grad_er, grad_se, i, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, dt, errequiregrad, serequiregrad, sampling_interval, nt_saved, use_async, fwi_mode);
         CUDA_CHECK_LAST();
