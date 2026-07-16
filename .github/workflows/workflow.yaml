@@ -42,6 +42,8 @@ jobs:
         with:
           cuda: ${{ matrix.cuda }}
           method: network
+          sub-packages: '["nvcc", "cudart"]'
+          log-file-suffix: windows-${{ matrix.cuda }}.txt
 
       - name: Set up MSVC 2022 Developer Command Prompt
         if: matrix.platform == 'windows'
