@@ -327,7 +327,8 @@ jobs:
           Write-Host "===== Exported symbols from $dll_file ====="
           $exports = dumpbin /exports $dll_file
           $exports
-          if ($exports -notmatch "deepgpr_abi_version") {
+          $hasAbiVersion = $exports | Select-String -SimpleMatch "deepgpr_abi_version" -Quiet
+          if (-not $hasAbiVersion) {
             throw "CUDA DLL does not export deepgpr_abi_version"
           }
 
@@ -388,7 +389,8 @@ jobs:
           Write-Host "===== Exported symbols from $out_file ====="
           $exports = dumpbin /exports $out_file
           $exports
-          if ($exports -notmatch "deepgpr_abi_version") {
+          $hasAbiVersion = $exports | Select-String -SimpleMatch "deepgpr_abi_version" -Quiet
+          if (-not $hasAbiVersion) {
             throw "CPU DLL does not export deepgpr_abi_version"
           }
 
