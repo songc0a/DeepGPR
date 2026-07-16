@@ -35,6 +35,11 @@ __constant__ float m0 = 1.25663706212e-06;
 
 static int g_fdtd_order = 2;
 
+DEEPGPR_API int deepgpr_abi_version(void)
+{
+    return 2;
+}
+
 /*
  * Set the spatial FDTD finite-difference order.
  *
@@ -210,6 +215,58 @@ __device__ __forceinline__ float staggered_forward_diff_static(
     return acc;
 }
 
+__device__ __forceinline__ void add_staggered_backward_adjoint(
+    float* gradient, long long id, long long stride,
+    long long coord, long long n, int order, float weight)
+{
+    int radius = order <= 2 ? 1 : usable_backward_radius(coord, n, fdtd_radius_for_order(order));
+    for (int r = 1; r <= radius; ++r) {
+        float value = weight * fdtd_coeff(radius, r);
+        atomicAdd(&gradient[id + (long long)(r - 1) * stride], value);
+        atomicAdd(&gradient[id - (long long)r * stride], -value);
+    }
+}
+
+__device__ __forceinline__ void add_staggered_forward_adjoint(
+    float* gradient, long long id, long long stride,
+    long long coord, long long n, int order, float weight)
+{
+    int radius = order <= 2 ? 1 : usable_forward_radius(coord, n, fdtd_radius_for_order(order));
+    for (int r = 1; r <= radius; ++r) {
+        float value = weight * fdtd_coeff(radius, r);
+        atomicAdd(&gradient[id + (long long)r * stride], value);
+        atomicAdd(&gradient[id - (long long)(r - 1) * stride], -value);
+    }
+}
+
+__device__ __forceinline__ void pml_backward_derivative_adjoint(
+    float lambda_field, float* lambda_source,
+    long long source_id, long long stride, long long coord, long long n, int order,
+    float inverse_spacing, float update_coeff, float sign,
+    float ra_minus_one, float rb, float re, float rf, float* lambda_phi)
+{
+    float phi_new = *lambda_phi;
+    float derivative_weight =
+        (sign * update_coeff * ra_minus_one * lambda_field - rf * phi_new) * inverse_spacing;
+    add_staggered_backward_adjoint(
+        lambda_source, source_id, stride, coord, n, order, derivative_weight);
+    *lambda_phi = sign * update_coeff * rb * lambda_field + re * phi_new;
+}
+
+__device__ __forceinline__ void pml_forward_derivative_adjoint(
+    float lambda_field, float* lambda_source,
+    long long source_id, long long stride, long long coord, long long n, int order,
+    float inverse_spacing, float update_coeff, float sign,
+    float ra_minus_one, float rb, float re, float rf, float* lambda_phi)
+{
+    float phi_new = *lambda_phi;
+    float derivative_weight =
+        (sign * update_coeff * ra_minus_one * lambda_field - rf * phi_new) * inverse_spacing;
+    add_staggered_forward_adjoint(
+        lambda_source, source_id, stride, coord, n, order, derivative_weight);
+    *lambda_phi = sign * update_coeff * rb * lambda_field + re * phi_new;
+}
+
 /*
  * Build forward-update coefficients for electric and magnetic fields.
  *
@@ -256,51 +313,6 @@ __global__ void ucgetforward(const float* __restrict__ er, const float* __restri
         }
     }
 }
-
-/*
- * Build backward-update coefficients for electric and magnetic fields.
- *
- * Parameters:
- *   er: Padded relative permittivity array.
- *   se: Padded electrical conductivity array.
- *   mr: Padded relative permeability array.
- *   uE0, uE1, uE4: Output electric-field update coefficient arrays.
- *   uH0, uH1, uH4: Output magnetic-field update coefficient arrays.
- *   NX_FIELDS, NY_FIELDS, NZ_FIELDS: Padded field grid sizes.
- *   dt: Time step size.
- *   dx: Spatial grid spacing.
- */
-__global__ void ucgetbackward(const float* __restrict__ er, const float* __restrict__ se, const float* __restrict__ mr,
-    float* __restrict__ uE0, float* __restrict__ uE1, float* __restrict__ uE4,
-    float* __restrict__ uH0, float* __restrict__ uH1, float* __restrict__ uH4,
-    int NX_FIELDS, int NY_FIELDS, int NZ_FIELDS, float dt, float dx) 
-{
-    long long idx = blockIdx.x * blockDim.x + threadIdx.x;
-    long long ny_nz = (long long)NY_FIELDS * NZ_FIELDS;
-    if (idx >= (long long)NX_FIELDS * ny_nz) return;
-
-    long long i = idx / ny_nz;
-    long long rem = idx % ny_nz;
-    long long j = rem / NZ_FIELDS;
-    long long k = rem % NZ_FIELDS;
-
-    if (i < (NX_FIELDS-1) && j < (NY_FIELDS-1) && k < (NZ_FIELDS-1) ) {
-        float HA = m0 * mr[idx] / dt;
-        uH0[idx] = 1.0f;
-        uH1[idx] = (1.0f / dx) / HA;
-        uH4[idx] = 1.0f / HA;
-
-        if (se[idx] > 100.0f) {
-            uE0[idx] = 0.0f; uE1[idx] = 0.0f; uE4[idx] = 0.0f;
-        } else {
-            float EA = (e0 * er[idx] / dt) + 0.5f * se[idx];
-            uE0[idx] = (2.0f * e0 * er[idx]) / (2.0f * e0 * er[idx] + se[idx] * dt);
-            uE1[idx] = (1.0f / dx) / EA;
-            uE4[idx] = 1.0f / EA;
-        }
-    }
-}
-
 
 /*
  * Store receiver samples for all six field components.
@@ -641,6 +653,84 @@ __global__ void h_fields_base_update_gpu(
     }
 }
 
+__global__ void e_fields_base_adjoint_gpu(
+    const float* uE0, const float* uE1,
+    float* Ex, float* Ey, float* Ez, float* Hx, float* Hy, float* Hz,
+    int step, int NX, int NY, int NZ, int order)
+{
+    long long ny_nz = (long long)NY * NZ;
+    long long field_stride = (long long)NX * ny_nz;
+    long long work = blockIdx.x * blockDim.x + threadIdx.x;
+    if (work >= (long long)step * field_stride) return;
+    long long idx = work % field_stride;
+    long long i = idx / ny_nz;
+    long long rem = idx % ny_nz;
+    long long j = rem / NZ;
+    long long k = rem % NZ;
+    bool do_ex = (((NY - 1) != 1 || (NZ - 1) != 1) && i < NX - 1 && j > 0 && j < NY - 1 && k > 0 && k < NZ - 1);
+    bool do_ey = (((NX - 1) != 1 || (NZ - 1) != 1) && i > 0 && i < NX - 1 && j < NY - 1 && k > 0 && k < NZ - 1);
+    bool do_ez = (((NX - 1) != 1 || (NY - 1) != 1) && i > 0 && i < NX - 1 && j > 0 && j < NY - 1 && k < NZ - 1);
+    float coeff = uE1[idx];
+
+    if (do_ex) {
+        float value = Ex[work];
+        add_staggered_backward_adjoint(Hz, work, NZ, j, NY, order, coeff * value);
+        add_staggered_backward_adjoint(Hy, work, 1, k, NZ, order, -coeff * value);
+        Ex[work] = uE0[idx] * value;
+    }
+    if (do_ey) {
+        float value = Ey[work];
+        add_staggered_backward_adjoint(Hx, work, 1, k, NZ, order, coeff * value);
+        add_staggered_backward_adjoint(Hz, work, ny_nz, i, NX, order, -coeff * value);
+        Ey[work] = uE0[idx] * value;
+    }
+    if (do_ez) {
+        float value = Ez[work];
+        add_staggered_backward_adjoint(Hy, work, ny_nz, i, NX, order, coeff * value);
+        add_staggered_backward_adjoint(Hx, work, NZ, j, NY, order, -coeff * value);
+        Ez[work] = uE0[idx] * value;
+    }
+}
+
+__global__ void h_fields_base_adjoint_gpu(
+    const float* uH0, const float* uH1,
+    float* Ex, float* Ey, float* Ez, float* Hx, float* Hy, float* Hz,
+    int step, int NX, int NY, int NZ, int order)
+{
+    long long ny_nz = (long long)NY * NZ;
+    long long field_stride = (long long)NX * ny_nz;
+    long long work = blockIdx.x * blockDim.x + threadIdx.x;
+    if (work >= (long long)step * field_stride) return;
+    long long idx = work % field_stride;
+    long long i = idx / ny_nz;
+    long long rem = idx % ny_nz;
+    long long j = rem / NZ;
+    long long k = rem % NZ;
+    bool do_hx = ((NX - 1) != 1 && i > 0 && i < NX - 1 && j < NY - 1 && k < NZ - 1);
+    bool do_hy = ((NY - 1) != 1 && i < NX - 1 && j > 0 && j < NY - 1 && k < NZ - 1);
+    bool do_hz = ((NZ - 1) != 1 && i < NX - 1 && j < NY - 1 && k > 0 && k < NZ - 1);
+    float coeff = uH1[idx];
+
+    if (do_hx) {
+        float value = Hx[work];
+        add_staggered_forward_adjoint(Ez, work, NZ, j, NY, order, -coeff * value);
+        add_staggered_forward_adjoint(Ey, work, 1, k, NZ, order, coeff * value);
+        Hx[work] = uH0[idx] * value;
+    }
+    if (do_hy) {
+        float value = Hy[work];
+        add_staggered_forward_adjoint(Ex, work, 1, k, NZ, order, -coeff * value);
+        add_staggered_forward_adjoint(Ez, work, ny_nz, i, NX, order, coeff * value);
+        Hy[work] = uH0[idx] * value;
+    }
+    if (do_hz) {
+        float value = Hz[work];
+        add_staggered_forward_adjoint(Ey, work, ny_nz, i, NX, order, -coeff * value);
+        add_staggered_forward_adjoint(Ex, work, NZ, j, NY, order, coeff * value);
+        Hz[work] = uH0[idx] * value;
+    }
+}
+
 /*
  * Apply magnetic CPML boundary corrections after the base magnetic-field update.
  */
@@ -805,6 +895,204 @@ __global__ void pml_h_fields_update_gpu(
 }
 
 
+__global__ void pml_e_fields_adjoint_gpu(
+    float* Ex, float* Ey, float* Ez, float* Hx, float* Hy, float* Hz,
+    float dx, float dy, float dz, int step, int NX, int NY, int NZ,
+    int pml0, int pml1, int pml2, int pml3, int pml4, int pml5,
+    const float* x0R, const float* xmR, const float* y0R, const float* ymR,
+    const float* z0R, const float* zmR, const float* update,
+    float* x0P1, float* x0P2, float* xmP1, float* xmP2,
+    float* y0P1, float* y0P2, float* ymP1, float* ymP2,
+    float* z0P1, float* z0P2, float* zmP1, float* zmP2, int order)
+{
+    long long ny_nz = (long long)NY * NZ;
+    long long field_stride = (long long)NX * ny_nz;
+    long long work = blockIdx.x * blockDim.x + threadIdx.x;
+    if (work >= (long long)step * field_stride) return;
+    int s = (int)(work / field_stride);
+    long long idx = work % field_stride;
+    long long i = idx / ny_nz;
+    long long rem = idx % ny_nz;
+    long long j = rem / NZ;
+    long long k = rem % NZ;
+    float upd = update[idx];
+
+#define APPLY_E_PML_GPU(R, P, p, q, stride, coord, n, spacing, field, source, sign) \
+    do { \
+        pml_backward_derivative_adjoint( \
+            (field)[work], (source), work, (stride), (coord), (n), order, \
+            1.0f / (spacing), upd, (sign), (R)[q] - 1.0f, (R)[(p) + (q)], \
+            (R)[2 * (p) + (q)], (R)[3 * (p) + (q)], &(P)[p_idx]); \
+    } while (0)
+
+    if (pml0 > 0 && i > 0 && i <= pml0) {
+        long long q = pml0 - i;
+        if (j < NY - 1) {
+            long long p_idx = ((long long)s * (pml0 + 1) * (NY - 1) * NZ) + q * (NY - 1) * NZ + j * NZ + k;
+            APPLY_E_PML_GPU(x0R, x0P1, pml0, q, ny_nz, i, NX, dx, Ey, Hz, -1.0f);
+        }
+        if (k < NZ - 1) {
+            long long p_idx = ((long long)s * (pml0 + 1) * NY * (NZ - 1)) + q * NY * (NZ - 1) + j * (NZ - 1) + k;
+            APPLY_E_PML_GPU(x0R, x0P2, pml0, q, ny_nz, i, NX, dx, Ez, Hy, 1.0f);
+        }
+    }
+    if (pml1 > 0 && i >= NX - 1 - pml1 && i < NX - 1) {
+        long long q = i - (NX - 1 - pml1);
+        if (j < NY - 1 && i > 0) {
+            long long p_idx = ((long long)s * (pml1 + 1) * (NY - 1) * NZ) + q * (NY - 1) * NZ + j * NZ + k;
+            APPLY_E_PML_GPU(xmR, xmP1, pml1, q, ny_nz, i, NX, dx, Ey, Hz, -1.0f);
+        }
+        if (k < NZ - 1 && i > 0) {
+            long long p_idx = ((long long)s * (pml1 + 1) * NY * (NZ - 1)) + q * NY * (NZ - 1) + j * (NZ - 1) + k;
+            APPLY_E_PML_GPU(xmR, xmP2, pml1, q, ny_nz, i, NX, dx, Ez, Hy, 1.0f);
+        }
+    }
+    if (pml2 > 0 && j > 0 && j <= pml2) {
+        long long q = pml2 - j;
+        if (i < NX - 1) {
+            long long p_idx = ((long long)s * (NX - 1) * (pml2 + 1) * NZ) + i * (pml2 + 1) * NZ + q * NZ + k;
+            APPLY_E_PML_GPU(y0R, y0P1, pml2, q, NZ, j, NY, dy, Ex, Hz, 1.0f);
+        }
+        if (k < NZ - 1) {
+            long long p_idx = ((long long)s * NX * (pml2 + 1) * (NZ - 1)) + i * (pml2 + 1) * (NZ - 1) + q * (NZ - 1) + k;
+            APPLY_E_PML_GPU(y0R, y0P2, pml2, q, NZ, j, NY, dy, Ez, Hx, -1.0f);
+        }
+    }
+    if (pml3 > 0 && j >= NY - 1 - pml3 && j < NY - 1) {
+        long long q = j - (NY - 1 - pml3);
+        if (i < NX - 1 && j > 0) {
+            long long p_idx = ((long long)s * (NX - 1) * (pml3 + 1) * NZ) + i * (pml3 + 1) * NZ + q * NZ + k;
+            APPLY_E_PML_GPU(ymR, ymP1, pml3, q, NZ, j, NY, dy, Ex, Hz, 1.0f);
+        }
+        if (k < NZ - 1 && j > 0) {
+            long long p_idx = ((long long)s * NX * (pml3 + 1) * (NZ - 1)) + i * (pml3 + 1) * (NZ - 1) + q * (NZ - 1) + k;
+            APPLY_E_PML_GPU(ymR, ymP2, pml3, q, NZ, j, NY, dy, Ez, Hx, -1.0f);
+        }
+    }
+    if (pml4 > 0 && k > 0 && k <= pml4) {
+        long long q = pml4 - k;
+        if (i < NX - 1) {
+            long long p_idx = ((long long)s * (NX - 1) * NY * (pml4 + 1)) + i * NY * (pml4 + 1) + j * (pml4 + 1) + q;
+            APPLY_E_PML_GPU(z0R, z0P1, pml4, q, 1, k, NZ, dz, Ex, Hy, -1.0f);
+        }
+        if (j < NY - 1) {
+            long long p_idx = ((long long)s * NX * (NY - 1) * (pml4 + 1)) + i * (NY - 1) * (pml4 + 1) + j * (pml4 + 1) + q;
+            APPLY_E_PML_GPU(z0R, z0P2, pml4, q, 1, k, NZ, dz, Ey, Hx, 1.0f);
+        }
+    }
+    if (pml5 > 0 && k >= NZ - 1 - pml5 && k < NZ - 1) {
+        long long q = k - (NZ - 1 - pml5);
+        if (i < NX - 1 && k > 0) {
+            long long p_idx = ((long long)s * (NX - 1) * NY * (pml5 + 1)) + i * NY * (pml5 + 1) + j * (pml5 + 1) + q;
+            APPLY_E_PML_GPU(zmR, zmP1, pml5, q, 1, k, NZ, dz, Ex, Hy, -1.0f);
+        }
+        if (j < NY - 1 && k > 0) {
+            long long p_idx = ((long long)s * NX * (NY - 1) * (pml5 + 1)) + i * (NY - 1) * (pml5 + 1) + j * (pml5 + 1) + q;
+            APPLY_E_PML_GPU(zmR, zmP2, pml5, q, 1, k, NZ, dz, Ey, Hx, 1.0f);
+        }
+    }
+#undef APPLY_E_PML_GPU
+}
+
+__global__ void pml_h_fields_adjoint_gpu(
+    float* Ex, float* Ey, float* Ez, float* Hx, float* Hy, float* Hz,
+    float dx, float dy, float dz, int step, int NX, int NY, int NZ,
+    int pml0, int pml1, int pml2, int pml3, int pml4, int pml5,
+    const float* x0R, const float* xmR, const float* y0R, const float* ymR,
+    const float* z0R, const float* zmR, const float* update,
+    float* x0P1, float* x0P2, float* xmP1, float* xmP2,
+    float* y0P1, float* y0P2, float* ymP1, float* ymP2,
+    float* z0P1, float* z0P2, float* zmP1, float* zmP2, int order)
+{
+    long long ny_nz = (long long)NY * NZ;
+    long long field_stride = (long long)NX * ny_nz;
+    long long work = blockIdx.x * blockDim.x + threadIdx.x;
+    if (work >= (long long)step * field_stride) return;
+    int s = (int)(work / field_stride);
+    long long idx = work % field_stride;
+    long long i = idx / ny_nz;
+    long long rem = idx % ny_nz;
+    long long j = rem / NZ;
+    long long k = rem % NZ;
+    float upd = update[idx];
+
+#define APPLY_H_PML_GPU(R, P, p, q, stride, coord, n, spacing, field, source, sign) \
+    do { \
+        pml_forward_derivative_adjoint( \
+            (field)[work], (source), work, (stride), (coord), (n), order, \
+            1.0f / (spacing), upd, (sign), (R)[q] - 1.0f, (R)[(p) + (q)], \
+            (R)[2 * (p) + (q)], (R)[3 * (p) + (q)], &(P)[p_idx]); \
+    } while (0)
+
+    if (pml0 > 0 && i < pml0) {
+        long long q = pml0 - 1 - i;
+        if (k < NZ - 1) {
+            long long p_idx = ((long long)s * pml0 * NY * (NZ - 1)) + q * NY * (NZ - 1) + j * (NZ - 1) + k;
+            APPLY_H_PML_GPU(x0R, x0P1, pml0, q, ny_nz, i, NX, dx, Hy, Ez, 1.0f);
+        }
+        if (j < NY - 1) {
+            long long p_idx = ((long long)s * pml0 * (NY - 1) * NZ) + q * (NY - 1) * NZ + j * NZ + k;
+            APPLY_H_PML_GPU(x0R, x0P2, pml0, q, ny_nz, i, NX, dx, Hz, Ey, -1.0f);
+        }
+    }
+    if (pml1 > 0 && i >= NX - 1 - pml1 && i < NX - 1) {
+        long long q = i - (NX - 1 - pml1);
+        if (k < NZ - 1) {
+            long long p_idx = ((long long)s * pml1 * NY * (NZ - 1)) + q * NY * (NZ - 1) + j * (NZ - 1) + k;
+            APPLY_H_PML_GPU(xmR, xmP1, pml1, q, ny_nz, i, NX, dx, Hy, Ez, 1.0f);
+        }
+        if (j < NY - 1) {
+            long long p_idx = ((long long)s * pml1 * (NY - 1) * NZ) + q * (NY - 1) * NZ + j * NZ + k;
+            APPLY_H_PML_GPU(xmR, xmP2, pml1, q, ny_nz, i, NX, dx, Hz, Ey, -1.0f);
+        }
+    }
+    if (pml2 > 0 && j < pml2) {
+        long long q = pml2 - 1 - j;
+        if (k < NZ - 1) {
+            long long p_idx = ((long long)s * NX * pml2 * (NZ - 1)) + i * pml2 * (NZ - 1) + q * (NZ - 1) + k;
+            APPLY_H_PML_GPU(y0R, y0P1, pml2, q, NZ, j, NY, dy, Hx, Ez, -1.0f);
+        }
+        if (i < NX - 1) {
+            long long p_idx = ((long long)s * (NX - 1) * pml2 * NZ) + i * pml2 * NZ + q * NZ + k;
+            APPLY_H_PML_GPU(y0R, y0P2, pml2, q, NZ, j, NY, dy, Hz, Ex, 1.0f);
+        }
+    }
+    if (pml3 > 0 && j >= NY - 1 - pml3 && j < NY - 1) {
+        long long q = j - (NY - 1 - pml3);
+        if (k < NZ - 1) {
+            long long p_idx = ((long long)s * NX * pml3 * (NZ - 1)) + i * pml3 * (NZ - 1) + q * (NZ - 1) + k;
+            APPLY_H_PML_GPU(ymR, ymP1, pml3, q, NZ, j, NY, dy, Hx, Ez, -1.0f);
+        }
+        if (i < NX - 1) {
+            long long p_idx = ((long long)s * (NX - 1) * pml3 * NZ) + i * pml3 * NZ + q * NZ + k;
+            APPLY_H_PML_GPU(ymR, ymP2, pml3, q, NZ, j, NY, dy, Hz, Ex, 1.0f);
+        }
+    }
+    if (pml4 > 0 && k < pml4) {
+        long long q = pml4 - 1 - k;
+        if (j < NY - 1) {
+            long long p_idx = ((long long)s * NX * (NY - 1) * pml4) + i * (NY - 1) * pml4 + j * pml4 + q;
+            APPLY_H_PML_GPU(z0R, z0P1, pml4, q, 1, k, NZ, dz, Hx, Ey, 1.0f);
+        }
+        if (i < NX - 1) {
+            long long p_idx = ((long long)s * (NX - 1) * NY * pml4) + i * NY * pml4 + j * pml4 + q;
+            APPLY_H_PML_GPU(z0R, z0P2, pml4, q, 1, k, NZ, dz, Hy, Ex, -1.0f);
+        }
+    }
+    if (pml5 > 0 && k >= NZ - 1 - pml5 && k < NZ - 1) {
+        long long q = k - (NZ - 1 - pml5);
+        if (j < NY - 1) {
+            long long p_idx = ((long long)s * NX * (NY - 1) * pml5) + i * (NY - 1) * pml5 + j * pml5 + q;
+            APPLY_H_PML_GPU(zmR, zmP1, pml5, q, 1, k, NZ, dz, Hx, Ey, 1.0f);
+        }
+        if (i < NX - 1) {
+            long long p_idx = ((long long)s * (NX - 1) * NY * pml5) + i * NY * pml5 + j * pml5 + q;
+            APPLY_H_PML_GPU(zmR, zmP2, pml5, q, 1, k, NZ, dz, Hy, Ex, -1.0f);
+        }
+    }
+#undef APPLY_H_PML_GPU
+}
+
 /*
  * Inject the adjoint source into one electric-field component.
  *
@@ -821,10 +1109,10 @@ __global__ void pml_h_fields_update_gpu(
  *   polarisation: Source component, 0 for x, 1 for y, 2 for z.
  *   iterations: Total number of time steps.
  */
-__global__ void Back_source(
-    int step, int iteration, float dx,
+__global__ void add_adjoint_sources(
+    int step, int iteration,
     const int* __restrict__ sourcelocation, const float* __restrict__ srcwaveforms,
-    float* Ex, float* Ey, float* Ez, float* uE4,
+    float* Ex, float* Ey, float* Ez,
     int NX, int NY, int NZ, int nsr, int polarisation, int iterations
 ){
     long long field_stride = (long long)NX * NY * NZ;
@@ -843,9 +1131,9 @@ __global__ void Back_source(
     float waveform_value = srcwaveforms[index];
     long long id4 = (long long)s * field_stride + i * NY * NZ + j * NZ + k;
 
-    if (polarisation == 0) Ex[id4] -= waveform_value;
-    else if (polarisation == 1) Ey[id4] -= waveform_value;
-    else if (polarisation == 2) Ez[id4] -= waveform_value;
+    if (polarisation == 0) Ex[id4] += waveform_value;
+    else if (polarisation == 1) Ey[id4] += waveform_value;
+    else if (polarisation == 2) Ez[id4] += waveform_value;
 }
 
 
@@ -883,13 +1171,44 @@ __global__ void copy_to_Eall_single(
 }
 
 
+/* Save R from the executed update E^(n+1) = ca E^n + cb R. */
+__global__ void copy_to_Rall_single(
+    float* __restrict__ dst_ptr, int t_idx,
+    const float* __restrict__ E, const float* __restrict__ Eold_ptr,
+    const float* __restrict__ ca, const float* __restrict__ cb,
+    int step, int NX, int NY, int NZ)
+{
+    long long nx1 = NX - 1, ny1 = NY - 1, nz1 = NZ - 1;
+    long long total = nx1 * ny1 * nz1;
+    long long work = blockIdx.x * blockDim.x + threadIdx.x;
+    if (work >= (long long)step * total) return;
+
+    int s = (int)(work / total);
+    long long idx = work % total;
+    long long i = idx / (ny1 * nz1);
+    long long rem = idx % (ny1 * nz1);
+    long long j = rem / nz1;
+    long long k = rem % nz1;
+    long long material_idx = i * NY * NZ + j * NZ + k;
+    long long field_idx = (long long)s * NX * NY * NZ + material_idx;
+    long long snap_stride = (long long)step * total;
+    long long saved_idx = (long long)t_idx * snap_stride + work;
+    float cb_value = cb[material_idx];
+
+    dst_ptr[saved_idx] = cb_value != 0.0f
+        ? (E[field_idx] - ca[material_idx] * Eold_ptr[saved_idx]) / cb_value
+        : 0.0f;
+}
+
+
 /*
  * Accumulate model gradients from saved forward fields and adjoint fields.
  *
  * Parameters:
  *   Ex, Ey, Ez: Adjoint electric field component arrays.
- *   Eall_ptr: Saved forward electric field history.
- *   d_E_buf: Device-side staging buffer for async-offloaded Eall snapshots.
+ *   Eall_ptr: Saved pre-update electric field E^n.
+ *   Rall_ptr: Saved effective right-hand side R^n.
+ *   d_E_buf, d_R_buf: Device staging buffers for host-offloaded snapshots.
  *   grader: Output relative permittivity gradient array.
  *   gradse: Output conductivity gradient array.
  *   i: Current reverse time-step index.
@@ -905,7 +1224,10 @@ __global__ void copy_to_Eall_single(
  */
 __global__ void accumulate_gradients(
     const float* __restrict__ Ex, const float* __restrict__ Ey, const float* __restrict__ Ez,
-    const float* __restrict__ Eall_ptr, const float* __restrict__ d_E_buf,
+    const float* __restrict__ Eall_ptr, const float* __restrict__ Rall_ptr,
+    const float* __restrict__ d_E_buf, const float* __restrict__ d_R_buf,
+    const float* __restrict__ ca, const float* __restrict__ cb,
+    const float* __restrict__ se,
     float* __restrict__ grader, float* __restrict__ gradse,
     int i, int step, int NX, int NY, int NZ, float dt,int errequiregrad,int serequiregrad,
     int S, int nt_saved, int use_async_offload, int fwi_mode
@@ -929,17 +1251,8 @@ __global__ void accumulate_gradients(
 
     long long e_stride = (long long)NX * NY * NZ;
     long long idx_E = (long long)s * e_stride + ix * NY * NZ + iy * NZ + iz;
+    long long material_idx = ix * NY * NZ + iy * NZ + iz;
     
-    long long idx0_curr = i / S;
-    long long idx1_curr = min(idx0_curr + 1, (long long)nt_saved - 1);
-    float w1_curr = (float)(i % S) / S;
-    float w0_curr = 1.0f - w1_curr;
-
-    long long idx0_prev = (i - 1) / S;
-    long long idx1_prev = min(idx0_prev + 1, (long long)nt_saved - 1);
-    float w1_prev = (float)((i - 1) % S) / S;
-    float w0_prev = 1.0f - w1_prev;
-
     float local_grader = 0.0f;
     float local_gradse = 0.0f;
 
@@ -951,28 +1264,36 @@ __global__ void accumulate_gradients(
 
     for (int c = 0; c < components; ++c) {
         long long comp_offset = (fwi_mode == 3) ? (long long)c * component_stride : 0;
-        long long ring_offset = (long long)c * snap_stride;
-        float e0_c, e1_c, e0_p, e1_p;
+        float e_old, rhs;
 
         if (use_async_offload) {
-            long long ring_stride = (long long)components * snap_stride;
-            e0_c = d_E_buf[(idx0_curr % 3) * ring_stride + ring_offset + base_idx];
-            e1_c = d_E_buf[(idx1_curr % 3) * ring_stride + ring_offset + base_idx];
-            e0_p = d_E_buf[(idx0_prev % 3) * ring_stride + ring_offset + base_idx];
-            e1_p = d_E_buf[(idx1_prev % 3) * ring_stride + ring_offset + base_idx];
+            long long device_idx = (long long)c * snap_stride + base_idx;
+            e_old = d_E_buf[device_idx];
+            rhs = d_R_buf[device_idx];
         } else {
-            e0_c = Eall_ptr[comp_offset + idx0_curr * snap_stride + base_idx];
-            e1_c = Eall_ptr[comp_offset + idx1_curr * snap_stride + base_idx];
-            e0_p = Eall_ptr[comp_offset + idx0_prev * snap_stride + base_idx];
-            e1_p = Eall_ptr[comp_offset + idx1_prev * snap_stride + base_idx];
+            long long saved_idx = comp_offset + (long long)(i / S) * snap_stride + base_idx;
+            e_old = Eall_ptr[saved_idx];
+            rhs = Rall_ptr[saved_idx];
         }
 
-        float e_curr = e0_c * w0_curr + e1_c * w1_curr;
-        float e_prev = e0_p * w0_prev + e1_p * w1_prev;
         float adjoint_val = adjoint_values[(fwi_mode == 3) ? c : 2];
+        float grad_ca = adjoint_val * e_old * (float)S;
+        float grad_cb = adjoint_val * rhs * (float)S;
+        float ca_value = ca[material_idx];
+        float cb_value = cb[material_idx];
 
-        if (errequiregrad == 1) local_grader += (e_curr - e_prev) * adjoint_val / dt;
-        if (serequiregrad == 1) local_gradse += e_curr * adjoint_val * dt;
+        if (se[material_idx] <= 100.0f) {
+            if (errequiregrad == 1) {
+                float dca_der = e0 * (1.0f - ca_value) * cb_value / dt;
+                float dcb_der = -e0 * cb_value * cb_value / dt;
+                local_grader += grad_ca * dca_der + grad_cb * dcb_der;
+            }
+            if (serequiregrad == 1) {
+                float dca_dse = -0.5f * (1.0f + ca_value) * cb_value;
+                float dcb_dse = -0.5f * cb_value * cb_value;
+                local_gradse += grad_ca * dca_dse + grad_cb * dcb_dse;
+            }
+        }
     }
 
     if (errequiregrad == 1) atomicAdd(&grader[idx], local_grader);
@@ -985,7 +1306,8 @@ __global__ void accumulate_gradients(
  *
  * Parameters:
  *   er, se, mr: Padded material property arrays.
- *   Eall_ptr: Saved forward electric field history buffer.
+ *   Eall_ptr: Saved pre-update electric field history.
+ *   Rall_ptr: Saved effective electric right-hand sides.
  *   Ex, Ey, Ez: Electric field component arrays.
  *   Hx, Hy, Hz: Magnetic field component arrays.
  *   uE0, uE1, uE4: Electric-field update coefficient arrays.
@@ -1015,7 +1337,7 @@ __global__ void accumulate_gradients(
  *   fwi_mode: Gradient mode; 2 saves Ez only, 3 saves Ex, Ey, and Ez.
  */
 DEEPGPR_API void forward(const float* __restrict__ er, const float* __restrict__ se, const float* __restrict__ mr,  
-             float* __restrict__ Eall_ptr, 
+             float* __restrict__ Eall_ptr, float* __restrict__ Rall_ptr,
              float* __restrict__ Ex,  float* __restrict__ Ey, float* __restrict__ Ez,  
              float* __restrict__ Hx, float* __restrict__ Hy,  float* __restrict__ Hz,
              float* __restrict__ uE0, float* __restrict__ uE1, float* __restrict__ uE4,
@@ -1055,6 +1377,7 @@ DEEPGPR_API void forward(const float* __restrict__ er, const float* __restrict__
     int nt_saved = (nt + sampling_interval - 1) / sampling_interval;
 
     float* d_E_buf = nullptr;
+    float* d_R_buf = nullptr;
     long long snap_size = (long long)step * (NX_FIELDS - 1) * (NY_FIELDS - 1) * (NZ_FIELDS - 1);
     long long component_stride = (long long)nt_saved * snap_size;
     
@@ -1065,6 +1388,7 @@ DEEPGPR_API void forward(const float* __restrict__ er, const float* __restrict__
         CUDA_CHECK(cudaStreamCreate(&stream_trans));
         CUDA_CHECK(cudaEventCreate(&event_comp));
         CUDA_CHECK(cudaMalloc(&d_E_buf, 2 * e_components * snap_size * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&d_R_buf, 2 * e_components * snap_size * sizeof(float)));
     }
 
     long long blockSize = 256;
@@ -1081,8 +1405,30 @@ DEEPGPR_API void forward(const float* __restrict__ er, const float* __restrict__
     dim3 grid_copy(CEIL_DIV((long long)step * total_copy, blockSize));
 
     for (int i = 0; i < nt; i++) {
-        store_outputs<<<grid_rx, blockSize, 0, stream_comp>>>(step, nrx, i, receiverlocation, rxs, Ex, Ey, Ez, Hx, Hy, Hz, NX_FIELDS, NY_FIELDS, NZ_FIELDS, nt);
-        CUDA_CHECK_LAST();
+        if (i % sampling_interval == 0) {
+            int t_saved = i / sampling_interval;
+            if (use_async) {
+                int buf_idx = t_saved % 2;
+                long long buf_base = (long long)buf_idx * e_components * snap_size;
+                CUDA_CHECK(cudaStreamSynchronize(stream_trans));
+                if (fwi_mode == 3) {
+                    copy_to_Eall_single<<<grid_copy, blockSize, 0, stream_comp>>>(d_E_buf + buf_base, 0, Ex, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
+                    copy_to_Eall_single<<<grid_copy, blockSize, 0, stream_comp>>>(d_E_buf + buf_base + snap_size, 0, Ey, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
+                    copy_to_Eall_single<<<grid_copy, blockSize, 0, stream_comp>>>(d_E_buf + buf_base + 2 * snap_size, 0, Ez, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
+                } else {
+                    copy_to_Eall_single<<<grid_copy, blockSize, 0, stream_comp>>>(d_E_buf + buf_base, 0, Ez, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
+                }
+                CUDA_CHECK_LAST();
+            } else if (fwi_mode == 3) {
+                copy_to_Eall_single<<<grid_copy, blockSize, 0, stream_comp>>>(Eall_ptr, t_saved, Ex, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
+                copy_to_Eall_single<<<grid_copy, blockSize, 0, stream_comp>>>(Eall_ptr + component_stride, t_saved, Ey, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
+                copy_to_Eall_single<<<grid_copy, blockSize, 0, stream_comp>>>(Eall_ptr + 2 * component_stride, t_saved, Ez, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
+                CUDA_CHECK_LAST();
+            } else {
+                copy_to_Eall_single<<<grid_copy, blockSize, 0, stream_comp>>>(Eall_ptr, t_saved, Ez, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
+                CUDA_CHECK_LAST();
+            }
+        }
 
         if (fdtd_order == 8) {
             h_fields_base_update_gpu<8><<<grid_fields, blockSize, 0, stream_comp>>>(uH0, uH1, Ex, Ey, Ez, Hx, Hy, Hz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
@@ -1137,49 +1483,50 @@ DEEPGPR_API void forward(const float* __restrict__ er, const float* __restrict__
         if (i % sampling_interval == 0) {
             int t_saved = i / sampling_interval;
             if (use_async) {
-                int buf_idx = t_saved % 2; 
+                int buf_idx = t_saved % 2;
                 long long buf_base = (long long)buf_idx * e_components * snap_size;
-                CUDA_CHECK(cudaStreamSynchronize(stream_trans));
                 if (fwi_mode == 3) {
-                    copy_to_Eall_single<<<grid_copy, blockSize, 0, stream_comp>>>(d_E_buf + buf_base, 0, Ex, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
-                    CUDA_CHECK_LAST();
-                    copy_to_Eall_single<<<grid_copy, blockSize, 0, stream_comp>>>(d_E_buf + buf_base + snap_size, 0, Ey, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
-                    CUDA_CHECK_LAST();
-                    copy_to_Eall_single<<<grid_copy, blockSize, 0, stream_comp>>>(d_E_buf + buf_base + 2 * snap_size, 0, Ez, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
-                    CUDA_CHECK_LAST();
+                    copy_to_Rall_single<<<grid_copy, blockSize, 0, stream_comp>>>(d_R_buf + buf_base, 0, Ex, d_E_buf + buf_base, uE0, uE4, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
+                    copy_to_Rall_single<<<grid_copy, blockSize, 0, stream_comp>>>(d_R_buf + buf_base + snap_size, 0, Ey, d_E_buf + buf_base + snap_size, uE0, uE4, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
+                    copy_to_Rall_single<<<grid_copy, blockSize, 0, stream_comp>>>(d_R_buf + buf_base + 2 * snap_size, 0, Ez, d_E_buf + buf_base + 2 * snap_size, uE0, uE4, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
                 } else {
-                    copy_to_Eall_single<<<grid_copy, blockSize, 0, stream_comp>>>(d_E_buf + buf_base, 0, Ez, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
-                    CUDA_CHECK_LAST();
+                    copy_to_Rall_single<<<grid_copy, blockSize, 0, stream_comp>>>(d_R_buf + buf_base, 0, Ez, d_E_buf + buf_base, uE0, uE4, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
                 }
+                CUDA_CHECK_LAST();
                 CUDA_CHECK(cudaEventRecord(event_comp, stream_comp));
                 CUDA_CHECK(cudaStreamWaitEvent(stream_trans, event_comp, 0));
                 if (fwi_mode == 3) {
                     CUDA_CHECK(cudaMemcpyAsync(Eall_ptr + t_saved * snap_size, d_E_buf + buf_base, snap_size * sizeof(float), cudaMemcpyDeviceToHost, stream_trans));
                     CUDA_CHECK(cudaMemcpyAsync(Eall_ptr + component_stride + t_saved * snap_size, d_E_buf + buf_base + snap_size, snap_size * sizeof(float), cudaMemcpyDeviceToHost, stream_trans));
                     CUDA_CHECK(cudaMemcpyAsync(Eall_ptr + 2 * component_stride + t_saved * snap_size, d_E_buf + buf_base + 2 * snap_size, snap_size * sizeof(float), cudaMemcpyDeviceToHost, stream_trans));
+                    CUDA_CHECK(cudaMemcpyAsync(Rall_ptr + t_saved * snap_size, d_R_buf + buf_base, snap_size * sizeof(float), cudaMemcpyDeviceToHost, stream_trans));
+                    CUDA_CHECK(cudaMemcpyAsync(Rall_ptr + component_stride + t_saved * snap_size, d_R_buf + buf_base + snap_size, snap_size * sizeof(float), cudaMemcpyDeviceToHost, stream_trans));
+                    CUDA_CHECK(cudaMemcpyAsync(Rall_ptr + 2 * component_stride + t_saved * snap_size, d_R_buf + buf_base + 2 * snap_size, snap_size * sizeof(float), cudaMemcpyDeviceToHost, stream_trans));
                 } else {
                     CUDA_CHECK(cudaMemcpyAsync(Eall_ptr + t_saved * snap_size, d_E_buf + buf_base, snap_size * sizeof(float), cudaMemcpyDeviceToHost, stream_trans));
+                    CUDA_CHECK(cudaMemcpyAsync(Rall_ptr + t_saved * snap_size, d_R_buf + buf_base, snap_size * sizeof(float), cudaMemcpyDeviceToHost, stream_trans));
                 }
             } else {
                 if (fwi_mode == 3) {
-                    copy_to_Eall_single<<<grid_copy, blockSize, 0, stream_comp>>>(Eall_ptr, t_saved, Ex, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
-                    CUDA_CHECK_LAST();
-                    copy_to_Eall_single<<<grid_copy, blockSize, 0, stream_comp>>>(Eall_ptr + component_stride, t_saved, Ey, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
-                    CUDA_CHECK_LAST();
-                    copy_to_Eall_single<<<grid_copy, blockSize, 0, stream_comp>>>(Eall_ptr + 2 * component_stride, t_saved, Ez, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
-                    CUDA_CHECK_LAST();
+                    copy_to_Rall_single<<<grid_copy, blockSize, 0, stream_comp>>>(Rall_ptr, t_saved, Ex, Eall_ptr, uE0, uE4, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
+                    copy_to_Rall_single<<<grid_copy, blockSize, 0, stream_comp>>>(Rall_ptr + component_stride, t_saved, Ey, Eall_ptr + component_stride, uE0, uE4, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
+                    copy_to_Rall_single<<<grid_copy, blockSize, 0, stream_comp>>>(Rall_ptr + 2 * component_stride, t_saved, Ez, Eall_ptr + 2 * component_stride, uE0, uE4, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
                 } else {
-                    copy_to_Eall_single<<<grid_copy, blockSize, 0, stream_comp>>>(Eall_ptr, t_saved, Ez, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
-                    CUDA_CHECK_LAST();
+                    copy_to_Rall_single<<<grid_copy, blockSize, 0, stream_comp>>>(Rall_ptr, t_saved, Ez, Eall_ptr, uE0, uE4, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
                 }
+                CUDA_CHECK_LAST();
             }
         }
+
+        store_outputs<<<grid_rx, blockSize, 0, stream_comp>>>(step, nrx, i, receiverlocation, rxs, Ex, Ey, Ez, Hx, Hy, Hz, NX_FIELDS, NY_FIELDS, NZ_FIELDS, nt);
+        CUDA_CHECK_LAST();
     }
 
     if (use_async) {
         CUDA_CHECK(cudaStreamSynchronize(stream_comp));
         CUDA_CHECK(cudaStreamSynchronize(stream_trans));
         CUDA_CHECK(cudaFree(d_E_buf));
+        CUDA_CHECK(cudaFree(d_R_buf));
         CUDA_CHECK(cudaEventDestroy(event_comp));
         CUDA_CHECK(cudaStreamDestroy(stream_comp));
         CUDA_CHECK(cudaStreamDestroy(stream_trans));
@@ -1191,7 +1538,8 @@ DEEPGPR_API void forward(const float* __restrict__ er, const float* __restrict__
  *
  * Parameters:
  *   er, se, mr: Padded material property arrays.
- *   Eall_ptr: Saved forward electric field history buffer.
+ *   Eall_ptr: Saved pre-update electric field history.
+ *   Rall_ptr: Saved effective electric right-hand sides.
  *   Ex, Ey, Ez: Adjoint electric field component arrays.
  *   Hx, Hy, Hz: Adjoint magnetic field component arrays.
  *   uE0, uE1, uE4: Electric-field update coefficient arrays.
@@ -1222,8 +1570,8 @@ DEEPGPR_API void forward(const float* __restrict__ er, const float* __restrict__
  *   sampling_interval: Forward wavefield sampling interval.
  *   fwi_mode: Gradient mode; 2 uses Ez only, 3 uses Ex, Ey, and Ez.
  */
-DEEPGPR_API void backward(const float* __restrict__ er, const float* __restrict__ se, const float* __restrict__ mr,  
-             const float* __restrict__ Eall_ptr,
+DEEPGPR_API void backward(const float* __restrict__ er, const float* __restrict__ se, const float* __restrict__ mr,
+             const float* __restrict__ Eall_ptr, const float* __restrict__ Rall_ptr,
              float* __restrict__ Ex,  float* __restrict__ Ey, float* __restrict__ Ez,  
              float* __restrict__ Hx, float* __restrict__ Hy,  float* __restrict__ Hz,
              float* __restrict__ uE0, float* __restrict__ uE1, float* __restrict__ uE4,
@@ -1262,6 +1610,7 @@ DEEPGPR_API void backward(const float* __restrict__ er, const float* __restrict_
     int e_components = (fwi_mode == 3) ? 3 : 1;
 
     float* d_E_buf = nullptr;
+    float* d_R_buf = nullptr;
     long long snap_size = (long long)step * (NX_FIELDS - 1) * (NY_FIELDS - 1) * (NZ_FIELDS - 1);
     
     cudaStream_t stream_comp = 0, stream_trans = 0;
@@ -1270,7 +1619,8 @@ DEEPGPR_API void backward(const float* __restrict__ er, const float* __restrict_
         CUDA_CHECK(cudaStreamCreate(&stream_comp));
         CUDA_CHECK(cudaStreamCreate(&stream_trans));
         CUDA_CHECK(cudaEventCreate(&event_trans));
-        CUDA_CHECK(cudaMalloc(&d_E_buf, 3 * e_components * snap_size * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&d_E_buf, e_components * snap_size * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&d_R_buf, e_components * snap_size * sizeof(float)));
     }
 
     long long blockSize = 256;
@@ -1278,7 +1628,7 @@ DEEPGPR_API void backward(const float* __restrict__ er, const float* __restrict_
     dim3 grid_material(CEIL_DIV(total_fields, blockSize));
     dim3 grid_fields(CEIL_DIV((long long)step * total_fields, blockSize));
 
-    ucgetbackward<<<grid_material, blockSize, 0, stream_comp>>>(er, se, mr, uE0, uE1, uE4, uH0, uH1, uH4, NX_FIELDS, NY_FIELDS, NZ_FIELDS, dt, dx);
+    ucgetforward<<<grid_material, blockSize, 0, stream_comp>>>(er, se, mr, uE0, uE1, uE4, uH0, uH1, uH4, NX_FIELDS, NY_FIELDS, NZ_FIELDS, dt, dx);
     CUDA_CHECK_LAST();
 
     long long total_src = (long long)step * nsrc;
@@ -1291,91 +1641,49 @@ DEEPGPR_API void backward(const float* __restrict__ er, const float* __restrict_
     int nt_saved = (nt + sampling_interval - 1) / sampling_interval;
     long long component_stride = (long long)nt_saved * snap_size;
 
-    int max_t_needed = (nt - 1) / sampling_interval;
-    max_t_needed = min(max_t_needed + 1, nt_saved - 1);
-    int lowest_t_loaded = max_t_needed - 2;
-
-    if (use_async) {
-        for(int k = 0; k < 3; k++) {
-            int t_load = max_t_needed - k;
-            if(t_load >= 0) {
-                long long ring_base = (long long)(t_load % 3) * e_components * snap_size;
-                for (int c = 0; c < e_components; ++c) {
-                    long long comp_offset = (fwi_mode == 3) ? (long long)c * component_stride : 0;
-                    CUDA_CHECK(cudaMemcpyAsync(d_E_buf + ring_base + (long long)c * snap_size, Eall_ptr + comp_offset + (long long)t_load * snap_size, snap_size * sizeof(float), cudaMemcpyHostToDevice, stream_trans));
-                }
-            }
-        }
-        CUDA_CHECK(cudaStreamSynchronize(stream_trans));
-    }
-
-    for (int i = nt-1; i > 0; i--) {
-        if (use_async) {
-            int needed_t_min = (i - 1) / sampling_interval;
-            if (needed_t_min < lowest_t_loaded && needed_t_min >= 0) {
-                CUDA_CHECK(cudaStreamSynchronize(stream_trans));
-                long long ring_base = (long long)(needed_t_min % 3) * e_components * snap_size;
-                for (int c = 0; c < e_components; ++c) {
-                    long long comp_offset = (fwi_mode == 3) ? (long long)c * component_stride : 0;
-                    CUDA_CHECK(cudaMemcpyAsync(d_E_buf + ring_base + (long long)c * snap_size, Eall_ptr + comp_offset + (long long)needed_t_min * snap_size, snap_size * sizeof(float), cudaMemcpyHostToDevice, stream_trans));
-                }
-                lowest_t_loaded = needed_t_min;
+    for (int i = nt - 1; i >= 0; i--) {
+        if (use_async && i % sampling_interval == 0) {
+            int t_saved = i / sampling_interval;
+            CUDA_CHECK(cudaStreamSynchronize(stream_trans));
+            for (int c = 0; c < e_components; ++c) {
+                long long comp_offset = (fwi_mode == 3) ? (long long)c * component_stride : 0;
+                CUDA_CHECK(cudaMemcpyAsync(d_E_buf + (long long)c * snap_size, Eall_ptr + comp_offset + (long long)t_saved * snap_size, snap_size * sizeof(float), cudaMemcpyHostToDevice, stream_trans));
+                CUDA_CHECK(cudaMemcpyAsync(d_R_buf + (long long)c * snap_size, Rall_ptr + comp_offset + (long long)t_saved * snap_size, snap_size * sizeof(float), cudaMemcpyHostToDevice, stream_trans));
             }
             CUDA_CHECK(cudaEventRecord(event_trans, stream_trans));
             CUDA_CHECK(cudaStreamWaitEvent(stream_comp, event_trans, 0));
         }
-
-        Back_source<<<grid_src, blockSize, 0, stream_comp>>>(step, i, dx, sourcelocation, srcwaveforms, Ex, Ey, Ez, uE4, NX_FIELDS, NY_FIELDS, NZ_FIELDS, nsrc, polarisation, nt);
-        CUDA_CHECK_LAST();
         
-        if (fdtd_order == 8) {
-            e_fields_base_update_gpu<8><<<grid_fields, blockSize, 0, stream_comp>>>(uE0, uE1, Ex, Ey, Ez, Hx, Hy, Hz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
-            CUDA_CHECK_LAST();
-            pml_e_fields_update_gpu<8><<<grid_fields, blockSize, 0, stream_comp>>>(
-                Ex, Ey, Ez, Hx, Hy, Hz, dx, dx, dx, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
-                pml0, pml1, pml2, pml3, pml4, pml5, x0ER, xmER, y0ER, ymER, z0ER, zmER, uE4,
-                x0EPhi1, x0EPhi2, xmEPhi1, xmEPhi2, y0EPhi1, y0EPhi2, ymEPhi1, ymEPhi2, z0EPhi1, z0EPhi2, zmEPhi1, zmEPhi2);
-            CUDA_CHECK_LAST();
-            h_fields_base_update_gpu<8><<<grid_fields, blockSize, 0, stream_comp>>>(uH0, uH1, Ex, Ey, Ez, Hx, Hy, Hz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
-            CUDA_CHECK_LAST();
-            pml_h_fields_update_gpu<8><<<grid_fields, blockSize, 0, stream_comp>>>(
-                Ex, Ey, Ez, Hx, Hy, Hz, dx, dx, dx, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
-                pml0, pml1, pml2, pml3, pml4, pml5, x0HR, xmHR, y0HR, ymHR, z0HR, zmHR, uH4,
-                x0HPhi1, x0HPhi2, xmHPhi1, xmHPhi2, y0HPhi1, y0HPhi2, ymHPhi1, ymHPhi2, z0HPhi1, z0HPhi2, zmHPhi1, zmHPhi2);
-            CUDA_CHECK_LAST();
-        } else if (fdtd_order == 4) {
-            e_fields_base_update_gpu<4><<<grid_fields, blockSize, 0, stream_comp>>>(uE0, uE1, Ex, Ey, Ez, Hx, Hy, Hz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
-            CUDA_CHECK_LAST();
-            pml_e_fields_update_gpu<4><<<grid_fields, blockSize, 0, stream_comp>>>(
-                Ex, Ey, Ez, Hx, Hy, Hz, dx, dx, dx, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
-                pml0, pml1, pml2, pml3, pml4, pml5, x0ER, xmER, y0ER, ymER, z0ER, zmER, uE4,
-                x0EPhi1, x0EPhi2, xmEPhi1, xmEPhi2, y0EPhi1, y0EPhi2, ymEPhi1, ymEPhi2, z0EPhi1, z0EPhi2, zmEPhi1, zmEPhi2);
-            CUDA_CHECK_LAST();
-            h_fields_base_update_gpu<4><<<grid_fields, blockSize, 0, stream_comp>>>(uH0, uH1, Ex, Ey, Ez, Hx, Hy, Hz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
-            CUDA_CHECK_LAST();
-            pml_h_fields_update_gpu<4><<<grid_fields, blockSize, 0, stream_comp>>>(
-                Ex, Ey, Ez, Hx, Hy, Hz, dx, dx, dx, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
-                pml0, pml1, pml2, pml3, pml4, pml5, x0HR, xmHR, y0HR, ymHR, z0HR, zmHR, uH4,
-                x0HPhi1, x0HPhi2, xmHPhi1, xmHPhi2, y0HPhi1, y0HPhi2, ymHPhi1, ymHPhi2, z0HPhi1, z0HPhi2, zmHPhi1, zmHPhi2);
-            CUDA_CHECK_LAST();
-        } else {
-            e_fields_base_update_gpu<2><<<grid_fields, blockSize, 0, stream_comp>>>(uE0, uE1, Ex, Ey, Ez, Hx, Hy, Hz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
-            CUDA_CHECK_LAST();
-            pml_e_fields_update_gpu<2><<<grid_fields, blockSize, 0, stream_comp>>>(
-                Ex, Ey, Ez, Hx, Hy, Hz, dx, dx, dx, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
-                pml0, pml1, pml2, pml3, pml4, pml5, x0ER, xmER, y0ER, ymER, z0ER, zmER, uE4,
-                x0EPhi1, x0EPhi2, xmEPhi1, xmEPhi2, y0EPhi1, y0EPhi2, ymEPhi1, ymEPhi2, z0EPhi1, z0EPhi2, zmEPhi1, zmEPhi2);
-            CUDA_CHECK_LAST();
-            h_fields_base_update_gpu<2><<<grid_fields, blockSize, 0, stream_comp>>>(uH0, uH1, Ex, Ey, Ez, Hx, Hy, Hz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
-            CUDA_CHECK_LAST();
-            pml_h_fields_update_gpu<2><<<grid_fields, blockSize, 0, stream_comp>>>(
-                Ex, Ey, Ez, Hx, Hy, Hz, dx, dx, dx, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
-                pml0, pml1, pml2, pml3, pml4, pml5, x0HR, xmHR, y0HR, ymHR, z0HR, zmHR, uH4,
-                x0HPhi1, x0HPhi2, xmHPhi1, xmHPhi2, y0HPhi1, y0HPhi2, ymHPhi1, ymHPhi2, z0HPhi1, z0HPhi2, zmHPhi1, zmHPhi2);
+        add_adjoint_sources<<<grid_src, blockSize, 0, stream_comp>>>(
+            step, i, sourcelocation, srcwaveforms, Ex, Ey, Ez,
+            NX_FIELDS, NY_FIELDS, NZ_FIELDS, nsrc, polarisation, nt);
+        CUDA_CHECK_LAST();
+
+        if (i % sampling_interval == 0) {
+            accumulate_gradients<<<grid_grad, blockSize, 0, stream_comp>>>(
+                Ex, Ey, Ez, Eall_ptr, Rall_ptr, d_E_buf, d_R_buf, uE0, uE4, se,
+                grad_er, grad_se, i, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, dt,
+                errequiregrad, serequiregrad, sampling_interval, nt_saved, use_async, fwi_mode);
             CUDA_CHECK_LAST();
         }
 
-        accumulate_gradients<<<grid_grad, blockSize, 0, stream_comp>>>(Ex, Ey, Ez, Eall_ptr, d_E_buf, grad_er, grad_se, i, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, dt, errequiregrad, serequiregrad, sampling_interval, nt_saved, use_async, fwi_mode);
+        pml_e_fields_adjoint_gpu<<<grid_fields, blockSize, 0, stream_comp>>>(
+            Ex, Ey, Ez, Hx, Hy, Hz, dx, dx, dx, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
+            pml0, pml1, pml2, pml3, pml4, pml5, x0ER, xmER, y0ER, ymER, z0ER, zmER, uE4,
+            x0EPhi1, x0EPhi2, xmEPhi1, xmEPhi2, y0EPhi1, y0EPhi2, ymEPhi1, ymEPhi2,
+            z0EPhi1, z0EPhi2, zmEPhi1, zmEPhi2, fdtd_order);
+        CUDA_CHECK_LAST();
+        e_fields_base_adjoint_gpu<<<grid_fields, blockSize, 0, stream_comp>>>(
+            uE0, uE1, Ex, Ey, Ez, Hx, Hy, Hz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, fdtd_order);
+        CUDA_CHECK_LAST();
+        pml_h_fields_adjoint_gpu<<<grid_fields, blockSize, 0, stream_comp>>>(
+            Ex, Ey, Ez, Hx, Hy, Hz, dx, dx, dx, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
+            pml0, pml1, pml2, pml3, pml4, pml5, x0HR, xmHR, y0HR, ymHR, z0HR, zmHR, uH4,
+            x0HPhi1, x0HPhi2, xmHPhi1, xmHPhi2, y0HPhi1, y0HPhi2, ymHPhi1, ymHPhi2,
+            z0HPhi1, z0HPhi2, zmHPhi1, zmHPhi2, fdtd_order);
+        CUDA_CHECK_LAST();
+        h_fields_base_adjoint_gpu<<<grid_fields, blockSize, 0, stream_comp>>>(
+            uH0, uH1, Ex, Ey, Ez, Hx, Hy, Hz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, fdtd_order);
         CUDA_CHECK_LAST();
     }
 
@@ -1383,6 +1691,7 @@ DEEPGPR_API void backward(const float* __restrict__ er, const float* __restrict_
         CUDA_CHECK(cudaStreamSynchronize(stream_comp));
         CUDA_CHECK(cudaStreamSynchronize(stream_trans));
         CUDA_CHECK(cudaFree(d_E_buf));
+        CUDA_CHECK(cudaFree(d_R_buf));
         CUDA_CHECK(cudaEventDestroy(event_trans));
         CUDA_CHECK(cudaStreamDestroy(stream_comp));
         CUDA_CHECK(cudaStreamDestroy(stream_trans));

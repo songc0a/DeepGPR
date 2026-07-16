@@ -4,5 +4,5 @@ dist/
 build/
 .vscode/
 *.egg-info/
-pyproject.toml
 .DS_Store
+experiment/

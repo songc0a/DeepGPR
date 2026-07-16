@@ -88,8 +88,24 @@ def compute(device, dx=None, dt=None,
         raise ValueError("fdtd_order must be one of 2, 4, or 8.")
     if mode not in (2, 3):
         raise ValueError("mode must be 2 or 3.")
+    if not isinstance(model_gradient_sampling_interval, int) or model_gradient_sampling_interval < 1:
+        raise ValueError("model_gradient_sampling_interval must be a positive integer.")
+    if source_direction not in (0, 1, 2) or reciever_direction not in (0, 1, 2):
+        raise ValueError("source_direction and reciever_direction must be 0, 1, or 2.")
+    if getattr(source_amplitudes, "requires_grad", False):
+        raise NotImplementedError("DeepGPR does not currently return source-amplitude gradients.")
+    if getattr(mr, "requires_grad", False):
+        raise NotImplementedError("DeepGPR does not currently return relative-permeability gradients.")
 
     er,se,nx,ny,nz,nt,nstep,nsr,nrx,ere,see,mr,spatial_mode,dtype,pmlthick,source_amplitudes=initialization(device,er,se,mr,source_amplitudes,source_location,receiver_location,dx,dt,pmlthick)
+
+    needs_model_gradient = er.requires_grad or se.requires_grad
+    if needs_model_gradient and mode == 2:
+        if spatial_mode != 2 or source_direction != 2 or reciever_direction != 2:
+            raise ValueError(
+                "mode=2 is an exact model-gradient mode only for 2D Ez-TM modeling. "
+                "Use mode=3 for 3D or other electric-field components."
+            )
 
     Ex,Ey,Ez=create_or_separate(E,nx,ny,nz,nstep,device,dtype)
     Hx,Hy,Hz=create_or_separate(H,nx,ny,nz,nstep,device,dtype)
@@ -182,6 +198,7 @@ class DeepGPR(torch.autograd.Function):
         ctx.use_async_offload = bool(use_async_offload and device.type == "cuda")
         ctx.fdtd_order = fdtd_order
         ctx.mode = mode
+        ctx.reciever_direction = reciever_direction
         ctx.debug = bool(debug)
 
         nt_saved = (nt + model_gradient_sampling_interval - 1) // model_gradient_sampling_interval
@@ -194,8 +211,10 @@ class DeepGPR(torch.autograd.Function):
 
         if ctx.use_async_offload:
             Eall = torch.zeros(eall_shape, device='cpu', dtype=dtype).pin_memory()
+            Rall = torch.zeros(eall_shape, device='cpu', dtype=dtype).pin_memory()
         else:
             Eall = torch.zeros(eall_shape, device=device, dtype=dtype).contiguous()
+            Rall = torch.zeros(eall_shape, device=device, dtype=dtype).contiguous()
 
         Eupdatecoffs0=torch.zeros((nx+1,ny+1,nz+1), device=device, dtype=dtype)
         Eupdatecoffs1=torch.zeros((nx+1,ny+1,nz+1), device=device, dtype=dtype)
@@ -212,7 +231,8 @@ class DeepGPR(torch.autograd.Function):
                 ctypes.cast(ere.data_ptr(), ctypes.POINTER(ctypes.c_float)), 
                 ctypes.cast(see.data_ptr(), ctypes.POINTER(ctypes.c_float)), 
                 ctypes.cast(mr.data_ptr(), ctypes.POINTER(ctypes.c_float)),
-                ctypes.cast(Eall.data_ptr(), ctypes.POINTER(ctypes.c_float)),              
+                ctypes.cast(Eall.data_ptr(), ctypes.POINTER(ctypes.c_float)),
+                ctypes.cast(Rall.data_ptr(), ctypes.POINTER(ctypes.c_float)),
                 ctypes.cast(Ex.data_ptr(), ctypes.POINTER(ctypes.c_float)),
                 ctypes.cast(Ey.data_ptr(), ctypes.POINTER(ctypes.c_float)),
                 ctypes.cast(Ez.data_ptr(), ctypes.POINTER(ctypes.c_float)),
@@ -276,6 +296,8 @@ class DeepGPR(torch.autograd.Function):
             _check_nonzero_source_created_fields(c_lib, source_amplitudes, Ex, Ey, Ez, Hx, Hy, Hz)
 
         ctx.Eall = Eall
+        ctx.Rall = Rall
+        ctx.mark_non_differentiable(Eall)
         return (Ex,Ey,Ez,Hx,Hy,Hz,x0EPhi1,x0EPhi2,x0HPhi1,x0HPhi2,xmEPhi1,xmEPhi2,xmHPhi1,xmHPhi2,y0EPhi1,y0EPhi2,y0HPhi1,y0HPhi2,ymEPhi1,ymEPhi2,ymHPhi1,ymHPhi2,z0EPhi1,z0EPhi2,z0HPhi1,z0HPhi2,zmEPhi1,zmEPhi2,zmHPhi1,zmHPhi2,Eall,receiver_amplitudes[:,reciever_direction,:,:])
 
     @staticmethod
@@ -337,11 +359,13 @@ class DeepGPR(torch.autograd.Function):
         pmlthick=ctx.pmlthick
         device=ctx.device
         Eall=ctx.Eall
+        Rall=ctx.Rall
         model_gradient_sampling_interval = ctx.model_gradient_sampling_interval
         c_lib = get_deepgpr_lib(device)
         set_library_fdtd_order(c_lib, ctx.fdtd_order)
 
         Eall=Eall.contiguous()
+        Rall=Rall.contiguous()
         gEx=gEx.contiguous()
         gEy=gEy.contiguous()
         gEz=gEz.contiguous()
@@ -402,7 +426,8 @@ class DeepGPR(torch.autograd.Function):
                 ctypes.cast(ere.data_ptr(), ctypes.POINTER(ctypes.c_float)), 
                 ctypes.cast(see.data_ptr(), ctypes.POINTER(ctypes.c_float)), 
                 ctypes.cast(mr.data_ptr(), ctypes.POINTER(ctypes.c_float)),
-                ctypes.cast(Eall.data_ptr(), ctypes.POINTER(ctypes.c_float)),               
+                ctypes.cast(Eall.data_ptr(), ctypes.POINTER(ctypes.c_float)),
+                ctypes.cast(Rall.data_ptr(), ctypes.POINTER(ctypes.c_float)),
                 ctypes.cast(gEx.data_ptr(), ctypes.POINTER(ctypes.c_float)),
                 ctypes.cast(gEy.data_ptr(), ctypes.POINTER(ctypes.c_float)),
                 ctypes.cast(gEz.data_ptr(), ctypes.POINTER(ctypes.c_float)),
@@ -440,7 +465,7 @@ class DeepGPR(torch.autograd.Function):
                 dt, nt, nstep, nrx, dx,
                 nx+1, ny+1, nz+1, nsr,
                 ctypes.cast(receiver_location.data_ptr(), ctypes.POINTER(ctypes.c_int)), ctypes.cast(sourceamp.data_ptr(), ctypes.POINTER(ctypes.c_float)),
-                2,
+                ctx.reciever_direction,
                 ctypes.cast(grad_er.data_ptr(), ctypes.POINTER(ctypes.c_float)), ctypes.cast(grad_se.data_ptr(), ctypes.POINTER(ctypes.c_float)),errequiregrad,serequiregrad,
                 model_gradient_sampling_interval,
                 ctx.mode)
@@ -471,7 +496,8 @@ class DeepGPR(torch.autograd.Function):
             check_tensors_for_nan_inf(d="backward", **tensors_to_check)
 
         ctx.Eall = None
-        del Eall,er, se, mr,receiver_location,x0,xm,y0,ym,z0,zm,x01,x02,xm1,xm2,y01,y02,ym1,ym2,z01,z02,zm1,zm2,ere,see, Eupdatecoffs0, Eupdatecoffs1, Eupdatecoffs4, Hupdatecoffs0, Hupdatecoffs1, Hupdatecoffs4
+        ctx.Rall = None
+        del Eall,Rall,er, se, mr,receiver_location,x0,xm,y0,ym,z0,zm,x01,x02,xm1,xm2,y01,y02,ym1,ym2,z01,z02,zm1,zm2,ere,see, Eupdatecoffs0, Eupdatecoffs1, Eupdatecoffs4, Hupdatecoffs0, Hupdatecoffs1, Hupdatecoffs4
 
         return (
                     grad_er, grad_se,         

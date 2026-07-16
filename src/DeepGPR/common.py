@@ -52,7 +52,13 @@ def initialization(device, er,se,mr,source_amplitudes,source_location,receiver_l
     if len(se.shape) == 2:
         se = se.reshape(*se.shape, 1)
     elif len(se.shape) != 3:
-        raise ValueError('The shape of epsilon should be 2-d or 3-d.')
+        raise ValueError('The shape of sigma should be 2-d or 3-d.')
+
+    if mr is not None:
+        if len(mr.shape) == 2:
+            mr = mr.reshape(*mr.shape, 1)
+        elif len(mr.shape) != 3:
+            raise ValueError('The shape of mr should be 2-d or 3-d.')
 
     if er.shape == se.shape:
         nx=er.shape[0]
@@ -70,7 +76,7 @@ def initialization(device, er,se,mr,source_amplitudes,source_location,receiver_l
             if mr.shape == er.shape:
                 mr=mr.to(device)
             else:
-                raise ValueError('The shape of miu should be the same as epsilon and sigma.')
+                raise ValueError('The shape of mr should be the same as epsilon and sigma.')
     else:
         raise ValueError('The shape of epsilon and sigma should be the same.')
 

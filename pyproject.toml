@@ -1,0 +1,63 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "DeepGPR"
+version = "0.0.14"
+authors = [
+    { name = "Lei Liu", email = "liulei990222@gmail.com" }
+]
+description = "PyTorch and CUDA for GPR FWI"
+readme = "README.md"
+license = "MIT"
+license-files = ["license"]
+requires-python = ">=3.8"
+
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS :: MacOS X",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Scientific/Engineering :: Physics"
+]
+
+dependencies = [
+    "numpy",
+    "scipy",
+    "matplotlib",
+    "torch"
+]
+
+[project.urls]
+Homepage = "https://github.com/songc0a/DeepGPR"
+Repository = "https://github.com/songc0a/DeepGPR"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+DeepGPR = [
+    "lib/*.cu",
+    "lib/*.cuh",
+    "lib/*.h",
+    "lib/*.hpp",
+    "lib/*.cpp",
+    "lib/*.c",
+    "lib/*.dll",
+    "lib/*.so",
+    "lib/*.dylib",
+    "lib/*.pyd"
+]
+
+[tool.setuptools.exclude-package-data]
+DeepGPR = [
+    ".DS_Store",
+    "__pycache__/*",
+    "*.pyc"
+]

@@ -183,8 +183,16 @@ This section defines the geometric observation system (coordinates) and the exci
 
 `mode` only changes how the model gradients are accumulated during backpropagation:
 
-- `mode=2` (default): Saves Ez in `Eall` and computes relative permittivity/conductivity gradients from Ez only. This keeps the old behavior.
+- `mode=2` (default): Saves Ez in `Eall` and computes relative permittivity/conductivity gradients from Ez only.
 - `mode=3`: Saves Ex, Ey, and Ez in `Eall` and computes relative permittivity/conductivity gradients from all three electric-field components. This is intended for complete 3D Maxwell FWI. The adjoint source polarization is not changed by this option.
+
+When `er` or `se` requires gradients, `mode=2` is restricted to 2D Ez-TM modeling; use `mode=3` for 3D gradients. Gradients with respect to `source_amplitudes` and `mr` are not currently implemented and are rejected explicitly.
+
+### 4.2 Discrete Adjoint Gradient
+
+The backward solver is the explicit transpose of the executed FDTD and CPML updates. It first accumulates gradients with respect to the discrete electric coefficients `ca` and `cb`, then applies the analytic chain rule to `er` and `se`. Source injection is included in the `cb` derivative.
+
+Use `model_gradient_sampling_interval=1` for an exact directional derivative check. Values larger than one use a scaled temporal subsampling approximation. See [the Chinese derivation](docs/discrete_forward_adjoint_zh.md) and run [the gradient-check notebook](examples/4.GradientCheck.ipynb) after rebuilding the native ABI 2 libraries.
 
 ## CPU Backend Build
 
@@ -233,7 +241,7 @@ The function returns a tuple of 5 elements. These are used to extract synthetic 
 return Eall, (Ex, Ey, Ez), (Hx, Hy, Hz), (x0EPhi1...zmHPhi2), receiver_amplitudes
 ```
 
-1.  **`Eall`**: The electric field history saved for gradient calculation.
+1.  **`Eall`**: The pre-update electric field history `E^n` saved for gradient calculation and diagnostics. An internal tensor stores the corresponding discrete right-hand side `R^n`.
     *   **Shape when `mode=2`**: `(nt_saved, nstep, nx, ny, nz)`, storing Ez only.
     *   **Shape when `mode=3`**: `(3, nt_saved, nstep, nx, ny, nz)`, storing components in `[Ex, Ey, Ez]` order.
     *   `nt_saved` depends on `nt` and `model_gradient_sampling_interval`.

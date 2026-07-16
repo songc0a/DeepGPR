@@ -154,8 +154,17 @@ def _configure_deepgpr_library(lib: ctypes.CDLL) -> None:
     if getattr(lib, "_deepgpr_argtypes_configured", False):
         return
 
+    lib.deepgpr_abi_version.argtypes = []
+    lib.deepgpr_abi_version.restype = ctypes.c_int
+    abi_version = int(lib.deepgpr_abi_version())
+    if abi_version != 2:
+        raise RuntimeError(
+            f"Incompatible DeepGPR native ABI {abi_version}; expected ABI 2. "
+            "Rebuild the CPU/CUDA shared libraries from the current sources."
+        )
+
     lib.forward.argtypes = [
-        _FLOAT_P, _FLOAT_P, _FLOAT_P, _FLOAT_P,
+        _FLOAT_P, _FLOAT_P, _FLOAT_P, _FLOAT_P, _FLOAT_P,
         _FLOAT_P, _FLOAT_P, _FLOAT_P,
         _FLOAT_P, _FLOAT_P, _FLOAT_P,
         _FLOAT_P, _FLOAT_P, _FLOAT_P,
@@ -184,7 +193,7 @@ def _configure_deepgpr_library(lib: ctypes.CDLL) -> None:
     lib.forward.restype = None
 
     lib.backward.argtypes = [
-        _FLOAT_P, _FLOAT_P, _FLOAT_P, _FLOAT_P,
+        _FLOAT_P, _FLOAT_P, _FLOAT_P, _FLOAT_P, _FLOAT_P,
         _FLOAT_P, _FLOAT_P, _FLOAT_P,
         _FLOAT_P, _FLOAT_P, _FLOAT_P,
         _FLOAT_P, _FLOAT_P, _FLOAT_P,
@@ -245,7 +254,7 @@ def _load_deepgpr_library(kind: str) -> ctypes.CDLL:
             load_errors.append(f"{path}: {exc}")
             continue
 
-        _require_exported_symbols(lib, ("forward", "backward"), path)
+        _require_exported_symbols(lib, ("forward", "backward", "deepgpr_abi_version"), path)
         _configure_deepgpr_library(lib)
         lib._deepgpr_path = str(path.resolve())
         _LOADED_LIBS[kind] = lib
