@@ -125,6 +125,7 @@ def compute(device, dx=None, dt=None,
             E=None, H=None, PML=None,
             pmlthick=10, source_direction=2, reciever_direction=2,
             model_gradient_sampling_interval=1,
+            wavefield_storage_dtype=torch.float32,
             use_async_offload=False,
             fdtd_order=2,
             mode=2,
@@ -137,7 +138,7 @@ def compute(device, dx=None, dt=None,
 | :--- | :--- | :--- |
 | **`device`** | `torch.device` / `str` | PyTorch computation device, e.g., `'cuda:0'` or `'cpu'`. CUDA loads `deepgpr.so/.dll`; CPU loads `deepgpr_cpu.so/.dll/.dylib`. |
 | **`dx`** | `float` | Spatial grid step size (assuming an isotropic grid, i.e., $dx = dy = dz$). Typically in meters (m). |
-| **`dt`** | `float` | Time step size. **Note**: Must strictly satisfy the CFL (Courant-Friedrichs-Lewy) stability condition, or an exception will be raised. Typically in seconds (s). |
+| **`dt`** | `float` | Time step size. It is checked against a material-aware CFL limit that includes the selected 2/4/8-order stencil. Typically in seconds (s). |
 | **`fdtd_order`** | `int` | Spatial finite-difference order used by the FDTD field updates. Supported values are `2`, `4`, and `8`; default is `2` for compatibility with earlier versions. |
 | **`mode`** | `int` | FWI gradient mode. `2` keeps the previous Ez-only model-gradient calculation. `3` uses Ex, Ey, and Ez electric-field contributions for relative permittivity and conductivity gradients. |
 | **`debug`** | `bool` | Runs expensive NaN/Inf and zero-field validation checks when `True`. The default `False` keeps these checks disabled for faster production runs. |
@@ -177,6 +178,7 @@ This section defines the geometric observation system (coordinates) and the exci
 | :--- | :--- | :--- | :--- |
 | **`pmlthick`** | `int` / `list` / `Tensor`| Scalar or list of 6 | Thickness (in grid layers) of the PML (Perfectly Matched Layer) absorbing boundaries.<br>- Integer `p`: All six boundaries have thickness `p` (Z-boundaries are ignored in 2D).<br>- List `[x0, xm, y0, ym, z0, zm]`: Specific thicknesses for the 6 boundaries. |
 | **`model_gradient_sampling_interval`**| `int` | Scalar | Wavefield sampling interval during forward propagation (Default: 1).<br>A larger integer reduces the VRAM usage for the saved `Eall` tensor, but may decrease the accuracy of backpropagated gradients. |
+| **`wavefield_storage_dtype`** | `torch.dtype` / `str` | `float32`, `float16`, or `bfloat16` | Storage format for saved `Eall` and internal `Rall` model-gradient wavefields. FDTD propagation remains float32. `float16` and `bfloat16` halve saved-wavefield memory at the cost of gradient accuracy; `bfloat16` has the safer dynamic range. String aliases such as `"fp16"` and `"bf16"` are accepted. |
 | **`use_async_offload`** | `bool` | Scalar | CUDA-only VRAM optimization flag (Default: `False`).<br>If `True`, the internal full wavefield tensor (`Eall`) is asynchronously offloaded to page-locked host memory (`pin_memory` CPU RAM). This drastically reduces GPU VRAM consumption at the cost of slightly slower computation times due to PCIe data transfer latency. On CPU this option is ignored. |
 
 ### 4.1 FWI Gradient Mode
@@ -192,7 +194,7 @@ When `er` or `se` requires gradients, `mode=2` is restricted to 2D Ez-TM modelin
 
 The backward solver is the explicit transpose of the executed FDTD and CPML updates. It first accumulates gradients with respect to the discrete electric coefficients `ca` and `cb`, then applies the analytic chain rule to `er` and `se`. Source injection is included in the `cb` derivative.
 
-Use `model_gradient_sampling_interval=1` for an exact directional derivative check. Values larger than one use a scaled temporal subsampling approximation. See [the Chinese derivation](docs/discrete_forward_adjoint_zh.md) and run [the gradient-check notebook](examples/4.GradientCheck.ipynb) after rebuilding the native ABI 2 libraries.
+Use `model_gradient_sampling_interval=1` and `wavefield_storage_dtype=torch.float32` for an exact directional derivative check. Temporal subsampling and lower-precision storage deliberately approximate the gradient. See [the Chinese derivation](docs/discrete_forward_adjoint_zh.md) and run [the gradient-check notebook](examples/4.GradientCheck.ipynb) after rebuilding the native ABI 3 libraries.
 
 ## CPU Backend Build
 
@@ -245,6 +247,7 @@ return Eall, (Ex, Ey, Ez), (Hx, Hy, Hz), (x0EPhi1...zmHPhi2), receiver_amplitude
     *   **Shape when `mode=2`**: `(nt_saved, nstep, nx, ny, nz)`, storing Ez only.
     *   **Shape when `mode=3`**: `(3, nt_saved, nstep, nx, ny, nz)`, storing components in `[Ex, Ey, Ez]` order.
     *   `nt_saved` depends on `nt` and `model_gradient_sampling_interval`.
+    *   Dtype is selected by `wavefield_storage_dtype`.
 2.  **`(Ex, Ey, Ez)`**: The 3D electric field state at the final time step. 
 3.  **`(Hx, Hy, Hz)`**: The 3D magnetic field state at the final time step.
 4.  **`(PML_Tuple)`**: A tuple of 24 Tensors recording the final time step state of the PML auxiliary $\Phi$ variables.

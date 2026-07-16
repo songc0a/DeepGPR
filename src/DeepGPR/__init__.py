@@ -8,6 +8,7 @@ from pathlib import Path
 
 _FLOAT_P = ctypes.POINTER(ctypes.c_float)
 _INT_P = ctypes.POINTER(ctypes.c_int)
+_VOID_P = ctypes.c_void_p
 
 _PACKAGE_DIR = Path(__file__).resolve().parent
 _LIB_DIR = _PACKAGE_DIR / "lib"
@@ -157,14 +158,14 @@ def _configure_deepgpr_library(lib: ctypes.CDLL) -> None:
     lib.deepgpr_abi_version.argtypes = []
     lib.deepgpr_abi_version.restype = ctypes.c_int
     abi_version = int(lib.deepgpr_abi_version())
-    if abi_version != 2:
+    if abi_version != 3:
         raise RuntimeError(
-            f"Incompatible DeepGPR native ABI {abi_version}; expected ABI 2. "
+            f"Incompatible DeepGPR native ABI {abi_version}; expected ABI 3. "
             "Rebuild the CPU/CUDA shared libraries from the current sources."
         )
 
     lib.forward.argtypes = [
-        _FLOAT_P, _FLOAT_P, _FLOAT_P, _FLOAT_P, _FLOAT_P,
+        _FLOAT_P, _FLOAT_P, _FLOAT_P, _VOID_P, _VOID_P,
         _FLOAT_P, _FLOAT_P, _FLOAT_P,
         _FLOAT_P, _FLOAT_P, _FLOAT_P,
         _FLOAT_P, _FLOAT_P, _FLOAT_P,
@@ -188,12 +189,12 @@ def _configure_deepgpr_library(lib: ctypes.CDLL) -> None:
         _INT_P, _FLOAT_P,
         ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
         _INT_P, _FLOAT_P,
-        ctypes.c_int, ctypes.c_int, ctypes.c_int,
+        ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
     ]
     lib.forward.restype = None
 
     lib.backward.argtypes = [
-        _FLOAT_P, _FLOAT_P, _FLOAT_P, _FLOAT_P, _FLOAT_P,
+        _FLOAT_P, _FLOAT_P, _FLOAT_P, _VOID_P, _VOID_P,
         _FLOAT_P, _FLOAT_P, _FLOAT_P,
         _FLOAT_P, _FLOAT_P, _FLOAT_P,
         _FLOAT_P, _FLOAT_P, _FLOAT_P,
@@ -218,7 +219,7 @@ def _configure_deepgpr_library(lib: ctypes.CDLL) -> None:
         _INT_P, _FLOAT_P,
         ctypes.c_int,
         _FLOAT_P, _FLOAT_P,
-        ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+        ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
     ]
     lib.backward.restype = None
 

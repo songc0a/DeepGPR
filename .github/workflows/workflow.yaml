@@ -183,7 +183,7 @@ jobs:
 
               nm -D "$cuda_out_file" | grep deepgpr_abi_version
               nm -D "$cpu_out_file" | grep deepgpr_abi_version
-              python3 -c "import ctypes; lib=ctypes.CDLL(\"./$cpu_out_file\"); assert lib.deepgpr_abi_version() == 2"
+              python3 -c "import ctypes; lib=ctypes.CDLL(\"./$cpu_out_file\"); assert lib.deepgpr_abi_version() == 3"
 
               echo "===== Built Linux libraries ====="
               ls -lh "$cuda_out_file" "$cpu_out_file"
@@ -394,7 +394,7 @@ jobs:
             throw "CPU DLL does not export deepgpr_abi_version"
           }
 
-          python -c "import ctypes; lib=ctypes.CDLL(r'$out_file'); assert lib.deepgpr_abi_version() == 2"
+          python -c "import ctypes; lib=ctypes.CDLL(r'$out_file'); assert lib.deepgpr_abi_version() == 3"
 
       - name: Upload shared library artifact
         uses: actions/upload-artifact@v4
@@ -469,7 +469,7 @@ jobs:
           otool -D "$libomp_file"
 
           nm -gU "$out_file" | grep -E "forward|backward|set_fdtd_order|deepgpr_abi_version"
-          python3 -c "import ctypes; ctypes.CDLL('./$libomp_file', mode=ctypes.RTLD_GLOBAL); lib=ctypes.CDLL('./$out_file'); assert lib.deepgpr_abi_version() == 2"
+          python3 -c "import ctypes; ctypes.CDLL('./$libomp_file', mode=ctypes.RTLD_GLOBAL); lib=ctypes.CDLL('./$out_file'); assert lib.deepgpr_abi_version() == 3"
 
       - name: Upload macOS CPU artifact
         uses: actions/upload-artifact@v4

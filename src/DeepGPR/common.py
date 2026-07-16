@@ -18,7 +18,7 @@ def _require_finite_tensor(name, tensor):
         raise ValueError(f"`{name}` contains NaN or Inf values.")
 
 
-def initialization(device, er,se,mr,source_amplitudes,source_location,receiver_location,dx,dt,pmlthick):
+def initialization(device, er,se,mr,source_amplitudes,source_location,receiver_location,dx,dt,pmlthick,fdtd_order=2):
     """Validate inputs and prepare model, source, receiver, and PML metadata.
 
     Args:
@@ -32,8 +32,18 @@ def initialization(device, er,se,mr,source_amplitudes,source_location,receiver_l
         dx: Spatial grid spacing.
         dt: Time step size.
         pmlthick: PML thickness as an int, list, or tensor.
+        fdtd_order: Spatial finite-difference order used for the CFL check.
     """
     dtype=torch.float32
+    try:
+        dx = float(dx)
+        dt = float(dt)
+    except (TypeError, ValueError) as exc:
+        raise TypeError("dx and dt must be finite positive scalars.") from exc
+    if not math.isfinite(dx) or dx <= 0.0:
+        raise ValueError("dx must be a finite positive scalar.")
+    if not math.isfinite(dt) or dt <= 0.0:
+        raise ValueError("dt must be a finite positive scalar.")
     _require_finite_tensor("er", er)
     _require_finite_tensor("se", se)
     _require_finite_tensor("mr", mr)
@@ -68,13 +78,13 @@ def initialization(device, er,se,mr,source_amplitudes,source_location,receiver_l
             mode=2
         else:
             mode=3
-        er=er.to(device)
-        se=se.to(device)
+        er=er.to(device=device, dtype=dtype)
+        se=se.to(device=device, dtype=dtype)
         if mr is None:
             mr=torch.ones_like(er, device=device)
         else:
             if mr.shape == er.shape:
-                mr=mr.to(device)
+                mr=mr.to(device=device, dtype=dtype)
             else:
                 raise ValueError('The shape of mr should be the same as epsilon and sigma.')
     else:
@@ -116,7 +126,18 @@ def initialization(device, er,se,mr,source_amplitudes,source_location,receiver_l
     else:
         raise ValueError('The first dimension (nstep) of source_location and receiver_location should be the same.')
     
-    source_amplitudes=source_amplitudes.to(device).contiguous()
+    if mr.min() <= 0:
+        raise ValueError('The values of mr are incorrect (must be positive).')
+
+    if source_amplitudes.ndim not in (2, 3):
+        raise ValueError('source_amplitudes must have shape (num_waveforms, nt) or (num_waveforms, nt, 1).')
+    if source_amplitudes.ndim == 2:
+        source_amplitudes = source_amplitudes.unsqueeze(-1)
+    if source_amplitudes.ndim == 3 and source_amplitudes.shape[2] != 1:
+        raise ValueError('The last dimension of source_amplitudes must be 1.')
+    if source_amplitudes.shape[0] < 1 or source_amplitudes.shape[1] < 1:
+        raise ValueError('source_amplitudes must contain at least one waveform and one time sample.')
+    source_amplitudes=source_amplitudes.to(device=device, dtype=dtype).contiguous()
 
     if (source_amplitudes.shape[0]>1 and source_amplitudes.shape[0]<nsr) or source_amplitudes.shape[0]>nsr :
         raise ValueError('The number of source waveforms is incorrect.')
@@ -124,7 +145,7 @@ def initialization(device, er,se,mr,source_amplitudes,source_location,receiver_l
         source_amplitudes=source_amplitudes.repeat(nsr,1,1).contiguous()
         print('Tips: The number of source waveforms is 1, but the number of sources is ',nsr,'. The source waveform is repeated for all sources.')
 
-    check_cfl(dx, dt,nx,ny,nz)
+    check_cfl(dx, dt,nx,ny,nz,er=er,mr=mr,fdtd_order=fdtd_order)
 
     nt=source_amplitudes.shape[1]
     
@@ -137,7 +158,7 @@ def initialization(device, er,se,mr,source_amplitudes,source_location,receiver_l
     return er,se,nx,ny,nz,nt,nstep,nsr,nrx,ere,see,mr,mode,dtype,pmlthick,source_amplitudes
 
 
-def check_cfl(dx, dt, nx,ny,nz):
+def check_cfl(dx, dt, nx,ny,nz,er=None,mr=None,fdtd_order=2):
     """Check the CFL stability condition for the simulation grid.
 
     Args:
@@ -146,19 +167,39 @@ def check_cfl(dx, dt, nx,ny,nz):
         nx: Number of cells along the x axis.
         ny: Number of cells along the y axis.
         nz: Number of cells along the z axis.
+        er: Optional relative-permittivity tensor used to find the fastest material.
+        mr: Optional relative-permeability tensor used to find the fastest material.
+        fdtd_order: Spatial finite-difference order, 2, 4, or 8.
     """
 
-    dy=dx
-    dz=dx
+    try:
+        dx = float(dx)
+        dt = float(dt)
+    except (TypeError, ValueError) as exc:
+        raise TypeError("dx and dt must be finite positive scalars.") from exc
+    if not math.isfinite(dx) or dx <= 0.0 or not math.isfinite(dt) or dt <= 0.0:
+        raise ValueError("dx and dt must be finite positive scalars.")
+    if fdtd_order not in (2, 4, 8):
+        raise ValueError("fdtd_order must be one of 2, 4, or 8.")
 
-    if nz==1:
-        dt_max = 1.0 / (c * math.sqrt(1/dx**2 + 1/dy**2))
-    elif nx==1:
-        dt_max = 1.0 / (c * math.sqrt(1/dy**2 + 1/dz**2))
-    elif ny==1:
-        dt_max = 1.0 / (c * math.sqrt(1/dx**2 + 1/dz**2))
-    else:
-        dt_max = 1.0 / (c * math.sqrt(1/dx**2 + 1/dy**2 + 1/dz**2))
+    coefficient_sums = {
+        2: 1.0,
+        4: 9.0 / 8.0 + 1.0 / 24.0,
+        8: 1225.0 / 1024.0 + 245.0 / 3072.0 + 49.0 / 5120.0 + 5.0 / 7168.0,
+    }
+    active_dimensions = sum(int(size > 1) for size in (nx, ny, nz))
+    if active_dimensions == 0:
+        raise ValueError("At least one model dimension must contain more than one cell.")
+
+    material_factor = 1.0
+    if er is not None and mr is not None:
+        min_er_mr = float((er.detach() * mr.detach()).amin().item())
+        if not math.isfinite(min_er_mr) or min_er_mr <= 0.0:
+            raise ValueError("epsilon_r * mu_r must be finite and positive for the CFL check.")
+        material_factor = math.sqrt(min_er_mr)
+
+    spectral_factor = coefficient_sums[fdtd_order]
+    dt_max = material_factor * dx / (c * spectral_factor * math.sqrt(active_dimensions))
 
     if dt > dt_max:
         raise ValueError(f"Does not meet CFL conditions: dt={dt:.3e} > dt_max={dt_max:.3e}")
@@ -276,12 +317,12 @@ class TVRegularization(nn.Module):
         return loss
 
 
-def create_or_separate(tuple:tuple, nx,ny,nz,nstep,device: torch.device,
+def create_or_separate(fields:tuple, nx,ny,nz,nstep,device: torch.device,
                   dtype: torch.dtype):
     """Create zero field components or validate existing field components.
 
     Args:
-        tuple: Existing (x, y, z) field tensors, or None to allocate zeros.
+        fields: Existing (x, y, z) field tensors, or None to allocate zeros.
         nx: Number of model cells along the x axis.
         ny: Number of model cells along the y axis.
         nz: Number of model cells along the z axis.
@@ -289,38 +330,23 @@ def create_or_separate(tuple:tuple, nx,ny,nz,nstep,device: torch.device,
         device: PyTorch device for allocated tensors.
         dtype: PyTorch dtype for allocated tensors.
     """
-    if tuple == None:
+    if fields is None:
         return torch.zeros((nstep,nx+1,ny+1,nz+1), device=device, dtype=dtype).contiguous(),torch.zeros((nstep,nx+1,ny+1,nz+1), device=device, dtype=dtype).contiguous(),torch.zeros((nstep,nx+1,ny+1,nz+1), device=device, dtype=dtype).contiguous()
-    # else:
-    #     if tensor[0].shape[1]==nx+1 and tensor[0].shape[2]==ny+1 and tensor[0].shape[3]==nz+1 and tensor[0].shape[0]==nstep:
-    #       return tensor[0].contiguous(),tensor[1].contiguous(),tensor[2].contiguous()
-    #     else:
-    #       print(nstep,nx,ny,nz)
-    #       raise ValueError('The shape of E and H should be (nstep,nx+1,ny+1,nz+1).')
-    else:
-        condition = (
-        tuple[0].shape[0] == nstep and
-        tuple[0].shape[1] == nx + 1 and
-        tuple[0].shape[2] == ny + 1
-        )
-    
-        if tuple[0].ndim > 3:
-            condition = condition and (tuple[0].shape[3] == nz + 1)
-        
-        if condition:
-            return (
-                tuple[0].contiguous(),
-                tuple[1].contiguous(),
-                tuple[2].contiguous()
-            )
-        else:
-            actual_shape = list(tuple[0].shape)
-            expected_min_shape = [nstep, nx + 1, ny + 1, nz + 1]
+    if not isinstance(fields, (list, tuple)) or len(fields) != 3:
+        raise ValueError("E and H must each contain exactly three field tensors.")
+
+    expected_shape = (nstep, nx + 1, ny + 1, nz + 1)
+    for component in fields:
+        if not isinstance(component, torch.Tensor) or component.shape != expected_shape:
+            actual_shape = getattr(component, "shape", None)
             raise ValueError(
-                f"Shape not match! \n"
-                f"Actual shape: {actual_shape} \n"
-                f"Expected shape (at least): {expected_min_shape[:3]} and (if nz!=1) {nz+1}"
+                f"Field shape mismatch: got {actual_shape}, expected {expected_shape}."
             )
+
+    return tuple(
+        component.to(device=device, dtype=dtype).contiguous()
+        for component in fields
+    )
 
 
 
@@ -682,7 +708,18 @@ def build_pml_phi(x0,xm,y0,ym,z0,zm,nstep,PML,device):
         zmHPhi1=PML[22].contiguous()
         zmHPhi2=PML[23].contiguous()
 
-    return x0EPhi1,x0EPhi2,x0HPhi1,x0HPhi2,xmEPhi1,xmEPhi2,xmHPhi1,xmHPhi2,y0EPhi1,y0EPhi2,y0HPhi1,y0HPhi2,ymEPhi1,ymEPhi2,ymHPhi1,ymHPhi2,z0EPhi1,z0EPhi2,z0HPhi1,z0HPhi2,zmEPhi1,zmEPhi2,zmHPhi1,zmHPhi2
+    tensors = (
+        x0EPhi1,x0EPhi2,x0HPhi1,x0HPhi2,
+        xmEPhi1,xmEPhi2,xmHPhi1,xmHPhi2,
+        y0EPhi1,y0EPhi2,y0HPhi1,y0HPhi2,
+        ymEPhi1,ymEPhi2,ymHPhi1,ymHPhi2,
+        z0EPhi1,z0EPhi2,z0HPhi1,z0HPhi2,
+        zmEPhi1,zmEPhi2,zmHPhi1,zmHPhi2,
+    )
+    return tuple(
+        tensor.to(device=device, dtype=torch.float32).contiguous()
+        for tensor in tensors
+    )
 
 
 def checkpoint_initial_field(device=None,per_nstep=None, dx=None, dt=None, 
@@ -690,7 +727,7 @@ def checkpoint_initial_field(device=None,per_nstep=None, dx=None, dt=None,
             source_location=None, 
             receiver_location=None, 
             er=None, se=None,mr=None, 
-            pmlthick=10):
+            pmlthick=10, fdtd_order=2):
     """Create initial electric, magnetic, and PML field checkpoints.
 
     Args:
@@ -705,12 +742,15 @@ def checkpoint_initial_field(device=None,per_nstep=None, dx=None, dt=None,
         se: Electrical conductivity tensor.
         mr: Relative permeability tensor, or None to use ones.
         pmlthick: PML thickness as an int, list, or tensor.
+        fdtd_order: Spatial finite-difference order used for the CFL check.
     """
     E=None
     H=None
     PML=None
 
-    er,se,nx,ny,nz,_,nstep,_,_,_,_,mr,_,dtype,pmlthick,source_amplitudes=initialization(device,er,se,mr,source_amplitudes,source_location,receiver_location,dx,dt,pmlthick)
+    er,se,nx,ny,nz,_,nstep,_,_,_,_,mr,_,dtype,pmlthick,source_amplitudes=initialization(
+        device,er,se,mr,source_amplitudes,source_location,receiver_location,
+        dx,dt,pmlthick,fdtd_order)
 
     Ex,Ey,Ez=create_or_separate(E,nx,ny,nz,nstep,device,dtype)
     Hx,Hy,Hz=create_or_separate(H,nx,ny,nz,nstep,device,dtype)

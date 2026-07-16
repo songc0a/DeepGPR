@@ -1,4 +1,7 @@
 #include <stddef.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
 
 #if defined(_OPENMP) || defined(DEEPGPR_USE_OPENMP)
 #include <omp.h>
@@ -20,11 +23,145 @@
 static const float E0 = 8.8541878128e-12f;
 static const float M0 = 1.25663706212e-06f;
 
+enum {
+    WAVEFIELD_FLOAT32 = 0,
+    WAVEFIELD_FLOAT16 = 1,
+    WAVEFIELD_BFLOAT16 = 2
+};
+
+static size_t wavefield_element_size(int storage_type)
+{
+    return storage_type == WAVEFIELD_FLOAT32 ? sizeof(float) : sizeof(uint16_t);
+}
+
+static void* wavefield_offset(void* pointer, long long offset, int storage_type)
+{
+    return (void*)((unsigned char*)pointer + offset * (long long)wavefield_element_size(storage_type));
+}
+
+static const void* wavefield_const_offset(const void* pointer, long long offset, int storage_type)
+{
+    return (const void*)((const unsigned char*)pointer + offset * (long long)wavefield_element_size(storage_type));
+}
+
+static uint16_t float_to_half_bits(float value)
+{
+    uint32_t bits;
+    uint32_t sign, exponent, mantissa, half_mantissa, remainder, halfway;
+    int half_exponent, shift;
+    memcpy(&bits, &value, sizeof(bits));
+    sign = (bits >> 16) & 0x8000u;
+    exponent = (bits >> 23) & 0xffu;
+    mantissa = bits & 0x7fffffu;
+
+    if (exponent == 0xffu) {
+        if (mantissa == 0u) return (uint16_t)(sign | 0x7c00u);
+        return (uint16_t)(sign | 0x7e00u);
+    }
+
+    half_exponent = (int)exponent - 127 + 15;
+    if (half_exponent >= 31) return (uint16_t)(sign | 0x7c00u);
+    if (half_exponent <= 0) {
+        if (half_exponent < -10) return (uint16_t)sign;
+        mantissa |= 0x800000u;
+        shift = 14 - half_exponent;
+        half_mantissa = mantissa >> shift;
+        remainder = mantissa & ((1u << shift) - 1u);
+        halfway = 1u << (shift - 1);
+        if (remainder > halfway || (remainder == halfway && (half_mantissa & 1u))) {
+            ++half_mantissa;
+        }
+        return (uint16_t)(sign | half_mantissa);
+    }
+
+    half_mantissa = mantissa >> 13;
+    remainder = mantissa & 0x1fffu;
+    if (remainder > 0x1000u || (remainder == 0x1000u && (half_mantissa & 1u))) {
+        ++half_mantissa;
+        if (half_mantissa == 0x400u) {
+            half_mantissa = 0u;
+            ++half_exponent;
+            if (half_exponent >= 31) return (uint16_t)(sign | 0x7c00u);
+        }
+    }
+    return (uint16_t)(sign | ((uint32_t)half_exponent << 10) | half_mantissa);
+}
+
+static float half_bits_to_float(uint16_t half)
+{
+    uint32_t sign = ((uint32_t)half & 0x8000u) << 16;
+    uint32_t exponent = ((uint32_t)half >> 10) & 0x1fu;
+    uint32_t mantissa = (uint32_t)half & 0x3ffu;
+    uint32_t bits;
+    float value;
+
+    if (exponent == 0u) {
+        if (mantissa == 0u) {
+            bits = sign;
+        } else {
+            int normalized_exponent = -14;
+            while ((mantissa & 0x400u) == 0u) {
+                mantissa <<= 1;
+                --normalized_exponent;
+            }
+            mantissa &= 0x3ffu;
+            bits = sign | ((uint32_t)(normalized_exponent + 127) << 23) | (mantissa << 13);
+        }
+    } else if (exponent == 0x1fu) {
+        bits = sign | 0x7f800000u | (mantissa << 13);
+    } else {
+        bits = sign | ((exponent + 112u) << 23) | (mantissa << 13);
+    }
+    memcpy(&value, &bits, sizeof(value));
+    return value;
+}
+
+static uint16_t float_to_bfloat16_bits(float value)
+{
+    uint32_t bits;
+    memcpy(&bits, &value, sizeof(bits));
+    if ((bits & 0x7f800000u) == 0x7f800000u && (bits & 0x007fffffu) != 0u) {
+        return (uint16_t)((bits >> 16) | 0x0040u);
+    }
+    bits += 0x7fffu + ((bits >> 16) & 1u);
+    return (uint16_t)(bits >> 16);
+}
+
+static float bfloat16_bits_to_float(uint16_t value)
+{
+    uint32_t bits = (uint32_t)value << 16;
+    float result;
+    memcpy(&result, &bits, sizeof(result));
+    return result;
+}
+
+static void store_wavefield_value(void* pointer, long long index, float value, int storage_type)
+{
+    if (storage_type == WAVEFIELD_FLOAT16) {
+        ((uint16_t*)pointer)[index] = float_to_half_bits(value);
+    } else if (storage_type == WAVEFIELD_BFLOAT16) {
+        ((uint16_t*)pointer)[index] = float_to_bfloat16_bits(value);
+    } else {
+        ((float*)pointer)[index] = value;
+    }
+}
+
+static float load_wavefield_value(const void* pointer, long long index, int storage_type)
+{
+    if (storage_type == WAVEFIELD_FLOAT16) {
+        return half_bits_to_float(((const uint16_t*)pointer)[index]);
+    }
+    if (storage_type == WAVEFIELD_BFLOAT16) {
+        return bfloat16_bits_to_float(((const uint16_t*)pointer)[index]);
+    }
+    return ((const float*)pointer)[index];
+}
+
 static int g_fdtd_order = 2;
 
 DEEPGPR_API int deepgpr_abi_version(void)
 {
-    return 2;
+    return 3;
 }
 
 /*
@@ -1179,10 +1316,11 @@ static void add_adjoint_sources_cpu(
  * source injection, so the cb gradient follows the executed discrete scheme.
  */
 static void copy_to_Rall_single_cpu(
-    float* RESTRICT dst_ptr, int t_idx,
-    const float* RESTRICT E, const float* RESTRICT Eold_ptr,
+    void* RESTRICT dst_ptr, int t_idx,
+    const float* RESTRICT E, const void* RESTRICT Eold_ptr,
+    const float* RESTRICT exact_Eold,
     const float* RESTRICT ca, const float* RESTRICT cb,
-    int step, int NX, int NY, int NZ)
+    int step, int NX, int NY, int NZ, int storage_type)
 {
     long long nx1 = NX - 1, ny1 = NY - 1, nz1 = NZ - 1;
     long long total = nx1 * ny1 * nz1;
@@ -1203,9 +1341,13 @@ static void copy_to_Rall_single_cpu(
         long long saved_idx = (long long)t_idx * snap_stride + work;
         float cb_value = cb[i * NY * NZ + j * NZ + k];
 
-        dst_ptr[saved_idx] = cb_value != 0.0f
-            ? (E[field_idx] - ca[i * NY * NZ + j * NZ + k] * Eold_ptr[saved_idx]) / cb_value
+        float e_old = exact_Eold != NULL
+            ? exact_Eold[work]
+            : load_wavefield_value(Eold_ptr, saved_idx, storage_type);
+        float rhs = cb_value != 0.0f
+            ? (E[field_idx] - ca[i * NY * NZ + j * NZ + k] * e_old) / cb_value
             : 0.0f;
+        store_wavefield_value(dst_ptr, saved_idx, rhs, storage_type);
     }
 }
 
@@ -1220,8 +1362,9 @@ static void copy_to_Rall_single_cpu(
  *   NX, NY, NZ: Padded field grid sizes.
  */
 static void copy_to_Eall_single_cpu(
-    float* RESTRICT dst_ptr, int t_idx, const float* RESTRICT E,
-    int step, int NX, int NY, int NZ)
+    void* RESTRICT dst_ptr, int t_idx, const float* RESTRICT E,
+    float* RESTRICT exact_Eold,
+    int step, int NX, int NY, int NZ, int storage_type)
 {
     long long nx1 = NX - 1, ny1 = NY - 1, nz1 = NZ - 1;
     long long total = nx1 * ny1 * nz1;
@@ -1240,7 +1383,9 @@ static void copy_to_Eall_single_cpu(
 
         long long src_idx = (long long)s * field_stride + i * NY * NZ + j * NZ + k;
         long long dst_idx = (long long)t_idx * step * total + (long long)s * total + idx;
-        dst_ptr[dst_idx] = E[src_idx];
+        float value = E[src_idx];
+        store_wavefield_value(dst_ptr, dst_idx, value, storage_type);
+        if (exact_Eold != NULL) exact_Eold[work] = value;
     }
 }
 
@@ -1266,12 +1411,13 @@ static void copy_to_Eall_single_cpu(
  */
 static void accumulate_gradients_cpu(
     const float* RESTRICT Ex, const float* RESTRICT Ey, const float* RESTRICT Ez,
-    const float* RESTRICT Eall_ptr, const float* RESTRICT Rall_ptr,
+    const void* RESTRICT Eall_ptr, const void* RESTRICT Rall_ptr,
     const float* RESTRICT ca, const float* RESTRICT cb,
     const float* RESTRICT se,
     float* RESTRICT grader, float* RESTRICT gradse,
     int i, int step, int NX, int NY, int NZ, float dt,
-    int errequiregrad, int serequiregrad, int S, int nt_saved, int fwi_mode)
+    int errequiregrad, int serequiregrad, int S, int nt_saved, int fwi_mode,
+    int storage_type)
 {
     long long sx = NX - 1, sy = NY - 1, sz = NZ - 1;
     long long total_cells = sx * sy * sz;
@@ -1305,8 +1451,8 @@ static void accumulate_gradients_cpu(
         for (int c = 0; c < components; ++c) {
             long long comp_offset = (fwi_mode == 3) ? (long long)c * component_stride : 0;
             long long saved_idx = comp_offset + (long long)(i / S) * snap_stride + base_idx;
-            float e_old = Eall_ptr[saved_idx];
-            float rhs = Rall_ptr[saved_idx];
+            float e_old = load_wavefield_value(Eall_ptr, saved_idx, storage_type);
+            float rhs = load_wavefield_value(Rall_ptr, saved_idx, storage_type);
             float adjoint_val = adjoint_values[(fwi_mode == 3) ? c : 2];
             float grad_ca = adjoint_val * e_old * (float)S;
             float grad_cb = adjoint_val * rhs * (float)S;
@@ -1374,7 +1520,7 @@ static void accumulate_gradients_cpu(
  *   fwi_mode: Gradient mode; 2 saves Ez only, 3 saves Ex, Ey, and Ez.
  */
 DEEPGPR_API void forward(const float* RESTRICT er, const float* RESTRICT se, const float* RESTRICT mr,
-             float* RESTRICT Eall_ptr, float* RESTRICT Rall_ptr,
+             void* RESTRICT Eall_ptr, void* RESTRICT Rall_ptr,
              float* RESTRICT Ex, float* RESTRICT Ey, float* RESTRICT Ez,
              float* RESTRICT Hx, float* RESTRICT Hy, float* RESTRICT Hz,
              float* RESTRICT uE0, float* RESTRICT uE1, float* RESTRICT uE4,
@@ -1398,12 +1544,18 @@ DEEPGPR_API void forward(const float* RESTRICT er, const float* RESTRICT se, con
 
              int NX_FIELDS, int NY_FIELDS, int NZ_FIELDS, int nsrc,
              const int* RESTRICT sourcelocation, const float* RESTRICT srcwaveforms, int polarisation,
-             int sampling_interval, int fwi_mode)
+             int sampling_interval, int fwi_mode, int storage_type)
 {
     int fdtd_order = g_fdtd_order;
+    int e_components = (fwi_mode == 3) ? 3 : 1;
     int nt_saved = (nt + sampling_interval - 1) / sampling_interval;
     long long snap_size = (long long)step * (NX_FIELDS - 1) * (NY_FIELDS - 1) * (NZ_FIELDS - 1);
     long long component_stride = (long long)nt_saved * snap_size;
+    float* exact_Eold = NULL;
+
+    if (storage_type != WAVEFIELD_FLOAT32) {
+        exact_Eold = (float*)malloc((size_t)e_components * (size_t)snap_size * sizeof(float));
+    }
 
     ucgetforward_cpu(er, se, mr, uE0, uE1, uE4, uH0, uH1, uH4, NX_FIELDS, NY_FIELDS, NZ_FIELDS, dt, dx);
 
@@ -1411,11 +1563,13 @@ DEEPGPR_API void forward(const float* RESTRICT er, const float* RESTRICT se, con
         if (i % sampling_interval == 0) {
             int t_saved = i / sampling_interval;
             if (fwi_mode == 3) {
-                copy_to_Eall_single_cpu(Eall_ptr, t_saved, Ex, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
-                copy_to_Eall_single_cpu(Eall_ptr + component_stride, t_saved, Ey, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
-                copy_to_Eall_single_cpu(Eall_ptr + 2 * component_stride, t_saved, Ez, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
+                copy_to_Eall_single_cpu(Eall_ptr, t_saved, Ex, exact_Eold, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, storage_type);
+                copy_to_Eall_single_cpu(wavefield_offset(Eall_ptr, component_stride, storage_type), t_saved, Ey,
+                    exact_Eold != NULL ? exact_Eold + snap_size : NULL, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, storage_type);
+                copy_to_Eall_single_cpu(wavefield_offset(Eall_ptr, 2 * component_stride, storage_type), t_saved, Ez,
+                    exact_Eold != NULL ? exact_Eold + 2 * snap_size : NULL, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, storage_type);
             } else {
-                copy_to_Eall_single_cpu(Eall_ptr, t_saved, Ez, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
+                copy_to_Eall_single_cpu(Eall_ptr, t_saved, Ez, exact_Eold, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, storage_type);
             }
         }
 
@@ -1438,16 +1592,24 @@ DEEPGPR_API void forward(const float* RESTRICT er, const float* RESTRICT se, con
         if (i % sampling_interval == 0) {
             int t_saved = i / sampling_interval;
             if (fwi_mode == 3) {
-                copy_to_Rall_single_cpu(Rall_ptr, t_saved, Ex, Eall_ptr, uE0, uE4, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
-                copy_to_Rall_single_cpu(Rall_ptr + component_stride, t_saved, Ey, Eall_ptr + component_stride, uE0, uE4, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
-                copy_to_Rall_single_cpu(Rall_ptr + 2 * component_stride, t_saved, Ez, Eall_ptr + 2 * component_stride, uE0, uE4, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
+                copy_to_Rall_single_cpu(Rall_ptr, t_saved, Ex, Eall_ptr, exact_Eold, uE0, uE4,
+                    step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, storage_type);
+                copy_to_Rall_single_cpu(wavefield_offset(Rall_ptr, component_stride, storage_type), t_saved, Ey,
+                    wavefield_const_offset(Eall_ptr, component_stride, storage_type), exact_Eold != NULL ? exact_Eold + snap_size : NULL,
+                    uE0, uE4, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, storage_type);
+                copy_to_Rall_single_cpu(wavefield_offset(Rall_ptr, 2 * component_stride, storage_type), t_saved, Ez,
+                    wavefield_const_offset(Eall_ptr, 2 * component_stride, storage_type), exact_Eold != NULL ? exact_Eold + 2 * snap_size : NULL,
+                    uE0, uE4, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, storage_type);
             } else {
-                copy_to_Rall_single_cpu(Rall_ptr, t_saved, Ez, Eall_ptr, uE0, uE4, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
+                copy_to_Rall_single_cpu(Rall_ptr, t_saved, Ez, Eall_ptr, exact_Eold, uE0, uE4,
+                    step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, storage_type);
             }
         }
 
         store_outputs_cpu(step, nrx, i, receiverlocation, rxs, Ex, Ey, Ez, Hx, Hy, Hz, NX_FIELDS, NY_FIELDS, NZ_FIELDS, nt);
     }
+
+    free(exact_Eold);
 }
 
 /*
@@ -1488,7 +1650,7 @@ DEEPGPR_API void forward(const float* RESTRICT er, const float* RESTRICT se, con
  *   fwi_mode: Gradient mode; 2 uses Ez only, 3 uses Ex, Ey, and Ez.
  */
 DEEPGPR_API void backward(const float* RESTRICT er, const float* RESTRICT se, const float* RESTRICT mr,
-             const float* RESTRICT Eall_ptr, const float* RESTRICT Rall_ptr,
+             const void* RESTRICT Eall_ptr, const void* RESTRICT Rall_ptr,
              float* RESTRICT Ex, float* RESTRICT Ey, float* RESTRICT Ez,
              float* RESTRICT Hx, float* RESTRICT Hy, float* RESTRICT Hz,
              float* RESTRICT uE0, float* RESTRICT uE1, float* RESTRICT uE4,
@@ -1512,7 +1674,7 @@ DEEPGPR_API void backward(const float* RESTRICT er, const float* RESTRICT se, co
              int nsrc, const int* RESTRICT sourcelocation, const float* RESTRICT srcwaveforms,
              int polarisation,
              float* RESTRICT grad_er,float* RESTRICT grad_se, int errequiregrad, int serequiregrad,
-             int sampling_interval, int fwi_mode)
+             int sampling_interval, int fwi_mode, int storage_type)
 {
     (void)nrx;
 
@@ -1527,7 +1689,7 @@ DEEPGPR_API void backward(const float* RESTRICT er, const float* RESTRICT se, co
         if (i % sampling_interval == 0) {
             accumulate_gradients_cpu(Ex, Ey, Ez, Eall_ptr, Rall_ptr, uE0, uE4, se,
                 grad_er, grad_se, i, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, dt,
-                errequiregrad, serequiregrad, sampling_interval, nt_saved, fwi_mode);
+                errequiregrad, serequiregrad, sampling_interval, nt_saved, fwi_mode, storage_type);
         }
 
         pml_e_fields_adjoint_cpu(

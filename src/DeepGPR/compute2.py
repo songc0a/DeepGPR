@@ -4,6 +4,34 @@ from . import get_deepgpr_lib, set_library_fdtd_order
 from .common import initialization,build_pml_phi,create_or_separate,buildpmlcoeffs,check_tensors_for_nan_inf
 
 
+_WAVEFIELD_STORAGE_TYPES = {
+    torch.float32: 0,
+    torch.float16: 1,
+    torch.bfloat16: 2,
+}
+
+
+def _normalize_wavefield_storage_dtype(value):
+    """Return a supported torch dtype for saved model-gradient wavefields."""
+    if isinstance(value, str):
+        aliases = {
+            "float32": torch.float32,
+            "fp32": torch.float32,
+            "float": torch.float32,
+            "float16": torch.float16,
+            "fp16": torch.float16,
+            "half": torch.float16,
+            "bfloat16": torch.bfloat16,
+            "bf16": torch.bfloat16,
+        }
+        value = aliases.get(value.lower())
+    if value not in _WAVEFIELD_STORAGE_TYPES:
+        raise ValueError(
+            "wavefield_storage_dtype must be float32, float16, or bfloat16."
+        )
+    return value
+
+
 def _sync_cuda_device(device):
     """Synchronize a CUDA device when the selected backend is CUDA.
 
@@ -55,6 +83,7 @@ def compute(device, dx=None, dt=None,
             PML=None,
             pmlthick=10, source_direction=2, reciever_direction=2,
             model_gradient_sampling_interval=1,
+            wavefield_storage_dtype=torch.float32,
             use_async_offload=False,
             fdtd_order=2,
             mode=2,
@@ -78,6 +107,7 @@ def compute(device, dx=None, dt=None,
         source_direction: Source electric-field polarization, 0 for x, 1 for y, 2 for z.
         reciever_direction: Receiver component to return, 0 for x, 1 for y, 2 for z.
         model_gradient_sampling_interval: Forward wavefield sampling interval for FWI gradients.
+        wavefield_storage_dtype: Saved E/R wavefield dtype: float32, float16, or bfloat16.
         use_async_offload: Whether CUDA should offload saved wavefields to pinned CPU memory.
         fdtd_order: Spatial finite-difference order, supported values are 2, 4, and 8.
         mode: FWI gradient mode; 2 uses Ez only, 3 uses Ex, Ey, and Ez.
@@ -90,6 +120,7 @@ def compute(device, dx=None, dt=None,
         raise ValueError("mode must be 2 or 3.")
     if not isinstance(model_gradient_sampling_interval, int) or model_gradient_sampling_interval < 1:
         raise ValueError("model_gradient_sampling_interval must be a positive integer.")
+    wavefield_storage_dtype = _normalize_wavefield_storage_dtype(wavefield_storage_dtype)
     if source_direction not in (0, 1, 2) or reciever_direction not in (0, 1, 2):
         raise ValueError("source_direction and reciever_direction must be 0, 1, or 2.")
     if getattr(source_amplitudes, "requires_grad", False):
@@ -97,7 +128,7 @@ def compute(device, dx=None, dt=None,
     if getattr(mr, "requires_grad", False):
         raise NotImplementedError("DeepGPR does not currently return relative-permeability gradients.")
 
-    er,se,nx,ny,nz,nt,nstep,nsr,nrx,ere,see,mr,spatial_mode,dtype,pmlthick,source_amplitudes=initialization(device,er,se,mr,source_amplitudes,source_location,receiver_location,dx,dt,pmlthick)
+    er,se,nx,ny,nz,nt,nstep,nsr,nrx,ere,see,mr,spatial_mode,dtype,pmlthick,source_amplitudes=initialization(device,er,se,mr,source_amplitudes,source_location,receiver_location,dx,dt,pmlthick,fdtd_order)
 
     needs_model_gradient = er.requires_grad or se.requires_grad
     if needs_model_gradient and mode == 2:
@@ -115,7 +146,7 @@ def compute(device, dx=None, dt=None,
     x0EPhi1,x0EPhi2,x0HPhi1,x0HPhi2,xmEPhi1,xmEPhi2,xmHPhi1,xmHPhi2,y0EPhi1,y0EPhi2,y0HPhi1,y0HPhi2,ymEPhi1,ymEPhi2,ymHPhi1,ymHPhi2,z0EPhi1,z0EPhi2,z0HPhi1,z0HPhi2,zmEPhi1,zmEPhi2,zmHPhi1,zmHPhi2=build_pml_phi(x0,xm,y0,ym,z0,zm,nstep,PML,device)
 
     Ex,Ey,Ez,Hx,Hy,Hz,x0EPhi1,x0EPhi2,x0HPhi1,x0HPhi2,xmEPhi1,xmEPhi2,xmHPhi1,xmHPhi2,y0EPhi1,y0EPhi2,y0HPhi1,y0HPhi2,ymEPhi1,ymEPhi2,ymHPhi1,ymHPhi2,z0EPhi1,z0EPhi2,z0HPhi1,z0HPhi2,zmEPhi1,zmEPhi2,zmHPhi1,zmHPhi2,Eall,receiver_amplitudes = DeepGPR.apply(
-        er, se,Ex,Ey,Ez,Hx,Hy,Hz,x0EPhi1,x0EPhi2,x0HPhi1,x0HPhi2,xmEPhi1,xmEPhi2,xmHPhi1,xmHPhi2,y0EPhi1,y0EPhi2,y0HPhi1,y0HPhi2,ymEPhi1,ymEPhi2,ymHPhi1,ymHPhi2,z0EPhi1,z0EPhi2,z0HPhi1,z0HPhi2,zmEPhi1,zmEPhi2,zmHPhi1,zmHPhi2, mr,dx,nx,ny,nz,dt,nt,nstep,source_amplitudes,source_location,receiver_location,pmlthick,nsr,nrx,device,dtype,x0,xm,y0,ym,z0,zm,x01,x02,xm1,xm2,y01,y02,ym1,ym2,z01,z02,zm1,zm2,ere,see,source_direction, reciever_direction, model_gradient_sampling_interval, use_async_offload, fdtd_order, mode, debug)
+        er, se,Ex,Ey,Ez,Hx,Hy,Hz,x0EPhi1,x0EPhi2,x0HPhi1,x0HPhi2,xmEPhi1,xmEPhi2,xmHPhi1,xmHPhi2,y0EPhi1,y0EPhi2,y0HPhi1,y0HPhi2,ymEPhi1,ymEPhi2,ymHPhi1,ymHPhi2,z0EPhi1,z0EPhi2,z0HPhi1,z0HPhi2,zmEPhi1,zmEPhi2,zmHPhi1,zmHPhi2, mr,dx,nx,ny,nz,dt,nt,nstep,source_amplitudes,source_location,receiver_location,pmlthick,nsr,nrx,device,dtype,x0,xm,y0,ym,z0,zm,x01,x02,xm1,xm2,y01,y02,ym1,ym2,z01,z02,zm1,zm2,ere,see,source_direction, reciever_direction, model_gradient_sampling_interval, wavefield_storage_dtype, use_async_offload, fdtd_order, mode, debug)
 
     return Eall,(Ex,Ey,Ez),(Hx,Hy,Hz),(x0EPhi1,x0EPhi2,x0HPhi1,x0HPhi2,xmEPhi1,xmEPhi2,xmHPhi1,xmHPhi2,y0EPhi1,y0EPhi2,y0HPhi1,y0HPhi2,ymEPhi1,ymEPhi2,ymHPhi1,ymHPhi2,z0EPhi1,z0EPhi2,z0HPhi1,z0HPhi2,zmEPhi1,zmEPhi2,zmHPhi1,zmHPhi2),receiver_amplitudes
 
@@ -130,7 +161,7 @@ class DeepGPR(torch.autograd.Function):
                 y0,ym,z0,zm,x01,x02,xm1,xm2,
                 y01,y02,ym1,ym2,z01,z02,zm1,zm2,
                 ere,see,source_direction, reciever_direction, 
-                model_gradient_sampling_interval, use_async_offload, fdtd_order, mode, debug):
+                model_gradient_sampling_interval, wavefield_storage_dtype, use_async_offload, fdtd_order, mode, debug):
         """Call the native forward solver and save tensors for backward.
 
         Args:
@@ -170,6 +201,7 @@ class DeepGPR(torch.autograd.Function):
             source_direction: Source electric-field polarization, 0 for x, 1 for y, 2 for z.
             reciever_direction: Receiver component to return, 0 for x, 1 for y, 2 for z.
             model_gradient_sampling_interval: Forward wavefield sampling interval.
+            wavefield_storage_dtype: Dtype used by saved E/R wavefield buffers.
             use_async_offload: Whether CUDA should offload saved wavefields to pinned CPU memory.
             fdtd_order: Spatial finite-difference order.
             mode: FWI gradient mode; 2 uses Ez only, 3 uses Ex, Ey, and Ez.
@@ -195,6 +227,7 @@ class DeepGPR(torch.autograd.Function):
         ctx.device=device
         ctx.dtype=dtype
         ctx.model_gradient_sampling_interval = model_gradient_sampling_interval
+        ctx.wavefield_storage_type = _WAVEFIELD_STORAGE_TYPES[wavefield_storage_dtype]
         ctx.use_async_offload = bool(use_async_offload and device.type == "cuda")
         ctx.fdtd_order = fdtd_order
         ctx.mode = mode
@@ -210,11 +243,11 @@ class DeepGPR(torch.autograd.Function):
             eall_shape = (nt_saved, nstep, nx, ny, nz)
 
         if ctx.use_async_offload:
-            Eall = torch.zeros(eall_shape, device='cpu', dtype=dtype).pin_memory()
-            Rall = torch.zeros(eall_shape, device='cpu', dtype=dtype).pin_memory()
+            Eall = torch.zeros(eall_shape, device='cpu', dtype=wavefield_storage_dtype).pin_memory()
+            Rall = torch.zeros(eall_shape, device='cpu', dtype=wavefield_storage_dtype).pin_memory()
         else:
-            Eall = torch.zeros(eall_shape, device=device, dtype=dtype).contiguous()
-            Rall = torch.zeros(eall_shape, device=device, dtype=dtype).contiguous()
+            Eall = torch.zeros(eall_shape, device=device, dtype=wavefield_storage_dtype).contiguous()
+            Rall = torch.zeros(eall_shape, device=device, dtype=wavefield_storage_dtype).contiguous()
 
         Eupdatecoffs0=torch.zeros((nx+1,ny+1,nz+1), device=device, dtype=dtype)
         Eupdatecoffs1=torch.zeros((nx+1,ny+1,nz+1), device=device, dtype=dtype)
@@ -231,8 +264,8 @@ class DeepGPR(torch.autograd.Function):
                 ctypes.cast(ere.data_ptr(), ctypes.POINTER(ctypes.c_float)), 
                 ctypes.cast(see.data_ptr(), ctypes.POINTER(ctypes.c_float)), 
                 ctypes.cast(mr.data_ptr(), ctypes.POINTER(ctypes.c_float)),
-                ctypes.cast(Eall.data_ptr(), ctypes.POINTER(ctypes.c_float)),
-                ctypes.cast(Rall.data_ptr(), ctypes.POINTER(ctypes.c_float)),
+                ctypes.c_void_p(Eall.data_ptr()),
+                ctypes.c_void_p(Rall.data_ptr()),
                 ctypes.cast(Ex.data_ptr(), ctypes.POINTER(ctypes.c_float)),
                 ctypes.cast(Ey.data_ptr(), ctypes.POINTER(ctypes.c_float)),
                 ctypes.cast(Ez.data_ptr(), ctypes.POINTER(ctypes.c_float)),
@@ -273,13 +306,15 @@ class DeepGPR(torch.autograd.Function):
                 ctypes.cast(source_location.data_ptr(), ctypes.POINTER(ctypes.c_int)), ctypes.cast(source_amplitudes.data_ptr(), ctypes.POINTER(ctypes.c_float)),
                 source_direction,
                 model_gradient_sampling_interval,
-                mode)
+                mode,
+                ctx.wavefield_storage_type)
         _sync_cuda_device(device)
 
         if ctx.debug:
             check_tensors_for_nan_inf(d="forward",
                 Ex=Ex, Ey=Ey, Ez=Ez,
                 Hx=Hx, Hy=Hy, Hz=Hz,
+                Eall=Eall, Rall=Rall,
                 x0EPhi1=x0EPhi1, x0EPhi2=x0EPhi2,
                 x0HPhi1=x0HPhi1, x0HPhi2=x0HPhi2,
                 xmEPhi1=xmEPhi1, xmEPhi2=xmEPhi2,
@@ -426,8 +461,8 @@ class DeepGPR(torch.autograd.Function):
                 ctypes.cast(ere.data_ptr(), ctypes.POINTER(ctypes.c_float)), 
                 ctypes.cast(see.data_ptr(), ctypes.POINTER(ctypes.c_float)), 
                 ctypes.cast(mr.data_ptr(), ctypes.POINTER(ctypes.c_float)),
-                ctypes.cast(Eall.data_ptr(), ctypes.POINTER(ctypes.c_float)),
-                ctypes.cast(Rall.data_ptr(), ctypes.POINTER(ctypes.c_float)),
+                ctypes.c_void_p(Eall.data_ptr()),
+                ctypes.c_void_p(Rall.data_ptr()),
                 ctypes.cast(gEx.data_ptr(), ctypes.POINTER(ctypes.c_float)),
                 ctypes.cast(gEy.data_ptr(), ctypes.POINTER(ctypes.c_float)),
                 ctypes.cast(gEz.data_ptr(), ctypes.POINTER(ctypes.c_float)),
@@ -468,7 +503,8 @@ class DeepGPR(torch.autograd.Function):
                 ctx.reciever_direction,
                 ctypes.cast(grad_er.data_ptr(), ctypes.POINTER(ctypes.c_float)), ctypes.cast(grad_se.data_ptr(), ctypes.POINTER(ctypes.c_float)),errequiregrad,serequiregrad,
                 model_gradient_sampling_interval,
-                ctx.mode)
+                ctx.mode,
+                ctx.wavefield_storage_type)
         _sync_cuda_device(device)
         
         tensors_to_check = dict(
@@ -513,5 +549,5 @@ class DeepGPR(torch.autograd.Function):
                     None, None, None, None, None, None, None, None,
                     None, None, None, None, None, None, None, None, 
                     None, None, None, None, None, None, None, None, 
-                    None, None, None, None
+                    None, None, None, None, None
                 )
