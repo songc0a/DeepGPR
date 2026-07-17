@@ -161,7 +161,7 @@ static int g_fdtd_order = 2;
 
 DEEPGPR_API int deepgpr_abi_version(void)
 {
-    return 3;
+    return 4;
 }
 
 /*
@@ -344,7 +344,7 @@ static void add_staggered_forward_adjoint_cpu(
  *   uH0, uH1, uH4: Output magnetic-field update coefficient arrays.
  *   NX_FIELDS, NY_FIELDS, NZ_FIELDS: Padded field grid sizes.
  *   dt: Time step size.
- *   dx: Spatial grid spacing.
+ *   dx, dy, dz: Grid spacing along each axis.
  */
 static void ucgetforward_cpu(const float* RESTRICT er, const float* RESTRICT se, const float* RESTRICT mr,
     float* RESTRICT uE0, float* RESTRICT uE1, float* RESTRICT uE4,
@@ -435,7 +435,7 @@ static void store_outputs_cpu(
  * Parameters:
  *   step: Number of shots or simulations in the batch.
  *   iteration: Current time-step index.
- *   dx: Spatial grid spacing.
+ *   dx, dy, dz: Grid spacing along each axis.
  *   sourcelocation: Source coordinates with shape (step, nsrc, 3).
  *   srcwaveforms: Source waveform array.
  *   Ex, Ey, Ez: Electric field component arrays to update.
@@ -446,7 +446,7 @@ static void store_outputs_cpu(
  *   nt: Total number of time steps.
  */
 static void Update_hertzian_dipole_cpu(
-    int step, int iteration, float dx,
+    int step, int iteration, float dx, float dy, float dz,
     const int* RESTRICT sourcelocation, const float* RESTRICT srcwaveforms,
     float* RESTRICT Ex, float* RESTRICT Ey, float* RESTRICT Ez, const float* RESTRICT uE4,
     int NX, int NY, int NZ, int nsrc, int polarisation, int nt)
@@ -460,7 +460,8 @@ static void Update_hertzian_dipole_cpu(
         int s = (int)(work / nsrc);
         long long src = work % nsrc;
         float waveform_value = srcwaveforms[src * nt + iteration];
-        float scale = waveform_value * dx / (dx * dx * dx);
+        float dipole_length = polarisation == 0 ? dx : (polarisation == 1 ? dy : dz);
+        float scale = waveform_value * dipole_length / (dx * dy * dz);
 
         long long i = sourcelocation[s * nsrc * 3 + src * 3 + 0];
         long long j = sourcelocation[s * nsrc * 3 + src * 3 + 1];
@@ -487,6 +488,7 @@ static void e_fields_base_update_cpu(
     float* RESTRICT Ex, float* RESTRICT Ey, float* RESTRICT Ez,
     const float* RESTRICT Hx, const float* RESTRICT Hy, const float* RESTRICT Hz,
     int step, int NX_FIELDS, int NY_FIELDS, int NZ_FIELDS,
+    float dx, float dy, float dz,
     int fdtd_order)
 {
     long long ny_nz = (long long)NY_FIELDS * NZ_FIELDS;
@@ -505,6 +507,8 @@ static void e_fields_base_update_cpu(
 
         float ue0 = uE0[idx];
         float ue1 = uE1[idx];
+        float ue_y = dy == dx ? ue1 : ue1 * dx / dy;
+        float ue_z = dz == dx ? ue1 : ue1 * dx / dz;
 
         int do_ex = (((NY_FIELDS - 1) != 1 || (NZ_FIELDS - 1) != 1) && i < (NX_FIELDS - 1) && j > 0 && j < (NY_FIELDS - 1) && k > 0 && k < (NZ_FIELDS - 1));
         int do_ey = (((NX_FIELDS - 1) != 1 || (NZ_FIELDS - 1) != 1) && i > 0 && i < (NX_FIELDS - 1) && j < (NY_FIELDS - 1) && k > 0 && k < (NZ_FIELDS - 1));
@@ -513,17 +517,17 @@ static void e_fields_base_update_cpu(
         if (do_ex) {
             float dHz_dy = staggered_backward_diff(Hz, id4, NZ_FIELDS, j, NY_FIELDS, fdtd_order);
             float dHy_dz = staggered_backward_diff(Hy, id4, 1, k, NZ_FIELDS, fdtd_order);
-            Ex[id4] = ue0 * Ex[id4] + ue1 * dHz_dy - ue1 * dHy_dz;
+            Ex[id4] = ue0 * Ex[id4] + ue_y * dHz_dy - ue_z * dHy_dz;
         }
         if (do_ey) {
             float dHx_dz = staggered_backward_diff(Hx, id4, 1, k, NZ_FIELDS, fdtd_order);
             float dHz_dx = staggered_backward_diff(Hz, id4, ny_nz, i, NX_FIELDS, fdtd_order);
-            Ey[id4] = ue0 * Ey[id4] + ue1 * dHx_dz - ue1 * dHz_dx;
+            Ey[id4] = ue0 * Ey[id4] + ue_z * dHx_dz - ue1 * dHz_dx;
         }
         if (do_ez) {
             float dHy_dx = staggered_backward_diff(Hy, id4, ny_nz, i, NX_FIELDS, fdtd_order);
             float dHx_dy = staggered_backward_diff(Hx, id4, NZ_FIELDS, j, NY_FIELDS, fdtd_order);
-            Ez[id4] = ue0 * Ez[id4] + ue1 * dHy_dx - ue1 * dHx_dy;
+            Ez[id4] = ue0 * Ez[id4] + ue1 * dHy_dx - ue_y * dHx_dy;
         }
     }
 }
@@ -819,6 +823,7 @@ static void h_fields_base_update_cpu(
     const float* RESTRICT Ex, const float* RESTRICT Ey, const float* RESTRICT Ez,
     float* RESTRICT Hx, float* RESTRICT Hy, float* RESTRICT Hz,
     int step, int NX_FIELDS, int NY_FIELDS, int NZ_FIELDS,
+    float dx, float dy, float dz,
     int fdtd_order)
 {
     long long ny_nz = (long long)NY_FIELDS * NZ_FIELDS;
@@ -837,6 +842,8 @@ static void h_fields_base_update_cpu(
 
         float uh0 = uH0[idx];
         float uh1 = uH1[idx];
+        float uh_y = dy == dx ? uh1 : uh1 * dx / dy;
+        float uh_z = dz == dx ? uh1 : uh1 * dx / dz;
 
         int do_hx = ((NX_FIELDS - 1) != 1 && i > 0 && i < (NX_FIELDS - 1) && j < (NY_FIELDS - 1) && k < (NZ_FIELDS - 1));
         int do_hy = ((NY_FIELDS - 1) != 1 && i < (NX_FIELDS - 1) && j > 0 && j < (NY_FIELDS - 1) && k < (NZ_FIELDS - 1));
@@ -845,17 +852,17 @@ static void h_fields_base_update_cpu(
         if (do_hx) {
             float dEz_dy = staggered_forward_diff(Ez, id4, NZ_FIELDS, j, NY_FIELDS, fdtd_order);
             float dEy_dz = staggered_forward_diff(Ey, id4, 1, k, NZ_FIELDS, fdtd_order);
-            Hx[id4] = uh0 * Hx[id4] - uh1 * dEz_dy + uh1 * dEy_dz;
+            Hx[id4] = uh0 * Hx[id4] - uh_y * dEz_dy + uh_z * dEy_dz;
         }
         if (do_hy) {
             float dEx_dz = staggered_forward_diff(Ex, id4, 1, k, NZ_FIELDS, fdtd_order);
             float dEz_dx = staggered_forward_diff(Ez, id4, ny_nz, i, NX_FIELDS, fdtd_order);
-            Hy[id4] = uh0 * Hy[id4] - uh1 * dEx_dz + uh1 * dEz_dx;
+            Hy[id4] = uh0 * Hy[id4] - uh_z * dEx_dz + uh1 * dEz_dx;
         }
         if (do_hz) {
             float dEy_dx = staggered_forward_diff(Ey, id4, ny_nz, i, NX_FIELDS, fdtd_order);
             float dEx_dy = staggered_forward_diff(Ex, id4, NZ_FIELDS, j, NY_FIELDS, fdtd_order);
-            Hz[id4] = uh0 * Hz[id4] - uh1 * dEy_dx + uh1 * dEx_dy;
+            Hz[id4] = uh0 * Hz[id4] - uh1 * dEy_dx + uh_y * dEx_dy;
         }
     }
 }
@@ -865,7 +872,7 @@ static void e_fields_base_adjoint_cpu(
     const float* RESTRICT uE0, const float* RESTRICT uE1,
     float* RESTRICT lambda_Ex, float* RESTRICT lambda_Ey, float* RESTRICT lambda_Ez,
     float* RESTRICT lambda_Hx, float* RESTRICT lambda_Hy, float* RESTRICT lambda_Hz,
-    int step, int NX, int NY, int NZ, int order)
+    int step, int NX, int NY, int NZ, float dx, float dy, float dz, int order)
 {
     long long ny_nz = (long long)NY * NZ;
     long long field_stride = (long long)NX * ny_nz;
@@ -883,23 +890,25 @@ static void e_fields_base_adjoint_cpu(
         int do_ey = (((NX - 1) != 1 || (NZ - 1) != 1) && i > 0 && i < NX - 1 && j < NY - 1 && k > 0 && k < NZ - 1);
         int do_ez = (((NX - 1) != 1 || (NY - 1) != 1) && i > 0 && i < NX - 1 && j > 0 && j < NY - 1 && k < NZ - 1);
         float coeff = uE1[idx];
+        float coeff_y = dy == dx ? coeff : coeff * dx / dy;
+        float coeff_z = dz == dx ? coeff : coeff * dx / dz;
 
         if (do_ex) {
             float value = lambda_Ex[work];
-            add_staggered_backward_adjoint_cpu(lambda_Hz, work, NZ, j, NY, order, coeff * value);
-            add_staggered_backward_adjoint_cpu(lambda_Hy, work, 1, k, NZ, order, -coeff * value);
+            add_staggered_backward_adjoint_cpu(lambda_Hz, work, NZ, j, NY, order, coeff_y * value);
+            add_staggered_backward_adjoint_cpu(lambda_Hy, work, 1, k, NZ, order, -coeff_z * value);
             lambda_Ex[work] = uE0[idx] * value;
         }
         if (do_ey) {
             float value = lambda_Ey[work];
-            add_staggered_backward_adjoint_cpu(lambda_Hx, work, 1, k, NZ, order, coeff * value);
+            add_staggered_backward_adjoint_cpu(lambda_Hx, work, 1, k, NZ, order, coeff_z * value);
             add_staggered_backward_adjoint_cpu(lambda_Hz, work, ny_nz, i, NX, order, -coeff * value);
             lambda_Ey[work] = uE0[idx] * value;
         }
         if (do_ez) {
             float value = lambda_Ez[work];
             add_staggered_backward_adjoint_cpu(lambda_Hy, work, ny_nz, i, NX, order, coeff * value);
-            add_staggered_backward_adjoint_cpu(lambda_Hx, work, NZ, j, NY, order, -coeff * value);
+            add_staggered_backward_adjoint_cpu(lambda_Hx, work, NZ, j, NY, order, -coeff_y * value);
             lambda_Ez[work] = uE0[idx] * value;
         }
     }
@@ -910,7 +919,7 @@ static void h_fields_base_adjoint_cpu(
     const float* RESTRICT uH0, const float* RESTRICT uH1,
     float* RESTRICT lambda_Ex, float* RESTRICT lambda_Ey, float* RESTRICT lambda_Ez,
     float* RESTRICT lambda_Hx, float* RESTRICT lambda_Hy, float* RESTRICT lambda_Hz,
-    int step, int NX, int NY, int NZ, int order)
+    int step, int NX, int NY, int NZ, float dx, float dy, float dz, int order)
 {
     long long ny_nz = (long long)NY * NZ;
     long long field_stride = (long long)NX * ny_nz;
@@ -928,23 +937,25 @@ static void h_fields_base_adjoint_cpu(
         int do_hy = ((NY - 1) != 1 && i < NX - 1 && j > 0 && j < NY - 1 && k < NZ - 1);
         int do_hz = ((NZ - 1) != 1 && i < NX - 1 && j < NY - 1 && k > 0 && k < NZ - 1);
         float coeff = uH1[idx];
+        float coeff_y = dy == dx ? coeff : coeff * dx / dy;
+        float coeff_z = dz == dx ? coeff : coeff * dx / dz;
 
         if (do_hx) {
             float value = lambda_Hx[work];
-            add_staggered_forward_adjoint_cpu(lambda_Ez, work, NZ, j, NY, order, -coeff * value);
-            add_staggered_forward_adjoint_cpu(lambda_Ey, work, 1, k, NZ, order, coeff * value);
+            add_staggered_forward_adjoint_cpu(lambda_Ez, work, NZ, j, NY, order, -coeff_y * value);
+            add_staggered_forward_adjoint_cpu(lambda_Ey, work, 1, k, NZ, order, coeff_z * value);
             lambda_Hx[work] = uH0[idx] * value;
         }
         if (do_hy) {
             float value = lambda_Hy[work];
-            add_staggered_forward_adjoint_cpu(lambda_Ex, work, 1, k, NZ, order, -coeff * value);
+            add_staggered_forward_adjoint_cpu(lambda_Ex, work, 1, k, NZ, order, -coeff_z * value);
             add_staggered_forward_adjoint_cpu(lambda_Ez, work, ny_nz, i, NX, order, coeff * value);
             lambda_Hy[work] = uH0[idx] * value;
         }
         if (do_hz) {
             float value = lambda_Hz[work];
             add_staggered_forward_adjoint_cpu(lambda_Ey, work, ny_nz, i, NX, order, -coeff * value);
-            add_staggered_forward_adjoint_cpu(lambda_Ex, work, NZ, j, NY, order, coeff * value);
+            add_staggered_forward_adjoint_cpu(lambda_Ex, work, NZ, j, NY, order, coeff_y * value);
             lambda_Hz[work] = uH0[idx] * value;
         }
     }
@@ -1521,7 +1532,7 @@ static void accumulate_gradients_cpu(
  *   nt: Number of time steps.
  *   step: Number of shots or simulations in the batch.
  *   nrx: Number of receivers per shot.
- *   dx: Spatial grid spacing.
+ *   dx, dy, dz: Grid spacing along each axis.
  *   receiverlocation: Receiver coordinates with shape (step, nrx, 3).
  *   rxs: Output receiver sample array.
  *   NX_FIELDS, NY_FIELDS, NZ_FIELDS: Padded field grid sizes.
@@ -1552,7 +1563,7 @@ DEEPGPR_API void forward(const float* RESTRICT er, const float* RESTRICT se, con
             const float* RESTRICT z0ER,const float* RESTRICT zmER, const float* RESTRICT x0HR,const float* RESTRICT xmHR,
             const float* RESTRICT y0HR,const float* RESTRICT ymHR, const float* RESTRICT z0HR,const float* RESTRICT zmHR,
 
-             float dt, int nt, int step, int nrx, float dx,
+             float dt, int nt, int step, int nrx, float dx, float dy, float dz,
              const int* RESTRICT receiverlocation, float* RESTRICT rxs,
 
              int NX_FIELDS, int NY_FIELDS, int NZ_FIELDS, int nsrc,
@@ -1586,21 +1597,24 @@ DEEPGPR_API void forward(const float* RESTRICT er, const float* RESTRICT se, con
             }
         }
 
-        h_fields_base_update_cpu(uH0, uH1, Ex, Ey, Ez, Hx, Hy, Hz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, fdtd_order);
+        h_fields_base_update_cpu(uH0, uH1, Ex, Ey, Ez, Hx, Hy, Hz,
+            step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, dx, dy, dz, fdtd_order);
         pml_h_fields_update_cpu(
-            Ex, Ey, Ez, Hx, Hy, Hz, dx, dx, dx, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
+            Ex, Ey, Ez, Hx, Hy, Hz, dx, dy, dz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
             pml0, pml1, pml2, pml3, pml4, pml5, x0HR, xmHR, y0HR, ymHR, z0HR, zmHR, uH4,
             x0HPhi1, x0HPhi2, xmHPhi1, xmHPhi2, y0HPhi1, y0HPhi2, ymHPhi1, ymHPhi2, z0HPhi1, z0HPhi2, zmHPhi1, zmHPhi2,
             fdtd_order);
 
-        e_fields_base_update_cpu(uE0, uE1, Ex, Ey, Ez, Hx, Hy, Hz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, fdtd_order);
+        e_fields_base_update_cpu(uE0, uE1, Ex, Ey, Ez, Hx, Hy, Hz,
+            step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, dx, dy, dz, fdtd_order);
         pml_e_fields_update_cpu(
-            Ex, Ey, Ez, Hx, Hy, Hz, dx, dx, dx, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
+            Ex, Ey, Ez, Hx, Hy, Hz, dx, dy, dz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
             pml0, pml1, pml2, pml3, pml4, pml5, x0ER, xmER, y0ER, ymER, z0ER, zmER, uE4,
             x0EPhi1, x0EPhi2, xmEPhi1, xmEPhi2, y0EPhi1, y0EPhi2, ymEPhi1, ymEPhi2, z0EPhi1, z0EPhi2, zmEPhi1, zmEPhi2,
             fdtd_order);
 
-        Update_hertzian_dipole_cpu(step, i, dx, sourcelocation, srcwaveforms, Ex, Ey, Ez, uE4, NX_FIELDS, NY_FIELDS, NZ_FIELDS, nsrc, polarisation, nt);
+        Update_hertzian_dipole_cpu(step, i, dx, dy, dz, sourcelocation, srcwaveforms,
+            Ex, Ey, Ez, uE4, NX_FIELDS, NY_FIELDS, NZ_FIELDS, nsrc, polarisation, nt);
 
         if (i % sampling_interval == 0) {
             int t_saved = i / sampling_interval;
@@ -1649,7 +1663,7 @@ DEEPGPR_API void forward(const float* RESTRICT er, const float* RESTRICT se, con
  *   nt: Number of time steps.
  *   step: Number of shots or simulations in the batch.
  *   nrx: Number of receivers per shot.
- *   dx: Spatial grid spacing.
+ *   dx, dy, dz: Grid spacing along each axis.
  *   NX_FIELDS, NY_FIELDS, NZ_FIELDS: Padded field grid sizes.
  *   nsrc: Number of adjoint sources per shot.
  *   sourcelocation: Adjoint source coordinates with shape (step, nsrc, 3).
@@ -1682,7 +1696,7 @@ DEEPGPR_API void backward(const float* RESTRICT er, const float* RESTRICT se, co
             float* RESTRICT z0ER,float* RESTRICT zmER, float* RESTRICT x0HR,float* RESTRICT xmHR,
             float* RESTRICT y0HR,float* RESTRICT ymHR, float* RESTRICT z0HR,float* RESTRICT zmHR,
 
-             float dt, int nt, int step, int nrx, float dx,
+             float dt, int nt, int step, int nrx, float dx, float dy, float dz,
              int NX_FIELDS, int NY_FIELDS, int NZ_FIELDS,
              int nsrc, const int* RESTRICT sourcelocation, const float* RESTRICT srcwaveforms,
              int polarisation,
@@ -1705,16 +1719,16 @@ DEEPGPR_API void backward(const float* RESTRICT er, const float* RESTRICT se, co
          * This stable reverse-time formulation follows tide-GPR's 3D solver.
          */
         h_fields_base_update_cpu(uH0, uH1, Ex, Ey, Ez, Hx, Hy, Hz,
-            step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, fdtd_order);
+            step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, dx, dy, dz, fdtd_order);
         pml_h_fields_update_cpu(
-            Ex, Ey, Ez, Hx, Hy, Hz, dx, dx, dx, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
+            Ex, Ey, Ez, Hx, Hy, Hz, dx, dy, dz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
             pml0, pml1, pml2, pml3, pml4, pml5, x0HR, xmHR, y0HR, ymHR, z0HR, zmHR, uH4,
             x0HPhi1, x0HPhi2, xmHPhi1, xmHPhi2, y0HPhi1, y0HPhi2, ymHPhi1, ymHPhi2,
             z0HPhi1, z0HPhi2, zmHPhi1, zmHPhi2, fdtd_order);
         e_fields_base_update_cpu(uE0, uE1, Ex, Ey, Ez, Hx, Hy, Hz,
-            step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, fdtd_order);
+            step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, dx, dy, dz, fdtd_order);
         pml_e_fields_update_cpu(
-            Ex, Ey, Ez, Hx, Hy, Hz, dx, dx, dx, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
+            Ex, Ey, Ez, Hx, Hy, Hz, dx, dy, dz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
             pml0, pml1, pml2, pml3, pml4, pml5, x0ER, xmER, y0ER, ymER, z0ER, zmER, uE4,
             x0EPhi1, x0EPhi2, xmEPhi1, xmEPhi2, y0EPhi1, y0EPhi2, ymEPhi1, ymEPhi2,
             z0EPhi1, z0EPhi2, zmEPhi1, zmEPhi2, fdtd_order);

@@ -2,11 +2,41 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
+import numbers
 import warnings
 
 c = 299792458.0
 m0 = 4.0 * math.pi * 1e-7
 e0 = 1.0 / (m0 * c * c)
+
+
+def _normalize_grid_spacing(value):
+    """Return grid spacing as a validated ``(dx, dy, dz)`` tuple."""
+    if torch.is_tensor(value):
+        if value.numel() == 1:
+            values = [value.detach().item()] * 3
+        elif value.numel() == 3:
+            values = value.detach().cpu().reshape(-1).tolist()
+        else:
+            raise ValueError("dx tensor must contain either one or three values.")
+    elif isinstance(value, numbers.Real) and not isinstance(value, bool):
+        values = [value] * 3
+    elif isinstance(value, (list, tuple)):
+        if len(value) != 3:
+            raise ValueError("dx list or tuple must contain exactly three values.")
+        values = value
+    else:
+        raise TypeError(
+            "dx must be a positive scalar or a three-value list, tuple, or tensor."
+        )
+
+    try:
+        spacing = tuple(float(item) for item in values)
+    except (TypeError, ValueError) as exc:
+        raise TypeError("dx, dy, and dz must be finite positive scalars.") from exc
+    if any(not math.isfinite(item) or item <= 0.0 for item in spacing):
+        raise ValueError("dx, dy, and dz must be finite positive scalars.")
+    return spacing
 
 def _require_finite_tensor(name, tensor):
     """Validate that a tensor contains only finite values.
@@ -53,19 +83,17 @@ def initialization(device, er,se,mr,source_amplitudes,source_location,receiver_l
         source_amplitudes: Source waveform tensor with shape (nwaveforms, nt, 1).
         source_location: Source coordinates with shape (nstep, nsr, 3).
         receiver_location: Receiver coordinates with shape (nstep, nrx, 3).
-        dx: Spatial grid spacing.
+        dx: Scalar grid spacing or a three-value ``(dx, dy, dz)`` sequence.
         dt: Time step size.
         pmlthick: PML thickness as an int, list, or tensor.
         fdtd_order: Spatial finite-difference order used for the CFL check.
     """
     dtype=torch.float32
+    spacing = _normalize_grid_spacing(dx)
     try:
-        dx = float(dx)
         dt = float(dt)
     except (TypeError, ValueError) as exc:
-        raise TypeError("dx and dt must be finite positive scalars.") from exc
-    if not math.isfinite(dx) or dx <= 0.0:
-        raise ValueError("dx must be a finite positive scalar.")
+        raise TypeError("dt must be a finite positive scalar.") from exc
     if not math.isfinite(dt) or dt <= 0.0:
         raise ValueError("dt must be a finite positive scalar.")
     _require_finite_tensor("er", er)
@@ -169,7 +197,7 @@ def initialization(device, er,se,mr,source_amplitudes,source_location,receiver_l
         source_amplitudes=source_amplitudes.repeat(nsr,1,1).contiguous()
         print('Tips: The number of source waveforms is 1, but the number of sources is ',nsr,'. The source waveform is repeated for all sources.')
 
-    check_cfl(dx, dt,nx,ny,nz,er=er,mr=mr,fdtd_order=fdtd_order)
+    check_cfl(spacing, dt,nx,ny,nz,er=er,mr=mr,fdtd_order=fdtd_order)
 
     nt=source_amplitudes.shape[1]
     
@@ -200,7 +228,7 @@ def check_cfl(dx, dt, nx,ny,nz,er=None,mr=None,fdtd_order=2):
     """Check the CFL stability condition for the simulation grid.
 
     Args:
-        dx: Spatial grid spacing.
+        dx: Scalar grid spacing or a three-value ``(dx, dy, dz)`` sequence.
         dt: Time step size.
         nx: Number of cells along the x axis.
         ny: Number of cells along the y axis.
@@ -210,13 +238,13 @@ def check_cfl(dx, dt, nx,ny,nz,er=None,mr=None,fdtd_order=2):
         fdtd_order: Spatial finite-difference order, 2, 4, or 8.
     """
 
+    spacing = _normalize_grid_spacing(dx)
     try:
-        dx = float(dx)
         dt = float(dt)
     except (TypeError, ValueError) as exc:
-        raise TypeError("dx and dt must be finite positive scalars.") from exc
-    if not math.isfinite(dx) or dx <= 0.0 or not math.isfinite(dt) or dt <= 0.0:
-        raise ValueError("dx and dt must be finite positive scalars.")
+        raise TypeError("dt must be a finite positive scalar.") from exc
+    if not math.isfinite(dt) or dt <= 0.0:
+        raise ValueError("dt must be a finite positive scalar.")
     if fdtd_order not in (2, 4, 8):
         raise ValueError("fdtd_order must be one of 2, 4, or 8.")
 
@@ -225,8 +253,12 @@ def check_cfl(dx, dt, nx,ny,nz,er=None,mr=None,fdtd_order=2):
         4: 9.0 / 8.0 + 1.0 / 24.0,
         8: 1225.0 / 1024.0 + 245.0 / 3072.0 + 49.0 / 5120.0 + 5.0 / 7168.0,
     }
-    active_dimensions = sum(int(size > 1) for size in (nx, ny, nz))
-    if active_dimensions == 0:
+    active_inverse_spacing_squared = sum(
+        1.0 / (axis_spacing * axis_spacing)
+        for size, axis_spacing in zip((nx, ny, nz), spacing)
+        if size > 1
+    )
+    if active_inverse_spacing_squared == 0.0:
         raise ValueError("At least one model dimension must contain more than one cell.")
 
     material_factor = 1.0
@@ -237,7 +269,9 @@ def check_cfl(dx, dt, nx,ny,nz,er=None,mr=None,fdtd_order=2):
         material_factor = math.sqrt(min_er_mr)
 
     spectral_factor = coefficient_sums[fdtd_order]
-    dt_max = material_factor * dx / (c * spectral_factor * math.sqrt(active_dimensions))
+    dt_max = material_factor / (
+        c * spectral_factor * math.sqrt(active_inverse_spacing_squared)
+    )
 
     if dt > dt_max:
         raise ValueError(f"Does not meet CFL conditions: dt={dt:.3e} > dt_max={dt_max:.3e}")
@@ -429,7 +463,7 @@ def buildpmlcoeffs(er,mr,dt,dx,nx,ny,nz,pmlthick,device,dtype):
         er: Relative permittivity tensor.
         mr: Relative permeability tensor.
         dt: Time step size.
-        dx: Spatial grid spacing.
+        dx: Scalar grid spacing or a three-value ``(dx, dy, dz)`` sequence.
         nx: Number of model cells along the x axis.
         ny: Number of model cells along the y axis.
         nz: Number of model cells along the z axis.
@@ -437,6 +471,7 @@ def buildpmlcoeffs(er,mr,dt,dx,nx,ny,nz,pmlthick,device,dtype):
         device: PyTorch device for output tensors.
         dtype: PyTorch dtype for output tensors.
     """
+    dx, dy, dz = _normalize_grid_spacing(dx)
     averageer=torch.zeros(6, device=device, dtype=dtype)
     averagemr=torch.zeros(6, device=device, dtype=dtype)
     lencfs=1
@@ -483,7 +518,7 @@ def buildpmlcoeffs(er,mr,dt,dx,nx,ny,nz,pmlthick,device,dtype):
         CFS2=CFS(device=device)
         y01=torch.zeros((4,lencfs,pmlthick[2]), device=device, dtype=dtype)
         y02=torch.zeros((4,lencfs,pmlthick[2]), device=device, dtype=dtype)
-        calculate_pml_update_coeffs(CFS2,y01,y02, averageer[2], averagemr[2], dt,dx,pmlthick[2])
+        calculate_pml_update_coeffs(CFS2,y01,y02, averageer[2], averagemr[2], dt,dy,pmlthick[2])
 
     if pmlthick[3]>0:
         ym=torch.tensor((pmlthick[3],0,nx,ny-pmlthick[3],ny,0,nz), device=device, dtype=torch.int)
@@ -492,7 +527,7 @@ def buildpmlcoeffs(er,mr,dt,dx,nx,ny,nz,pmlthick,device,dtype):
         CFS3=CFS(device=device)
         ym1=torch.zeros((4,lencfs,pmlthick[3]), device=device, dtype=dtype)
         ym2=torch.zeros((4,lencfs,pmlthick[3]), device=device, dtype=dtype)
-        calculate_pml_update_coeffs(CFS3,ym1,ym2, averageer[3], averagemr[3], dt,dx,pmlthick[3])
+        calculate_pml_update_coeffs(CFS3,ym1,ym2, averageer[3], averagemr[3], dt,dy,pmlthick[3])
 
     if pmlthick[4]>0:
         z0=torch.tensor((pmlthick[4],0,nx,0,ny,0,pmlthick[4]), device=device, dtype=torch.int)
@@ -501,7 +536,7 @@ def buildpmlcoeffs(er,mr,dt,dx,nx,ny,nz,pmlthick,device,dtype):
         CFS4=CFS(device=device)
         z01=torch.zeros((4,lencfs,pmlthick[4]), device=device, dtype=dtype)
         z02=torch.zeros((4,lencfs,pmlthick[4]), device=device, dtype=dtype)
-        calculate_pml_update_coeffs(CFS4,z01,z02, averageer[4], averagemr[4], dt,dx,pmlthick[4])
+        calculate_pml_update_coeffs(CFS4,z01,z02, averageer[4], averagemr[4], dt,dz,pmlthick[4])
 
     if pmlthick[5]>0:
         zm=torch.tensor((pmlthick[5],0,nx,0,ny,nz-pmlthick[5],nz), device=device, dtype=torch.int)
@@ -510,7 +545,7 @@ def buildpmlcoeffs(er,mr,dt,dx,nx,ny,nz,pmlthick,device,dtype):
         CFS5=CFS(device=device)
         zm1=torch.zeros((4,lencfs,pmlthick[5]), device=device, dtype=dtype)
         zm2=torch.zeros((4,lencfs,pmlthick[5]), device=device, dtype=dtype)
-        calculate_pml_update_coeffs(CFS5,zm1,zm2, averageer[5], averagemr[5], dt,dx,pmlthick[5])
+        calculate_pml_update_coeffs(CFS5,zm1,zm2, averageer[5], averagemr[5], dt,dz,pmlthick[5])
     return x0,xm,y0,ym,z0,zm,x01,x02,xm1,xm2,y01,y02,ym1,ym2,z01,z02,zm1,zm2
 
 
@@ -771,7 +806,7 @@ def checkpoint_initial_field(device=None,per_nstep=None, dx=None, dt=None,
     Args:
         device: PyTorch device where tensors will be allocated.
         per_nstep: Optional number of shots to keep from the initialized fields.
-        dx: Spatial grid spacing.
+        dx: Scalar grid spacing or a three-value ``(dx, dy, dz)`` sequence.
         dt: Time step size.
         source_amplitudes: Source waveform tensor.
         source_location: Source coordinates with shape (nstep, nsr, 3).

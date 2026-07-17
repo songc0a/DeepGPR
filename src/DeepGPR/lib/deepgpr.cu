@@ -159,7 +159,7 @@ static int g_fdtd_order = 2;
 
 DEEPGPR_API int deepgpr_abi_version(void)
 {
-    return 3;
+    return 4;
 }
 
 /*
@@ -400,7 +400,7 @@ __device__ __forceinline__ void pml_forward_derivative_adjoint(
  *   uH0, uH1, uH4: Output magnetic-field update coefficient arrays.
  *   NX_FIELDS, NY_FIELDS, NZ_FIELDS: Padded field grid sizes.
  *   dt: Time step size.
- *   dx: Spatial grid spacing.
+ *   dx, dy, dz: Grid spacing along each axis.
  */
 __global__ void ucgetforward(const float* __restrict__ er, const float* __restrict__ se, const float* __restrict__ mr,
     float* __restrict__ uE0, float* __restrict__ uE1, float* __restrict__ uE4,
@@ -486,7 +486,7 @@ __global__ void store_outputs(
  * Parameters:
  *   step: Number of shots or simulations in the batch.
  *   iteration: Current time-step index.
- *   dx: Spatial grid spacing.
+ *   dx, dy, dz: Grid spacing along each axis.
  *   sourcelocation: Source coordinates with shape (step, nsrc, 3).
  *   srcwaveforms: Source waveform array.
  *   Ex, Ey, Ez: Electric field component arrays to update.
@@ -497,7 +497,7 @@ __global__ void store_outputs(
  *   nt: Total number of time steps.
  */
 __global__ void Update_hertzian_dipole(
-    int step, int iteration, float dx, 
+    int step, int iteration, float dx, float dy, float dz,
     const int* __restrict__ sourcelocation, const float* __restrict__ srcwaveforms,
     float* __restrict__ Ex, float* __restrict__ Ey, float* __restrict__ Ez, const float* __restrict__ uE4,
     int NX, int NY, int NZ, int nsrc, int polarisation, int nt) 
@@ -510,7 +510,8 @@ __global__ void Update_hertzian_dipole(
     int s = (int)(work / nsrc);
     long long src = work % nsrc;
     float waveform_value = srcwaveforms[src * nt + iteration];
-    float scale = waveform_value * dx / (dx * dx * dx);  
+    float dipole_length = polarisation == 0 ? dx : (polarisation == 1 ? dy : dz);
+    float scale = waveform_value * dipole_length / (dx * dy * dz);
 
     long long i = sourcelocation[s * nsrc * 3 + src * 3 + 0];
     long long j = sourcelocation[s * nsrc * 3 + src * 3 + 1];
@@ -530,7 +531,8 @@ __global__ void e_fields_base_update_gpu(
     const float* __restrict__ uE0, const float* __restrict__ uE1,
     float* __restrict__ Ex, float* __restrict__ Ey, float* __restrict__ Ez,
     const float* __restrict__ Hx, const float* __restrict__ Hy, const float* __restrict__ Hz,
-    int step, int NX_FIELDS, int NY_FIELDS, int NZ_FIELDS)
+    int step, int NX_FIELDS, int NY_FIELDS, int NZ_FIELDS,
+    float dx, float dy, float dz)
 {
     long long ny_nz = (long long)NY_FIELDS * NZ_FIELDS;
     long long field_stride = (long long)NX_FIELDS * ny_nz;
@@ -546,6 +548,8 @@ __global__ void e_fields_base_update_gpu(
 
     float ue0 = uE0[idx];
     float ue1 = uE1[idx];
+    float ue_y = dy == dx ? ue1 : ue1 * dx / dy;
+    float ue_z = dz == dx ? ue1 : ue1 * dx / dz;
 
     bool do_ex = (((NY_FIELDS - 1) != 1 || (NZ_FIELDS - 1) != 1) && i < (NX_FIELDS - 1) && j > 0 && j < (NY_FIELDS - 1) && k > 0 && k < (NZ_FIELDS - 1));
     bool do_ey = (((NX_FIELDS - 1) != 1 || (NZ_FIELDS - 1) != 1) && i > 0 && i < (NX_FIELDS - 1) && j < (NY_FIELDS - 1) && k > 0 && k < (NZ_FIELDS - 1));
@@ -554,17 +558,17 @@ __global__ void e_fields_base_update_gpu(
     if (do_ex) {
         float dHz_dy = staggered_backward_diff_static<ORDER>(Hz, id4, NZ_FIELDS, j, NY_FIELDS);
         float dHy_dz = staggered_backward_diff_static<ORDER>(Hy, id4, 1, k, NZ_FIELDS);
-        Ex[id4] = ue0 * Ex[id4] + ue1 * dHz_dy - ue1 * dHy_dz;
+        Ex[id4] = ue0 * Ex[id4] + ue_y * dHz_dy - ue_z * dHy_dz;
     }
     if (do_ey) {
         float dHx_dz = staggered_backward_diff_static<ORDER>(Hx, id4, 1, k, NZ_FIELDS);
         float dHz_dx = staggered_backward_diff_static<ORDER>(Hz, id4, ny_nz, i, NX_FIELDS);
-        Ey[id4] = ue0 * Ey[id4] + ue1 * dHx_dz - ue1 * dHz_dx;
+        Ey[id4] = ue0 * Ey[id4] + ue_z * dHx_dz - ue1 * dHz_dx;
     }
     if (do_ez) {
         float dHy_dx = staggered_backward_diff_static<ORDER>(Hy, id4, ny_nz, i, NX_FIELDS);
         float dHx_dy = staggered_backward_diff_static<ORDER>(Hx, id4, NZ_FIELDS, j, NY_FIELDS);
-        Ez[id4] = ue0 * Ez[id4] + ue1 * dHy_dx - ue1 * dHx_dy;
+        Ez[id4] = ue0 * Ez[id4] + ue1 * dHy_dx - ue_y * dHx_dy;
     }
 }
 
@@ -737,7 +741,8 @@ __global__ void h_fields_base_update_gpu(
     const float* __restrict__ uH0, const float* __restrict__ uH1,
     const float* __restrict__ Ex, const float* __restrict__ Ey, const float* __restrict__ Ez,
     float* __restrict__ Hx, float* __restrict__ Hy, float* __restrict__ Hz,
-    int step, int NX_FIELDS, int NY_FIELDS, int NZ_FIELDS)
+    int step, int NX_FIELDS, int NY_FIELDS, int NZ_FIELDS,
+    float dx, float dy, float dz)
 {
     long long ny_nz = (long long)NY_FIELDS * NZ_FIELDS;
     long long field_stride = (long long)NX_FIELDS * ny_nz;
@@ -753,6 +758,8 @@ __global__ void h_fields_base_update_gpu(
 
     float uh0 = uH0[idx];
     float uh1 = uH1[idx];
+    float uh_y = dy == dx ? uh1 : uh1 * dx / dy;
+    float uh_z = dz == dx ? uh1 : uh1 * dx / dz;
 
     bool do_hx = ((NX_FIELDS - 1) != 1 && i > 0 && i < (NX_FIELDS - 1) && j < (NY_FIELDS - 1) && k < (NZ_FIELDS - 1));
     bool do_hy = ((NY_FIELDS - 1) != 1 && i < (NX_FIELDS - 1) && j > 0 && j < (NY_FIELDS - 1) && k < (NZ_FIELDS - 1));
@@ -761,24 +768,24 @@ __global__ void h_fields_base_update_gpu(
     if (do_hx) {
         float dEz_dy = staggered_forward_diff_static<ORDER>(Ez, id4, NZ_FIELDS, j, NY_FIELDS);
         float dEy_dz = staggered_forward_diff_static<ORDER>(Ey, id4, 1, k, NZ_FIELDS);
-        Hx[id4] = uh0 * Hx[id4] - uh1 * dEz_dy + uh1 * dEy_dz;
+        Hx[id4] = uh0 * Hx[id4] - uh_y * dEz_dy + uh_z * dEy_dz;
     }
     if (do_hy) {
         float dEx_dz = staggered_forward_diff_static<ORDER>(Ex, id4, 1, k, NZ_FIELDS);
         float dEz_dx = staggered_forward_diff_static<ORDER>(Ez, id4, ny_nz, i, NX_FIELDS);
-        Hy[id4] = uh0 * Hy[id4] - uh1 * dEx_dz + uh1 * dEz_dx;
+        Hy[id4] = uh0 * Hy[id4] - uh_z * dEx_dz + uh1 * dEz_dx;
     }
     if (do_hz) {
         float dEy_dx = staggered_forward_diff_static<ORDER>(Ey, id4, ny_nz, i, NX_FIELDS);
         float dEx_dy = staggered_forward_diff_static<ORDER>(Ex, id4, NZ_FIELDS, j, NY_FIELDS);
-        Hz[id4] = uh0 * Hz[id4] - uh1 * dEy_dx + uh1 * dEx_dy;
+        Hz[id4] = uh0 * Hz[id4] - uh1 * dEy_dx + uh_y * dEx_dy;
     }
 }
 
 __global__ void e_fields_base_adjoint_gpu(
     const float* uE0, const float* uE1,
     float* Ex, float* Ey, float* Ez, float* Hx, float* Hy, float* Hz,
-    int step, int NX, int NY, int NZ, int order)
+    int step, int NX, int NY, int NZ, float dx, float dy, float dz, int order)
 {
     long long ny_nz = (long long)NY * NZ;
     long long field_stride = (long long)NX * ny_nz;
@@ -793,23 +800,25 @@ __global__ void e_fields_base_adjoint_gpu(
     bool do_ey = (((NX - 1) != 1 || (NZ - 1) != 1) && i > 0 && i < NX - 1 && j < NY - 1 && k > 0 && k < NZ - 1);
     bool do_ez = (((NX - 1) != 1 || (NY - 1) != 1) && i > 0 && i < NX - 1 && j > 0 && j < NY - 1 && k < NZ - 1);
     float coeff = uE1[idx];
+    float coeff_y = dy == dx ? coeff : coeff * dx / dy;
+    float coeff_z = dz == dx ? coeff : coeff * dx / dz;
 
     if (do_ex) {
         float value = Ex[work];
-        add_staggered_backward_adjoint(Hz, work, NZ, j, NY, order, coeff * value);
-        add_staggered_backward_adjoint(Hy, work, 1, k, NZ, order, -coeff * value);
+        add_staggered_backward_adjoint(Hz, work, NZ, j, NY, order, coeff_y * value);
+        add_staggered_backward_adjoint(Hy, work, 1, k, NZ, order, -coeff_z * value);
         Ex[work] = uE0[idx] * value;
     }
     if (do_ey) {
         float value = Ey[work];
-        add_staggered_backward_adjoint(Hx, work, 1, k, NZ, order, coeff * value);
+        add_staggered_backward_adjoint(Hx, work, 1, k, NZ, order, coeff_z * value);
         add_staggered_backward_adjoint(Hz, work, ny_nz, i, NX, order, -coeff * value);
         Ey[work] = uE0[idx] * value;
     }
     if (do_ez) {
         float value = Ez[work];
         add_staggered_backward_adjoint(Hy, work, ny_nz, i, NX, order, coeff * value);
-        add_staggered_backward_adjoint(Hx, work, NZ, j, NY, order, -coeff * value);
+        add_staggered_backward_adjoint(Hx, work, NZ, j, NY, order, -coeff_y * value);
         Ez[work] = uE0[idx] * value;
     }
 }
@@ -817,7 +826,7 @@ __global__ void e_fields_base_adjoint_gpu(
 __global__ void h_fields_base_adjoint_gpu(
     const float* uH0, const float* uH1,
     float* Ex, float* Ey, float* Ez, float* Hx, float* Hy, float* Hz,
-    int step, int NX, int NY, int NZ, int order)
+    int step, int NX, int NY, int NZ, float dx, float dy, float dz, int order)
 {
     long long ny_nz = (long long)NY * NZ;
     long long field_stride = (long long)NX * ny_nz;
@@ -832,23 +841,25 @@ __global__ void h_fields_base_adjoint_gpu(
     bool do_hy = ((NY - 1) != 1 && i < NX - 1 && j > 0 && j < NY - 1 && k < NZ - 1);
     bool do_hz = ((NZ - 1) != 1 && i < NX - 1 && j < NY - 1 && k > 0 && k < NZ - 1);
     float coeff = uH1[idx];
+    float coeff_y = dy == dx ? coeff : coeff * dx / dy;
+    float coeff_z = dz == dx ? coeff : coeff * dx / dz;
 
     if (do_hx) {
         float value = Hx[work];
-        add_staggered_forward_adjoint(Ez, work, NZ, j, NY, order, -coeff * value);
-        add_staggered_forward_adjoint(Ey, work, 1, k, NZ, order, coeff * value);
+        add_staggered_forward_adjoint(Ez, work, NZ, j, NY, order, -coeff_y * value);
+        add_staggered_forward_adjoint(Ey, work, 1, k, NZ, order, coeff_z * value);
         Hx[work] = uH0[idx] * value;
     }
     if (do_hy) {
         float value = Hy[work];
-        add_staggered_forward_adjoint(Ex, work, 1, k, NZ, order, -coeff * value);
+        add_staggered_forward_adjoint(Ex, work, 1, k, NZ, order, -coeff_z * value);
         add_staggered_forward_adjoint(Ez, work, ny_nz, i, NX, order, coeff * value);
         Hy[work] = uH0[idx] * value;
     }
     if (do_hz) {
         float value = Hz[work];
         add_staggered_forward_adjoint(Ey, work, ny_nz, i, NX, order, -coeff * value);
-        add_staggered_forward_adjoint(Ex, work, NZ, j, NY, order, coeff * value);
+        add_staggered_forward_adjoint(Ex, work, NZ, j, NY, order, coeff_y * value);
         Hz[work] = uH0[idx] * value;
     }
 }
@@ -1221,7 +1232,6 @@ __global__ void pml_h_fields_adjoint_gpu(
  * Parameters:
  *   step: Number of shots or simulations in the batch.
  *   iteration: Current reverse time-step index.
- *   dx: Spatial grid spacing.
  *   sourcelocation: Adjoint source coordinates with shape (step, nsr, 3).
  *   srcwaveforms: Adjoint source waveform array.
  *   Ex, Ey, Ez: Electric field component arrays to update.
@@ -1468,7 +1478,7 @@ __global__ void accumulate_gradients(
  *   nt: Number of time steps.
  *   step: Number of shots or simulations in the batch.
  *   nrx: Number of receivers per shot.
- *   dx: Spatial grid spacing.
+ *   dx, dy, dz: Grid spacing along each axis.
  *   receiverlocation: Receiver coordinates with shape (step, nrx, 3).
  *   rxs: Output receiver sample array.
  *   NX_FIELDS, NY_FIELDS, NZ_FIELDS: Padded field grid sizes.
@@ -1499,7 +1509,7 @@ DEEPGPR_API void forward(const float* __restrict__ er, const float* __restrict__
             const float* __restrict__ z0ER,const float* __restrict__ zmER, const float* __restrict__ x0HR,const float* __restrict__ xmHR,
             const float* __restrict__ y0HR,const float* __restrict__ ymHR, const float* __restrict__ z0HR,const float* __restrict__ zmHR,
 
-             float dt, int nt, int step, int nrx, float dx,
+             float dt, int nt, int step, int nrx, float dx, float dy, float dz,
              const int* __restrict__ receiverlocation, float* __restrict__ rxs, 
 
              int NX_FIELDS, int NY_FIELDS, int NZ_FIELDS, int nsrc, 
@@ -1587,53 +1597,55 @@ DEEPGPR_API void forward(const float* __restrict__ er, const float* __restrict__
         }
 
         if (fdtd_order == 8) {
-            h_fields_base_update_gpu<8><<<grid_fields, blockSize, 0, stream_comp>>>(uH0, uH1, Ex, Ey, Ez, Hx, Hy, Hz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
+            h_fields_base_update_gpu<8><<<grid_fields, blockSize, 0, stream_comp>>>(uH0, uH1, Ex, Ey, Ez, Hx, Hy, Hz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, dx, dy, dz);
             CUDA_CHECK_LAST();
             pml_h_fields_update_gpu<8><<<grid_fields, blockSize, 0, stream_comp>>>(
-                Ex, Ey, Ez, Hx, Hy, Hz, dx, dx, dx, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
+                Ex, Ey, Ez, Hx, Hy, Hz, dx, dy, dz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
                 pml0, pml1, pml2, pml3, pml4, pml5, x0HR, xmHR, y0HR, ymHR, z0HR, zmHR, uH4,
                 x0HPhi1, x0HPhi2, xmHPhi1, xmHPhi2, y0HPhi1, y0HPhi2, ymHPhi1, ymHPhi2, z0HPhi1, z0HPhi2, zmHPhi1, zmHPhi2);
             CUDA_CHECK_LAST();
-            e_fields_base_update_gpu<8><<<grid_fields, blockSize, 0, stream_comp>>>(uE0, uE1, Ex, Ey, Ez, Hx, Hy, Hz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
+            e_fields_base_update_gpu<8><<<grid_fields, blockSize, 0, stream_comp>>>(uE0, uE1, Ex, Ey, Ez, Hx, Hy, Hz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, dx, dy, dz);
             CUDA_CHECK_LAST();
             pml_e_fields_update_gpu<8><<<grid_fields, blockSize, 0, stream_comp>>>(
-                Ex, Ey, Ez, Hx, Hy, Hz, dx, dx, dx, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
+                Ex, Ey, Ez, Hx, Hy, Hz, dx, dy, dz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
                 pml0, pml1, pml2, pml3, pml4, pml5, x0ER, xmER, y0ER, ymER, z0ER, zmER, uE4,
                 x0EPhi1, x0EPhi2, xmEPhi1, xmEPhi2, y0EPhi1, y0EPhi2, ymEPhi1, ymEPhi2, z0EPhi1, z0EPhi2, zmEPhi1, zmEPhi2);
             CUDA_CHECK_LAST();
         } else if (fdtd_order == 4) {
-            h_fields_base_update_gpu<4><<<grid_fields, blockSize, 0, stream_comp>>>(uH0, uH1, Ex, Ey, Ez, Hx, Hy, Hz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
+            h_fields_base_update_gpu<4><<<grid_fields, blockSize, 0, stream_comp>>>(uH0, uH1, Ex, Ey, Ez, Hx, Hy, Hz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, dx, dy, dz);
             CUDA_CHECK_LAST();
             pml_h_fields_update_gpu<4><<<grid_fields, blockSize, 0, stream_comp>>>(
-                Ex, Ey, Ez, Hx, Hy, Hz, dx, dx, dx, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
+                Ex, Ey, Ez, Hx, Hy, Hz, dx, dy, dz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
                 pml0, pml1, pml2, pml3, pml4, pml5, x0HR, xmHR, y0HR, ymHR, z0HR, zmHR, uH4,
                 x0HPhi1, x0HPhi2, xmHPhi1, xmHPhi2, y0HPhi1, y0HPhi2, ymHPhi1, ymHPhi2, z0HPhi1, z0HPhi2, zmHPhi1, zmHPhi2);
             CUDA_CHECK_LAST();
-            e_fields_base_update_gpu<4><<<grid_fields, blockSize, 0, stream_comp>>>(uE0, uE1, Ex, Ey, Ez, Hx, Hy, Hz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
+            e_fields_base_update_gpu<4><<<grid_fields, blockSize, 0, stream_comp>>>(uE0, uE1, Ex, Ey, Ez, Hx, Hy, Hz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, dx, dy, dz);
             CUDA_CHECK_LAST();
             pml_e_fields_update_gpu<4><<<grid_fields, blockSize, 0, stream_comp>>>(
-                Ex, Ey, Ez, Hx, Hy, Hz, dx, dx, dx, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
+                Ex, Ey, Ez, Hx, Hy, Hz, dx, dy, dz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
                 pml0, pml1, pml2, pml3, pml4, pml5, x0ER, xmER, y0ER, ymER, z0ER, zmER, uE4,
                 x0EPhi1, x0EPhi2, xmEPhi1, xmEPhi2, y0EPhi1, y0EPhi2, ymEPhi1, ymEPhi2, z0EPhi1, z0EPhi2, zmEPhi1, zmEPhi2);
             CUDA_CHECK_LAST();
         } else {
-            h_fields_base_update_gpu<2><<<grid_fields, blockSize, 0, stream_comp>>>(uH0, uH1, Ex, Ey, Ez, Hx, Hy, Hz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
+            h_fields_base_update_gpu<2><<<grid_fields, blockSize, 0, stream_comp>>>(uH0, uH1, Ex, Ey, Ez, Hx, Hy, Hz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, dx, dy, dz);
             CUDA_CHECK_LAST();
             pml_h_fields_update_gpu<2><<<grid_fields, blockSize, 0, stream_comp>>>(
-                Ex, Ey, Ez, Hx, Hy, Hz, dx, dx, dx, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
+                Ex, Ey, Ez, Hx, Hy, Hz, dx, dy, dz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
                 pml0, pml1, pml2, pml3, pml4, pml5, x0HR, xmHR, y0HR, ymHR, z0HR, zmHR, uH4,
                 x0HPhi1, x0HPhi2, xmHPhi1, xmHPhi2, y0HPhi1, y0HPhi2, ymHPhi1, ymHPhi2, z0HPhi1, z0HPhi2, zmHPhi1, zmHPhi2);
             CUDA_CHECK_LAST();
-            e_fields_base_update_gpu<2><<<grid_fields, blockSize, 0, stream_comp>>>(uE0, uE1, Ex, Ey, Ez, Hx, Hy, Hz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
+            e_fields_base_update_gpu<2><<<grid_fields, blockSize, 0, stream_comp>>>(uE0, uE1, Ex, Ey, Ez, Hx, Hy, Hz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, dx, dy, dz);
             CUDA_CHECK_LAST();
             pml_e_fields_update_gpu<2><<<grid_fields, blockSize, 0, stream_comp>>>(
-                Ex, Ey, Ez, Hx, Hy, Hz, dx, dx, dx, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
+                Ex, Ey, Ez, Hx, Hy, Hz, dx, dy, dz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
                 pml0, pml1, pml2, pml3, pml4, pml5, x0ER, xmER, y0ER, ymER, z0ER, zmER, uE4,
                 x0EPhi1, x0EPhi2, xmEPhi1, xmEPhi2, y0EPhi1, y0EPhi2, ymEPhi1, ymEPhi2, z0EPhi1, z0EPhi2, zmEPhi1, zmEPhi2);
             CUDA_CHECK_LAST();
         }
 
-        Update_hertzian_dipole<<<grid_src, blockSize, 0, stream_comp>>>(step, i, dx, sourcelocation, srcwaveforms, Ex, Ey, Ez, uE4, NX_FIELDS, NY_FIELDS, NZ_FIELDS, nsrc, polarisation, nt);
+        Update_hertzian_dipole<<<grid_src, blockSize, 0, stream_comp>>>(
+            step, i, dx, dy, dz, sourcelocation, srcwaveforms, Ex, Ey, Ez,
+            uE4, NX_FIELDS, NY_FIELDS, NZ_FIELDS, nsrc, polarisation, nt);
         CUDA_CHECK_LAST();
         
         if (i % sampling_interval == 0) {
@@ -1728,7 +1740,7 @@ DEEPGPR_API void forward(const float* __restrict__ er, const float* __restrict__
  *   nt: Number of time steps.
  *   step: Number of shots or simulations in the batch.
  *   nrx: Number of receivers per shot.
- *   dx: Spatial grid spacing.
+ *   dx, dy, dz: Grid spacing along each axis.
  *   NX_FIELDS, NY_FIELDS, NZ_FIELDS: Padded field grid sizes.
  *   nsrc: Number of adjoint sources per shot.
  *   sourcelocation: Adjoint source coordinates with shape (step, nsrc, 3).
@@ -1761,7 +1773,7 @@ DEEPGPR_API void backward(const float* __restrict__ er, const float* __restrict_
             float* __restrict__ z0ER,float* __restrict__ zmER, float* __restrict__ x0HR,float* __restrict__ xmHR,
             float* __restrict__ y0HR,float* __restrict__ ymHR, float* __restrict__ z0HR,float* __restrict__ zmHR,
 
-             float dt, int nt, int step, int nrx, float dx,
+             float dt, int nt, int step, int nrx, float dx, float dy, float dz,
              int NX_FIELDS, int NY_FIELDS, int NZ_FIELDS,
              int nsrc, const int* __restrict__ sourcelocation, const float* __restrict__ srcwaveforms,
              int polarisation, 
@@ -1834,57 +1846,57 @@ DEEPGPR_API void backward(const float* __restrict__ er, const float* __restrict_
         /* Stable reverse-time propagation using the dissipative forward CPML. */
         if (fdtd_order == 8) {
             h_fields_base_update_gpu<8><<<grid_fields, blockSize, 0, stream_comp>>>(
-                uH0, uH1, Ex, Ey, Ez, Hx, Hy, Hz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
+                uH0, uH1, Ex, Ey, Ez, Hx, Hy, Hz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, dx, dy, dz);
             CUDA_CHECK_LAST();
             pml_h_fields_update_gpu<8><<<grid_fields, blockSize, 0, stream_comp>>>(
-                Ex, Ey, Ez, Hx, Hy, Hz, dx, dx, dx, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
+                Ex, Ey, Ez, Hx, Hy, Hz, dx, dy, dz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
                 pml0, pml1, pml2, pml3, pml4, pml5, x0HR, xmHR, y0HR, ymHR, z0HR, zmHR, uH4,
                 x0HPhi1, x0HPhi2, xmHPhi1, xmHPhi2, y0HPhi1, y0HPhi2, ymHPhi1, ymHPhi2,
                 z0HPhi1, z0HPhi2, zmHPhi1, zmHPhi2);
             CUDA_CHECK_LAST();
             e_fields_base_update_gpu<8><<<grid_fields, blockSize, 0, stream_comp>>>(
-                uE0, uE1, Ex, Ey, Ez, Hx, Hy, Hz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
+                uE0, uE1, Ex, Ey, Ez, Hx, Hy, Hz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, dx, dy, dz);
             CUDA_CHECK_LAST();
             pml_e_fields_update_gpu<8><<<grid_fields, blockSize, 0, stream_comp>>>(
-                Ex, Ey, Ez, Hx, Hy, Hz, dx, dx, dx, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
+                Ex, Ey, Ez, Hx, Hy, Hz, dx, dy, dz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
                 pml0, pml1, pml2, pml3, pml4, pml5, x0ER, xmER, y0ER, ymER, z0ER, zmER, uE4,
                 x0EPhi1, x0EPhi2, xmEPhi1, xmEPhi2, y0EPhi1, y0EPhi2, ymEPhi1, ymEPhi2,
                 z0EPhi1, z0EPhi2, zmEPhi1, zmEPhi2);
             CUDA_CHECK_LAST();
         } else if (fdtd_order == 4) {
             h_fields_base_update_gpu<4><<<grid_fields, blockSize, 0, stream_comp>>>(
-                uH0, uH1, Ex, Ey, Ez, Hx, Hy, Hz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
+                uH0, uH1, Ex, Ey, Ez, Hx, Hy, Hz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, dx, dy, dz);
             CUDA_CHECK_LAST();
             pml_h_fields_update_gpu<4><<<grid_fields, blockSize, 0, stream_comp>>>(
-                Ex, Ey, Ez, Hx, Hy, Hz, dx, dx, dx, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
+                Ex, Ey, Ez, Hx, Hy, Hz, dx, dy, dz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
                 pml0, pml1, pml2, pml3, pml4, pml5, x0HR, xmHR, y0HR, ymHR, z0HR, zmHR, uH4,
                 x0HPhi1, x0HPhi2, xmHPhi1, xmHPhi2, y0HPhi1, y0HPhi2, ymHPhi1, ymHPhi2,
                 z0HPhi1, z0HPhi2, zmHPhi1, zmHPhi2);
             CUDA_CHECK_LAST();
             e_fields_base_update_gpu<4><<<grid_fields, blockSize, 0, stream_comp>>>(
-                uE0, uE1, Ex, Ey, Ez, Hx, Hy, Hz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
+                uE0, uE1, Ex, Ey, Ez, Hx, Hy, Hz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, dx, dy, dz);
             CUDA_CHECK_LAST();
             pml_e_fields_update_gpu<4><<<grid_fields, blockSize, 0, stream_comp>>>(
-                Ex, Ey, Ez, Hx, Hy, Hz, dx, dx, dx, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
+                Ex, Ey, Ez, Hx, Hy, Hz, dx, dy, dz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
                 pml0, pml1, pml2, pml3, pml4, pml5, x0ER, xmER, y0ER, ymER, z0ER, zmER, uE4,
                 x0EPhi1, x0EPhi2, xmEPhi1, xmEPhi2, y0EPhi1, y0EPhi2, ymEPhi1, ymEPhi2,
                 z0EPhi1, z0EPhi2, zmEPhi1, zmEPhi2);
             CUDA_CHECK_LAST();
         } else {
             h_fields_base_update_gpu<2><<<grid_fields, blockSize, 0, stream_comp>>>(
-                uH0, uH1, Ex, Ey, Ez, Hx, Hy, Hz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
+                uH0, uH1, Ex, Ey, Ez, Hx, Hy, Hz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, dx, dy, dz);
             CUDA_CHECK_LAST();
             pml_h_fields_update_gpu<2><<<grid_fields, blockSize, 0, stream_comp>>>(
-                Ex, Ey, Ez, Hx, Hy, Hz, dx, dx, dx, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
+                Ex, Ey, Ez, Hx, Hy, Hz, dx, dy, dz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
                 pml0, pml1, pml2, pml3, pml4, pml5, x0HR, xmHR, y0HR, ymHR, z0HR, zmHR, uH4,
                 x0HPhi1, x0HPhi2, xmHPhi1, xmHPhi2, y0HPhi1, y0HPhi2, ymHPhi1, ymHPhi2,
                 z0HPhi1, z0HPhi2, zmHPhi1, zmHPhi2);
             CUDA_CHECK_LAST();
             e_fields_base_update_gpu<2><<<grid_fields, blockSize, 0, stream_comp>>>(
-                uE0, uE1, Ex, Ey, Ez, Hx, Hy, Hz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
+                uE0, uE1, Ex, Ey, Ez, Hx, Hy, Hz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, dx, dy, dz);
             CUDA_CHECK_LAST();
             pml_e_fields_update_gpu<2><<<grid_fields, blockSize, 0, stream_comp>>>(
-                Ex, Ey, Ez, Hx, Hy, Hz, dx, dx, dx, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
+                Ex, Ey, Ez, Hx, Hy, Hz, dx, dy, dz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
                 pml0, pml1, pml2, pml3, pml4, pml5, x0ER, xmER, y0ER, ymER, z0ER, zmER, uE4,
                 x0EPhi1, x0EPhi2, xmEPhi1, xmEPhi2, y0EPhi1, y0EPhi2, ymEPhi1, ymEPhi2,
                 z0EPhi1, z0EPhi2, zmEPhi1, zmEPhi2);

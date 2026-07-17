@@ -49,7 +49,7 @@ import matplotlib.pyplot as plt
 
 # Set up the parameters and models
 device=torch.device("cuda" if torch.cuda.is_available() else "cpu")
-dx=0.02
+dx=0.02  # Or [dx, dy, dz], for example [0.02, 0.015, 0.01]
 dt=3e-11
 nt=2000
 er = torch.ones(100, 100,1) * 2  
@@ -61,7 +61,9 @@ receiver_location=torch.tensor([[[10,90,0]]],device=device,dtype=torch.int)
 freq=2e8
 peak_time = 1 / freq
 source_amplitudes = torch.zeros((1,nt,1),device=device)
-source_amplitudes[0,:,0]=DeepGPR.ricker(freq, nt, dt, peak_time).to(device)
+source_amplitudes[0,:,0]=DeepGPR.wavelet.ricker(
+    freq, nt, dt, peak_time, device=device
+)
 
 
 #forward modeling
@@ -87,6 +89,28 @@ plt.show()
 ![result](./Fig/example.png)
 
 There are more examples in the ./examples.
+
+## Source Wavelets
+
+Wavelets are available from the `DeepGPR.wavelet` module. Every function
+returns a one-dimensional PyTorch tensor and accepts optional `dtype` and
+`device` arguments.
+
+```python
+ricker = DeepGPR.wavelet.ricker(freq, nt, dt, peak_time, device=device)
+gaussian = DeepGPR.wavelet.gaussian(freq, nt, dt, peak_time, device=device)
+derivative = DeepGPR.wavelet.gaussian_derivative(
+    freq, nt, dt, peak_time, device=device
+)
+morlet = DeepGPR.wavelet.morlet(
+    freq, nt, dt, peak_time, cycles=3.0, device=device
+)
+burst = DeepGPR.wavelet.sine_burst(
+    freq, nt, dt, peak_time, cycles=3.0, device=device
+)
+```
+
+`DeepGPR.ricker(...)` remains available as a backward-compatible alias.
 
 
 
@@ -129,19 +153,33 @@ def compute(device, dx=None, dt=None,
             use_async_offload=False,
             fdtd_order=2,
             mode=2,
-            debug=False):
+            debug=False,
+            print_parameters=False):
 ```
+
+Set `print_parameters=True` on an ordinary call to print the normalized
+configuration and memory estimate immediately before the native solver starts:
+
+```python
+result = DeepGPR.compute(
+    device="cuda:0",
+    # Other model, source, and acquisition arguments...
+    print_parameters=True,
+)
+```
+
 ## 📥 Input Parameters
 ### 1. Basic Physics & Grid Parameters
 
 | Parameter | Data Type | Description |
 | :--- | :--- | :--- |
 | **`device`** | `torch.device` / `str` | PyTorch computation device, e.g., `'cuda:0'` or `'cpu'`. CUDA loads `deepgpr.so/.dll`; CPU loads `deepgpr_cpu.so/.dll/.dylib`. |
-| **`dx`** | `float` | Spatial grid step size (assuming an isotropic grid, i.e., $dx = dy = dz$). Typically in meters (m). |
+| **`dx`** | `float` / 3-value `list`, `tuple`, or `Tensor` | Grid spacing in meters. A scalar uses an isotropic grid ($dx = dy = dz$). Three values specify independent $(dx, dy, dz)$ spacings for the finite differences, CFL condition, CPML coefficients, and source scaling. |
 | **`dt`** | `float` | Time step size. It is checked against a material-aware CFL limit that includes the selected 2/4/8-order stencil. Typically in seconds (s). |
 | **`fdtd_order`** | `int` | Spatial finite-difference order used by the FDTD field updates. Supported values are `2`, `4`, and `8`; default is `2` for compatibility with earlier versions. |
 | **`mode`** | `int` | FWI gradient mode. `2` keeps the previous Ez-only model-gradient calculation. `3` uses Ex, Ey, and Ez electric-field contributions for relative permittivity and conductivity gradients. |
 | **`debug`** | `bool` | Runs expensive NaN/Inf and zero-field validation checks when `True`. The default `False` keeps these checks disabled for faster production runs. |
+| **`print_parameters`** | `bool` | Prints a preflight summary before native FDTD execution. The summary includes all simulation options and a tensor-payload memory estimate for model/state tensors, CPML, saved `Eall`/`Rall` wavefields, receiver buffers, gradients, low-precision snapshots, and CUDA offload buffers. CPU and CUDA estimates are reported separately with a 20% capacity margin. |
 ### 2. Medium Model Parameters
 
 This section defines the electromagnetic properties of the simulation space. For 2D simulations, set `nz=1`.
@@ -194,7 +232,7 @@ When `er` or `se` requires gradients, `mode=2` is restricted to 2D Ez-TM modelin
 
 The backward solver uses reciprocal reverse-time Maxwell propagation with the same dissipative CPML recurrence as the forward solver, following the stable strategy used by tide-GPR. It correlates the adjoint electric field with the saved discrete `ca`/`cb` update terms and then applies the analytic chain rule to `er` and `se`. This avoids the long-time transient growth of unscaled explicitly transposed CPML memory variables. CPML cells are treated as a numerical boundary and are excluded from the returned material gradients.
 
-Use `model_gradient_sampling_interval=1` and `wavefield_storage_dtype=torch.float32` for a directional derivative check in the physical model region. Temporal subsampling and lower-precision storage deliberately approximate the gradient. Run [the gradient-check notebook](examples/4.GradientCheck.ipynb) after rebuilding the native ABI 3 libraries.
+Use `model_gradient_sampling_interval=1` and `wavefield_storage_dtype=torch.float32` for a directional derivative check in the physical model region. Temporal subsampling and lower-precision storage deliberately approximate the gradient. Run [the gradient-check notebook](examples/4.GradientCheck.ipynb) after rebuilding the native ABI 4 libraries.
 
 ## CPU Backend Build
 
@@ -255,6 +293,20 @@ return Eall, (Ex, Ey, Ez), (Hx, Hy, Hz), (x0EPhi1...zmHPhi2), receiver_amplitude
     *   **Shape**: `(nstep, nt, nrx)`
     *   **Meaning**: `[Shot Index, Time Step, Receiver Index]`. Note that this output is already sliced to extract only the component specified by `reciever_direction`.
 
+
+## Tests and Verification
+
+Fast unit tests and the complete numerical verification notebooks are kept in
+the single [`tests`](tests) directory:
+
+```bash
+python -m unittest discover -s tests -p "test_*.py"
+python tests/run_notebook.py tests/00_local_backend_and_contracts.ipynb
+```
+
+Run notebooks `00` through `09` in numeric order, followed by
+`99_verification_summary.ipynb`. See [`tests/README.md`](tests/README.md) for
+the complete matrix and CUDA verification options.
 
 # Cite information
 If you find our codes useful, please kindly cite this article. Thanks.

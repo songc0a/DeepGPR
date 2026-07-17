@@ -1,7 +1,14 @@
 import torch
 import ctypes
 from . import get_deepgpr_lib, set_library_fdtd_order
-from .common import initialization,build_pml_phi,create_or_separate,buildpmlcoeffs,check_tensors_for_nan_inf
+from .common import (
+    _normalize_grid_spacing,
+    initialization,
+    build_pml_phi,
+    create_or_separate,
+    buildpmlcoeffs,
+    check_tensors_for_nan_inf,
+)
 
 
 _WAVEFIELD_STORAGE_TYPES = {
@@ -9,6 +16,365 @@ _WAVEFIELD_STORAGE_TYPES = {
     torch.float16: 1,
     torch.bfloat16: 2,
 }
+
+
+def _format_memory_size(num_bytes):
+    """Format a byte count using binary memory units."""
+    value = float(num_bytes)
+    units = ("B", "KiB", "MiB", "GiB", "TiB")
+    for unit in units:
+        if abs(value) < 1024.0 or unit == units[-1]:
+            return f"{value:.2f} {unit}"
+        value /= 1024.0
+
+
+def _pml_phi_elements(nx, ny, nz, nstep, pml):
+    """Return the exact number of float32 CPML auxiliary elements."""
+    total = 0
+    for thickness in pml[:2]:
+        if thickness > 0:
+            total += nstep * (
+                (thickness + 1) * ny * (nz + 1)
+                + (thickness + 1) * (ny + 1) * nz
+                + thickness * (ny + 1) * nz
+                + thickness * ny * (nz + 1)
+            )
+    for thickness in pml[2:4]:
+        if thickness > 0:
+            total += nstep * (
+                nx * (thickness + 1) * (nz + 1)
+                + (nx + 1) * (thickness + 1) * nz
+                + (nx + 1) * thickness * nz
+                + nx * thickness * (nz + 1)
+            )
+    for thickness in pml[4:6]:
+        if thickness > 0:
+            total += nstep * (
+                nx * (ny + 1) * (thickness + 1)
+                + (nx + 1) * ny * (thickness + 1)
+                + (nx + 1) * ny * thickness
+                + nx * (ny + 1) * thickness
+            )
+    return total
+
+
+def _estimate_compute_memory(
+    *,
+    device,
+    nx,
+    ny,
+    nz,
+    nt,
+    nstep,
+    nsr,
+    nrx,
+    source_waveforms,
+    pml,
+    mode,
+    sampling_interval,
+    storage_dtype,
+    use_async_offload,
+    er_requires_grad,
+    se_requires_grad,
+):
+    """Estimate tensor payload memory for one compute call."""
+    float_bytes = torch.tensor([], dtype=torch.float32).element_size()
+    int_bytes = torch.tensor([], dtype=torch.int32).element_size()
+    storage_bytes = torch.tensor([], dtype=storage_dtype).element_size()
+    model_cells = nx * ny * nz
+    field_cells = (nx + 1) * (ny + 1) * (nz + 1)
+    snapshot_cells = nstep * model_cells
+    components = 3 if mode == 3 else 1
+    nt_saved = (nt + sampling_interval - 1) // sampling_interval
+
+    model_bytes = (2 * model_cells + 3 * field_cells) * float_bytes
+    field_bytes = 6 * nstep * field_cells * float_bytes
+    pml_phi_bytes = _pml_phi_elements(nx, ny, nz, nstep, pml) * float_bytes
+    pml_coefficient_bytes = (
+        8 * sum(pml) * float_bytes
+        + 7 * sum(thickness > 0 for thickness in pml) * int_bytes
+    )
+    acquisition_bytes = (
+        source_waveforms * nt * float_bytes
+        + nstep * nsr * 3 * int_bytes
+        + nstep * nrx * 3 * int_bytes
+    )
+    core_bytes = (
+        model_bytes
+        + field_bytes
+        + pml_phi_bytes
+        + pml_coefficient_bytes
+        + acquisition_bytes
+    )
+
+    saved_wavefield_bytes = (
+        2 * components * nt_saved * snapshot_cells * storage_bytes
+    )
+    update_coefficient_bytes = 6 * field_cells * float_bytes
+    receiver_bytes = nstep * 6 * nt * nrx * float_bytes
+    gradient_bytes = (
+        int(er_requires_grad) + int(se_requires_grad)
+    ) * model_cells * float_bytes
+    needs_backward = er_requires_grad or se_requires_grad
+    adjoint_state_bytes = (
+        field_bytes + pml_phi_bytes if needs_backward else 0
+    )
+    receiver_adjoint_bytes = (
+        nstep * nt * nrx * float_bytes if needs_backward else 0
+    )
+    exact_old_bytes = (
+        components * snapshot_cells * float_bytes
+        if storage_dtype != torch.float32
+        else 0
+    )
+    effective_async = bool(use_async_offload and device.type == "cuda")
+
+    if device.type == "cuda" and effective_async:
+        forward_transfer_bytes = 4 * components * snapshot_cells * storage_bytes
+        backward_transfer_bytes = 2 * components * snapshot_cells * storage_bytes
+        forward_device_peak = (
+            core_bytes
+            + update_coefficient_bytes
+            + receiver_bytes
+            + exact_old_bytes
+            + forward_transfer_bytes
+        )
+        backward_device_peak = (
+            core_bytes
+            + update_coefficient_bytes
+            + receiver_bytes
+            + gradient_bytes
+            + adjoint_state_bytes
+            + receiver_adjoint_bytes
+            + backward_transfer_bytes
+        )
+        device_peak_bytes = max(forward_device_peak, backward_device_peak)
+        host_peak_bytes = saved_wavefield_bytes
+        transfer_buffer_bytes = max(forward_transfer_bytes, backward_transfer_bytes)
+    else:
+        transfer_buffer_bytes = 0
+        forward_peak = (
+            core_bytes
+            + saved_wavefield_bytes
+            + update_coefficient_bytes
+            + receiver_bytes
+            + exact_old_bytes
+        )
+        backward_peak = (
+            core_bytes
+            + saved_wavefield_bytes
+            + update_coefficient_bytes
+            + receiver_bytes
+            + gradient_bytes
+            + adjoint_state_bytes
+            + receiver_adjoint_bytes
+        )
+        peak_bytes = max(forward_peak, backward_peak)
+        if device.type == "cuda":
+            device_peak_bytes = peak_bytes
+            host_peak_bytes = 0
+        else:
+            device_peak_bytes = 0
+            host_peak_bytes = peak_bytes
+
+    return {
+        "model_and_padded_materials": model_bytes,
+        "electric_and_magnetic_fields": field_bytes,
+        "cpml_auxiliary_fields": pml_phi_bytes,
+        "cpml_coefficients": pml_coefficient_bytes,
+        "source_and_locations": acquisition_bytes,
+        "saved_gradient_wavefields": saved_wavefield_bytes,
+        "fdtd_update_coefficients": update_coefficient_bytes,
+        "six_component_receiver_buffer": receiver_bytes,
+        "material_gradients": gradient_bytes,
+        "adjoint_fields_and_cpml": adjoint_state_bytes,
+        "receiver_adjoint": receiver_adjoint_bytes,
+        "low_precision_exact_snapshot": exact_old_bytes,
+        "cuda_transfer_buffers": transfer_buffer_bytes,
+        "estimated_device_peak": device_peak_bytes,
+        "estimated_host_peak": host_peak_bytes,
+        "recommended_device_capacity": int(device_peak_bytes * 1.20),
+        "recommended_host_capacity": int(host_peak_bytes * 1.20),
+        "nt_saved": nt_saved,
+        "components_saved": components,
+        "effective_async_offload": effective_async,
+    }
+
+
+def _print_compute_preview(
+    *,
+    device,
+    grid_spacing,
+    dt,
+    nx,
+    ny,
+    nz,
+    nt,
+    nstep,
+    nsr,
+    nrx,
+    source_amplitudes,
+    source_location,
+    receiver_location,
+    er,
+    se,
+    mr,
+    mr_supplied,
+    pmlthick,
+    source_direction,
+    reciever_direction,
+    model_gradient_sampling_interval,
+    wavefield_storage_dtype,
+    use_async_offload,
+    fdtd_order,
+    mode,
+    debug,
+    E,
+    H,
+    PML,
+):
+    """Print a preflight configuration and memory estimate."""
+    pml = [int(value) for value in pmlthick.cpu().tolist()]
+    estimate = _estimate_compute_memory(
+        device=device,
+        nx=nx,
+        ny=ny,
+        nz=nz,
+        nt=nt,
+        nstep=nstep,
+        nsr=nsr,
+        nrx=nrx,
+        source_waveforms=source_amplitudes.shape[0],
+        pml=pml,
+        mode=mode,
+        sampling_interval=model_gradient_sampling_interval,
+        storage_dtype=wavefield_storage_dtype,
+        use_async_offload=use_async_offload,
+        er_requires_grad=er.requires_grad,
+        se_requires_grad=se.requires_grad,
+    )
+    er_min = float(er.detach().amin().item())
+    er_max = float(er.detach().amax().item())
+    se_min = float(se.detach().amin().item())
+    se_max = float(se.detach().amax().item())
+    physical_mr = mr[:nx, :ny, :nz]
+    mr_min = float(physical_mr.detach().amin().item())
+    mr_max = float(physical_mr.detach().amax().item())
+    source_min = float(source_amplitudes.detach().amin().item())
+    source_max = float(source_amplitudes.detach().amax().item())
+
+    print("\n=== DeepGPR compute preview ===")
+    print("Simulation")
+    print(f"  device: {device}")
+    print(f"  model shape: ({nx}, {ny}, {nz})")
+    print(f"  padded field shape: ({nx + 1}, {ny + 1}, {nz + 1})")
+    print(f"  shots / sources per shot / receivers per shot: {nstep} / {nsr} / {nrx}")
+    print(f"  time steps: {nt}")
+    dx, dy, dz = grid_spacing
+    print(
+        "  dx / dy / dz: "
+        f"{dx:.6e} m / {dy:.6e} m / {dz:.6e} m"
+    )
+    print(f"  dt / simulated duration: {dt:.6e} s / {nt * dt:.6e} s")
+    print(f"  FDTD order / gradient mode: {fdtd_order} / {mode}")
+    print(f"  source / receiver direction: {source_direction} / {reciever_direction}")
+    print(f"  PML thickness [x0, x1, y0, y1, z0, z1]: {pml}")
+    print("Model")
+    print(
+        f"  er range / requires_grad: [{er_min:.6e}, {er_max:.6e}] "
+        f"/ {er.requires_grad}"
+    )
+    print(
+        f"  se range / requires_grad: [{se_min:.6e}, {se_max:.6e}] "
+        f"/ {se.requires_grad}"
+    )
+    print(f"  mr range / supplied: [{mr_min:.6e}, {mr_max:.6e}] / {mr_supplied}")
+    print(f"  propagation dtype: {er.dtype}")
+    print("Wavefield and runtime options")
+    print(
+        "  gradient sampling interval / saved time steps: "
+        f"{model_gradient_sampling_interval} / {estimate['nt_saved']}"
+    )
+    print(
+        f"  saved components / storage dtype: {estimate['components_saved']} / "
+        f"{wavefield_storage_dtype}"
+    )
+    print(
+        f"  async offload requested / effective: {bool(use_async_offload)} / "
+        f"{estimate['effective_async_offload']}"
+    )
+    print(f"  debug validation: {bool(debug)}")
+    print("  print parameters: True")
+    print(
+        f"  initial E / H / PML supplied: {E is not None} / "
+        f"{H is not None} / {PML is not None}"
+    )
+    print("Input tensors")
+    print(
+        f"  source amplitudes shape / range: {tuple(source_amplitudes.shape)} / "
+        f"[{source_min:.6e}, {source_max:.6e}]"
+    )
+    print(f"  source locations shape: {tuple(source_location.shape)}")
+    print(f"  receiver locations shape: {tuple(receiver_location.shape)}")
+    print("Estimated tensor payload")
+    breakdown_labels = (
+        ("model and padded materials", "model_and_padded_materials"),
+        ("electric and magnetic fields", "electric_and_magnetic_fields"),
+        ("CPML auxiliary fields", "cpml_auxiliary_fields"),
+        ("CPML coefficients", "cpml_coefficients"),
+        ("source and acquisition locations", "source_and_locations"),
+        ("saved Eall and Rall wavefields", "saved_gradient_wavefields"),
+        ("FDTD update coefficients", "fdtd_update_coefficients"),
+        ("six-component receiver buffer", "six_component_receiver_buffer"),
+        ("material gradients", "material_gradients"),
+        ("adjoint fields and CPML", "adjoint_fields_and_cpml"),
+        ("receiver adjoint", "receiver_adjoint"),
+        ("low-precision exact snapshot", "low_precision_exact_snapshot"),
+        ("CUDA transfer buffers", "cuda_transfer_buffers"),
+    )
+    for label, key in breakdown_labels:
+        print(f"  {label}: {_format_memory_size(estimate[key])}")
+
+    if device.type == "cuda":
+        print(
+            "  estimated peak CUDA device memory: "
+            f"{_format_memory_size(estimate['estimated_device_peak'])}"
+        )
+        print(
+            "  recommended CUDA capacity with 20% margin: "
+            f"{_format_memory_size(estimate['recommended_device_capacity'])}"
+        )
+        if estimate["estimated_host_peak"]:
+            print(
+                "  estimated pinned host memory: "
+                f"{_format_memory_size(estimate['estimated_host_peak'])}"
+            )
+            print(
+                "  recommended host capacity with 20% margin: "
+                f"{_format_memory_size(estimate['recommended_host_capacity'])}"
+            )
+        try:
+            free_bytes, total_bytes = torch.cuda.mem_get_info(device)
+            print(
+                "  currently free / total CUDA memory: "
+                f"{_format_memory_size(free_bytes)} / {_format_memory_size(total_bytes)}"
+            )
+        except (RuntimeError, TypeError):
+            pass
+    else:
+        print(
+            "  estimated peak CPU memory: "
+            f"{_format_memory_size(estimate['estimated_host_peak'])}"
+        )
+        print(
+            "  recommended CPU capacity with 20% margin: "
+            f"{_format_memory_size(estimate['recommended_host_capacity'])}"
+        )
+    print(
+        "  note: estimates exclude the CUDA context, PyTorch allocator cache, autograd "
+        "metadata, Python objects, and other tensors owned by the calling program."
+    )
+    print("=== End DeepGPR compute preview ===\n")
 
 
 def _normalize_wavefield_storage_dtype(value):
@@ -87,12 +453,13 @@ def compute(device, dx=None, dt=None,
             use_async_offload=False,
             fdtd_order=2,
             mode=2,
-            debug=False):
+            debug=False,
+            print_parameters=False):
     """Run DeepGPR FDTD forward modeling with autograd support.
 
     Args:
         device: PyTorch device or device string, such as "cpu" or "cuda".
-        dx: Spatial grid spacing.
+        dx: Scalar grid spacing or a three-value ``(dx, dy, dz)`` sequence.
         dt: Time step size.
         source_amplitudes: Source waveform tensor with shape (nwaveforms, nt, 1).
         source_location: Source coordinates with shape (nstep, nsr, 3).
@@ -112,12 +479,15 @@ def compute(device, dx=None, dt=None,
         fdtd_order: Spatial finite-difference order, supported values are 2, 4, and 8.
         mode: FWI gradient mode; 2 uses Ez only, 3 uses Ex, Ey, and Ez.
         debug: Whether to run expensive tensor validation checks.
+        print_parameters: Whether to print a preflight parameter and memory preview.
     """
     device = torch.device(device)
     if fdtd_order not in (2, 4, 8):
         raise ValueError("fdtd_order must be one of 2, 4, or 8.")
     if mode not in (2, 3):
         raise ValueError("mode must be 2 or 3.")
+    if not isinstance(print_parameters, bool):
+        raise TypeError("print_parameters must be a bool.")
     if not isinstance(model_gradient_sampling_interval, int) or model_gradient_sampling_interval < 1:
         raise ValueError("model_gradient_sampling_interval must be a positive integer.")
     wavefield_storage_dtype = _normalize_wavefield_storage_dtype(wavefield_storage_dtype)
@@ -128,7 +498,9 @@ def compute(device, dx=None, dt=None,
     if getattr(mr, "requires_grad", False):
         raise NotImplementedError("DeepGPR does not currently return relative-permeability gradients.")
 
-    er,se,nx,ny,nz,nt,nstep,nsr,nrx,ere,see,mr,spatial_mode,dtype,pmlthick,source_amplitudes=initialization(device,er,se,mr,source_amplitudes,source_location,receiver_location,dx,dt,pmlthick,fdtd_order)
+    grid_spacing = _normalize_grid_spacing(dx)
+    mr_supplied = mr is not None
+    er,se,nx,ny,nz,nt,nstep,nsr,nrx,ere,see,mr,spatial_mode,dtype,pmlthick,source_amplitudes=initialization(device,er,se,mr,source_amplitudes,source_location,receiver_location,grid_spacing,dt,pmlthick,fdtd_order)
 
     needs_model_gradient = er.requires_grad or se.requires_grad
     if needs_model_gradient and mode == 2:
@@ -138,15 +510,48 @@ def compute(device, dx=None, dt=None,
                 "Use mode=3 for 3D or other electric-field components."
             )
 
+    if print_parameters:
+        _print_compute_preview(
+            device=device,
+            grid_spacing=grid_spacing,
+            dt=float(dt),
+            nx=nx,
+            ny=ny,
+            nz=nz,
+            nt=nt,
+            nstep=nstep,
+            nsr=nsr,
+            nrx=nrx,
+            source_amplitudes=source_amplitudes,
+            source_location=source_location,
+            receiver_location=receiver_location,
+            er=er,
+            se=se,
+            mr=mr,
+            mr_supplied=mr_supplied,
+            pmlthick=pmlthick,
+            source_direction=source_direction,
+            reciever_direction=reciever_direction,
+            model_gradient_sampling_interval=model_gradient_sampling_interval,
+            wavefield_storage_dtype=wavefield_storage_dtype,
+            use_async_offload=use_async_offload,
+            fdtd_order=fdtd_order,
+            mode=mode,
+            debug=debug,
+            E=E,
+            H=H,
+            PML=PML,
+        )
+
     Ex,Ey,Ez=create_or_separate(E,nx,ny,nz,nstep,device,dtype)
     Hx,Hy,Hz=create_or_separate(H,nx,ny,nz,nstep,device,dtype)
 
-    x0,xm,y0,ym,z0,zm,x01,x02,xm1,xm2,y01,y02,ym1,ym2,z01,z02,zm1,zm2=buildpmlcoeffs(er,mr,dt,dx,nx,ny,nz,pmlthick,device,dtype)
+    x0,xm,y0,ym,z0,zm,x01,x02,xm1,xm2,y01,y02,ym1,ym2,z01,z02,zm1,zm2=buildpmlcoeffs(er,mr,dt,grid_spacing,nx,ny,nz,pmlthick,device,dtype)
 
     x0EPhi1,x0EPhi2,x0HPhi1,x0HPhi2,xmEPhi1,xmEPhi2,xmHPhi1,xmHPhi2,y0EPhi1,y0EPhi2,y0HPhi1,y0HPhi2,ymEPhi1,ymEPhi2,ymHPhi1,ymHPhi2,z0EPhi1,z0EPhi2,z0HPhi1,z0HPhi2,zmEPhi1,zmEPhi2,zmHPhi1,zmHPhi2=build_pml_phi(x0,xm,y0,ym,z0,zm,nstep,PML,device)
 
     Ex,Ey,Ez,Hx,Hy,Hz,x0EPhi1,x0EPhi2,x0HPhi1,x0HPhi2,xmEPhi1,xmEPhi2,xmHPhi1,xmHPhi2,y0EPhi1,y0EPhi2,y0HPhi1,y0HPhi2,ymEPhi1,ymEPhi2,ymHPhi1,ymHPhi2,z0EPhi1,z0EPhi2,z0HPhi1,z0HPhi2,zmEPhi1,zmEPhi2,zmHPhi1,zmHPhi2,Eall,receiver_amplitudes = DeepGPR.apply(
-        er, se,Ex,Ey,Ez,Hx,Hy,Hz,x0EPhi1,x0EPhi2,x0HPhi1,x0HPhi2,xmEPhi1,xmEPhi2,xmHPhi1,xmHPhi2,y0EPhi1,y0EPhi2,y0HPhi1,y0HPhi2,ymEPhi1,ymEPhi2,ymHPhi1,ymHPhi2,z0EPhi1,z0EPhi2,z0HPhi1,z0HPhi2,zmEPhi1,zmEPhi2,zmHPhi1,zmHPhi2, mr,dx,nx,ny,nz,dt,nt,nstep,source_amplitudes,source_location,receiver_location,pmlthick,nsr,nrx,device,dtype,x0,xm,y0,ym,z0,zm,x01,x02,xm1,xm2,y01,y02,ym1,ym2,z01,z02,zm1,zm2,ere,see,source_direction, reciever_direction, model_gradient_sampling_interval, wavefield_storage_dtype, use_async_offload, fdtd_order, mode, debug)
+        er, se,Ex,Ey,Ez,Hx,Hy,Hz,x0EPhi1,x0EPhi2,x0HPhi1,x0HPhi2,xmEPhi1,xmEPhi2,xmHPhi1,xmHPhi2,y0EPhi1,y0EPhi2,y0HPhi1,y0HPhi2,ymEPhi1,ymEPhi2,ymHPhi1,ymHPhi2,z0EPhi1,z0EPhi2,z0HPhi1,z0HPhi2,zmEPhi1,zmEPhi2,zmHPhi1,zmHPhi2, mr,grid_spacing,nx,ny,nz,dt,nt,nstep,source_amplitudes,source_location,receiver_location,pmlthick,nsr,nrx,device,dtype,x0,xm,y0,ym,z0,zm,x01,x02,xm1,xm2,y01,y02,ym1,ym2,z01,z02,zm1,zm2,ere,see,source_direction, reciever_direction, model_gradient_sampling_interval, wavefield_storage_dtype, use_async_offload, fdtd_order, mode, debug)
 
     return Eall,(Ex,Ey,Ez),(Hx,Hy,Hz),(x0EPhi1,x0EPhi2,x0HPhi1,x0HPhi2,xmEPhi1,xmEPhi2,xmHPhi1,xmHPhi2,y0EPhi1,y0EPhi2,y0HPhi1,y0HPhi2,ymEPhi1,ymEPhi2,ymHPhi1,ymHPhi2,z0EPhi1,z0EPhi2,z0HPhi1,z0HPhi2,zmEPhi1,zmEPhi2,zmHPhi1,zmHPhi2),receiver_amplitudes
 
@@ -155,7 +560,7 @@ class DeepGPR(torch.autograd.Function):
     """PyTorch autograd bridge for the native DeepGPR backends."""
 
     @staticmethod
-    def forward(ctx, er, se,Ex,Ey,Ez,Hx,Hy,Hz,x0EPhi1,x0EPhi2,x0HPhi1,x0HPhi2,xmEPhi1,xmEPhi2,xmHPhi1,xmHPhi2,y0EPhi1,y0EPhi2,y0HPhi1,y0HPhi2,ymEPhi1,ymEPhi2,ymHPhi1,ymHPhi2,z0EPhi1,z0EPhi2,z0HPhi1,z0HPhi2,zmEPhi1,zmEPhi2,zmHPhi1,zmHPhi2, mr,dx,nx,ny,nz,dt,
+    def forward(ctx, er, se,Ex,Ey,Ez,Hx,Hy,Hz,x0EPhi1,x0EPhi2,x0HPhi1,x0HPhi2,xmEPhi1,xmEPhi2,xmHPhi1,xmHPhi2,y0EPhi1,y0EPhi2,y0HPhi1,y0HPhi2,ymEPhi1,ymEPhi2,ymHPhi1,ymHPhi2,z0EPhi1,z0EPhi2,z0HPhi1,z0HPhi2,zmEPhi1,zmEPhi2,zmHPhi1,zmHPhi2, mr,grid_spacing,nx,ny,nz,dt,
                 nt,nstep,source_amplitudes,source_location,receiver_location,
                 pmlthick,nsr,nrx,device,dtype,x0,xm,
                 y0,ym,z0,zm,x01,x02,xm1,xm2,
@@ -177,7 +582,7 @@ class DeepGPR(torch.autograd.Function):
             z0EPhi1, z0EPhi2, z0HPhi1, z0HPhi2: Low-z PML auxiliary tensors.
             zmEPhi1, zmEPhi2, zmHPhi1, zmHPhi2: High-z PML auxiliary tensors.
             mr: Padded relative permeability tensor.
-            dx: Spatial grid spacing.
+            grid_spacing: Three-value ``(dx, dy, dz)`` grid spacing tuple.
             nx: Number of model cells along the x axis.
             ny: Number of model cells along the y axis.
             nz: Number of model cells along the z axis.
@@ -214,7 +619,8 @@ class DeepGPR(torch.autograd.Function):
         c_lib = get_deepgpr_lib(device)
         set_library_fdtd_order(c_lib, fdtd_order)
         ctx.save_for_backward(er, se, mr,receiver_location,x0,xm,y0,ym,z0,zm,x01,x02,xm1,xm2,y01,y02,ym1,ym2,z01,z02,zm1,zm2,ere,see)
-        ctx.dx=dx
+        dx, dy, dz = grid_spacing
+        ctx.grid_spacing=grid_spacing
         ctx.nx=nx
         ctx.ny=ny
         ctx.nz=nz
@@ -300,7 +706,7 @@ class DeepGPR(torch.autograd.Function):
                 ctypes.cast(y02.data_ptr(), ctypes.POINTER(ctypes.c_float)), ctypes.cast(ym2.data_ptr(), ctypes.POINTER(ctypes.c_float)),         
                 ctypes.cast(z02.data_ptr(), ctypes.POINTER(ctypes.c_float)), ctypes.cast(zm2.data_ptr(), ctypes.POINTER(ctypes.c_float)),
 
-                dt, nt, nstep, nrx, dx,
+                dt, nt, nstep, nrx, dx, dy, dz,
                 ctypes.cast(receiver_location.data_ptr(), ctypes.POINTER(ctypes.c_int)), ctypes.cast(receiver_amplitudes.data_ptr(), ctypes.POINTER(ctypes.c_float)),
                 nx+1, ny+1, nz+1, nsr,
                 ctypes.cast(source_location.data_ptr(), ctypes.POINTER(ctypes.c_int)), ctypes.cast(source_amplitudes.data_ptr(), ctypes.POINTER(ctypes.c_float)),
@@ -381,7 +787,7 @@ class DeepGPR(torch.autograd.Function):
         zm1=zm1.contiguous()
         zm2=zm2.contiguous()
 
-        dx=ctx.dx
+        dx, dy, dz=ctx.grid_spacing
         nx=ctx.nx
         ny=ctx.ny
         nz=ctx.nz
@@ -497,7 +903,7 @@ class DeepGPR(torch.autograd.Function):
                 ctypes.cast(y02.data_ptr(), ctypes.POINTER(ctypes.c_float)), ctypes.cast(ym2.data_ptr(), ctypes.POINTER(ctypes.c_float)),         
                 ctypes.cast(z02.data_ptr(), ctypes.POINTER(ctypes.c_float)), ctypes.cast(zm2.data_ptr(), ctypes.POINTER(ctypes.c_float)), 
 
-                dt, nt, nstep, nrx, dx,
+                dt, nt, nstep, nrx, dx, dy, dz,
                 nx+1, ny+1, nz+1, nsr,
                 ctypes.cast(receiver_location.data_ptr(), ctypes.POINTER(ctypes.c_int)), ctypes.cast(sourceamp.data_ptr(), ctypes.POINTER(ctypes.c_float)),
                 ctx.reciever_direction,

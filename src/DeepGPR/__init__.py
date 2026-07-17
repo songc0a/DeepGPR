@@ -158,9 +158,9 @@ def _configure_deepgpr_library(lib: ctypes.CDLL) -> None:
     lib.deepgpr_abi_version.argtypes = []
     lib.deepgpr_abi_version.restype = ctypes.c_int
     abi_version = int(lib.deepgpr_abi_version())
-    if abi_version != 3:
+    if abi_version != 4:
         raise RuntimeError(
-            f"Incompatible DeepGPR native ABI {abi_version}; expected ABI 3. "
+            f"Incompatible DeepGPR native ABI {abi_version}; expected ABI 4. "
             "Rebuild the CPU/CUDA shared libraries from the current sources."
         )
 
@@ -185,7 +185,8 @@ def _configure_deepgpr_library(lib: ctypes.CDLL) -> None:
         _FLOAT_P, _FLOAT_P, _FLOAT_P, _FLOAT_P,
         _FLOAT_P, _FLOAT_P, _FLOAT_P, _FLOAT_P,
 
-        ctypes.c_float, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_float,
+        ctypes.c_float, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+        ctypes.c_float, ctypes.c_float, ctypes.c_float,
         _INT_P, _FLOAT_P,
         ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
         _INT_P, _FLOAT_P,
@@ -214,7 +215,8 @@ def _configure_deepgpr_library(lib: ctypes.CDLL) -> None:
         _FLOAT_P, _FLOAT_P, _FLOAT_P, _FLOAT_P,
         _FLOAT_P, _FLOAT_P, _FLOAT_P, _FLOAT_P,
 
-        ctypes.c_float, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_float,
+        ctypes.c_float, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+        ctypes.c_float, ctypes.c_float, ctypes.c_float,
         ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
         _INT_P, _FLOAT_P,
         ctypes.c_int,
@@ -331,6 +333,7 @@ def set_library_fdtd_order(lib: ctypes.CDLL, fdtd_order: int) -> None:
 from .common import *
 from .compute2 import *
 from .multiscale import *
+from . import wavelet as wavelet
 from .wavelet import *
 
 
