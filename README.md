@@ -192,9 +192,9 @@ When `er` or `se` requires gradients, `mode=2` is restricted to 2D Ez-TM modelin
 
 ### 4.2 Discrete Adjoint Gradient
 
-The backward solver is the explicit transpose of the executed FDTD and CPML updates. It first accumulates gradients with respect to the discrete electric coefficients `ca` and `cb`, then applies the analytic chain rule to `er` and `se`. Source injection is included in the `cb` derivative.
+The backward solver uses reciprocal reverse-time Maxwell propagation with the same dissipative CPML recurrence as the forward solver, following the stable strategy used by tide-GPR. It correlates the adjoint electric field with the saved discrete `ca`/`cb` update terms and then applies the analytic chain rule to `er` and `se`. This avoids the long-time transient growth of unscaled explicitly transposed CPML memory variables. CPML cells are treated as a numerical boundary and are excluded from the returned material gradients.
 
-Use `model_gradient_sampling_interval=1` and `wavefield_storage_dtype=torch.float32` for an exact directional derivative check. Temporal subsampling and lower-precision storage deliberately approximate the gradient. See [the Chinese derivation](docs/discrete_forward_adjoint_zh.md) and run [the gradient-check notebook](examples/4.GradientCheck.ipynb) after rebuilding the native ABI 3 libraries.
+Use `model_gradient_sampling_interval=1` and `wavefield_storage_dtype=torch.float32` for a directional derivative check in the physical model region. Temporal subsampling and lower-precision storage deliberately approximate the gradient. Run [the gradient-check notebook](examples/4.GradientCheck.ipynb) after rebuilding the native ABI 3 libraries.
 
 ## CPU Backend Build
 

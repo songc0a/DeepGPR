@@ -1402,6 +1402,7 @@ static void copy_to_Eall_single_cpu(
  *   i: Current reverse time-step index.
  *   step: Number of shots or simulations in the batch.
  *   NX, NY, NZ: Padded field grid sizes.
+ *   pml0..pml5: CPML thicknesses; gradients are excluded from these cells.
  *   dt: Time step size.
  *   errequiregrad: Whether to accumulate grader.
  *   serequiregrad: Whether to accumulate gradse.
@@ -1415,7 +1416,9 @@ static void accumulate_gradients_cpu(
     const float* RESTRICT ca, const float* RESTRICT cb,
     const float* RESTRICT se,
     float* RESTRICT grader, float* RESTRICT gradse,
-    int i, int step, int NX, int NY, int NZ, float dt,
+    int i, int step, int NX, int NY, int NZ,
+    int pml0, int pml1, int pml2, int pml3, int pml4, int pml5,
+    float dt,
     int errequiregrad, int serequiregrad, int S, int nt_saved, int fwi_mode,
     int storage_type)
 {
@@ -1434,6 +1437,16 @@ static void accumulate_gradients_cpu(
         long long rem = idx % (sy * sz);
         long long iy = rem / sz;
         long long iz = rem % sz;
+
+        /* CPML is a numerical boundary, not part of the invertible model. */
+        if ((pml0 > 0 && ix <= pml0) ||
+            (pml1 > 0 && ix >= sx - pml1) ||
+            (pml2 > 0 && iy <= pml2) ||
+            (pml3 > 0 && iy >= sy - pml3) ||
+            (pml4 > 0 && iz <= pml4) ||
+            (pml5 > 0 && iz >= sz - pml5)) {
+            continue;
+        }
 
         long long e_stride = (long long)NX * NY * NZ;
         long long idx_E = (long long)s * e_stride + ix * NY * NZ + iy * NZ + iz;
@@ -1684,27 +1697,36 @@ DEEPGPR_API void backward(const float* RESTRICT er, const float* RESTRICT se, co
     ucgetforward_cpu(er, se, mr, uE0, uE1, uE4, uH0, uH1, uH4, NX_FIELDS, NY_FIELDS, NZ_FIELDS, dt, dx);
 
     for (int i = nt - 1; i >= 0; i--) {
-        add_adjoint_sources_cpu(step, i, sourcelocation, srcwaveforms, Ex, Ey, Ez, NX_FIELDS, NY_FIELDS, NZ_FIELDS, nsrc, polarisation, nt);
-
-        if (i % sampling_interval == 0) {
-            accumulate_gradients_cpu(Ex, Ey, Ez, Eall_ptr, Rall_ptr, uE0, uE4, se,
-                grad_er, grad_se, i, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, dt,
-                errequiregrad, serequiregrad, sampling_interval, nt_saved, fwi_mode, storage_type);
-        }
-
-        pml_e_fields_adjoint_cpu(
-            Ex, Ey, Ez, Hx, Hy, Hz, dx, dx, dx, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
-            pml0, pml1, pml2, pml3, pml4, pml5, x0ER, xmER, y0ER, ymER, z0ER, zmER, uE4,
-            x0EPhi1, x0EPhi2, xmEPhi1, xmEPhi2, y0EPhi1, y0EPhi2, ymEPhi1, ymEPhi2,
-            z0EPhi1, z0EPhi2, zmEPhi1, zmEPhi2, fdtd_order);
-        e_fields_base_adjoint_cpu(uE0, uE1, Ex, Ey, Ez, Hx, Hy, Hz,
+        /*
+         * Propagate the receiver adjoint with the same dissipative CPML
+         * recurrence as the forward solver.  Explicitly transposing the
+         * CPML memory recursion is algebraically exact for one step, but its
+         * unscaled dual variables exhibit severe long-time transient growth.
+         * This stable reverse-time formulation follows tide-GPR's 3D solver.
+         */
+        h_fields_base_update_cpu(uH0, uH1, Ex, Ey, Ez, Hx, Hy, Hz,
             step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, fdtd_order);
-        pml_h_fields_adjoint_cpu(
+        pml_h_fields_update_cpu(
             Ex, Ey, Ez, Hx, Hy, Hz, dx, dx, dx, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
             pml0, pml1, pml2, pml3, pml4, pml5, x0HR, xmHR, y0HR, ymHR, z0HR, zmHR, uH4,
             x0HPhi1, x0HPhi2, xmHPhi1, xmHPhi2, y0HPhi1, y0HPhi2, ymHPhi1, ymHPhi2,
             z0HPhi1, z0HPhi2, zmHPhi1, zmHPhi2, fdtd_order);
-        h_fields_base_adjoint_cpu(uH0, uH1, Ex, Ey, Ez, Hx, Hy, Hz,
+        e_fields_base_update_cpu(uE0, uE1, Ex, Ey, Ez, Hx, Hy, Hz,
             step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, fdtd_order);
+        pml_e_fields_update_cpu(
+            Ex, Ey, Ez, Hx, Hy, Hz, dx, dx, dx, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
+            pml0, pml1, pml2, pml3, pml4, pml5, x0ER, xmER, y0ER, ymER, z0ER, zmER, uE4,
+            x0EPhi1, x0EPhi2, xmEPhi1, xmEPhi2, y0EPhi1, y0EPhi2, ymEPhi1, ymEPhi2,
+            z0EPhi1, z0EPhi2, zmEPhi1, zmEPhi2, fdtd_order);
+
+        add_adjoint_sources_cpu(step, i, sourcelocation, srcwaveforms, Ex, Ey, Ez,
+            NX_FIELDS, NY_FIELDS, NZ_FIELDS, nsrc, polarisation, nt);
+
+        if (i % sampling_interval == 0) {
+            accumulate_gradients_cpu(Ex, Ey, Ez, Eall_ptr, Rall_ptr, uE0, uE4, se,
+                grad_er, grad_se, i, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
+                pml0, pml1, pml2, pml3, pml4, pml5, dt,
+                errequiregrad, serequiregrad, sampling_interval, nt_saved, fwi_mode, storage_type);
+        }
     }
 }

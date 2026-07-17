@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
+import warnings
 
 c = 299792458.0
 m0 = 4.0 * math.pi * 1e-7
@@ -16,6 +17,29 @@ def _require_finite_tensor(name, tensor):
     """
     if tensor is not None and not torch.isfinite(tensor).all().item():
         raise ValueError(f"`{name}` contains NaN or Inf values.")
+
+
+def _warn_if_locations_in_pml(name, locations, shape, pml):
+    """Warn when acquisition coordinates overlap DeepGPR's in-model CPML."""
+    inside = torch.zeros(locations.shape[:-1], dtype=torch.bool, device=locations.device)
+    for axis, size in enumerate(shape):
+        low = int(pml[2 * axis])
+        high = int(pml[2 * axis + 1])
+        if low > 0:
+            inside |= locations[..., axis] <= low
+        if high > 0:
+            inside |= locations[..., axis] >= size - high
+
+    count = int(inside.sum().item())
+    if count:
+        warnings.warn(
+            f"{count} {name} coordinate(s) lie inside CPML. DeepGPR's CPML occupies "
+            "cells inside the supplied model; place acquisition points in the physical "
+            "interior (low_pml < index < size - high_pml) to avoid attenuated data and "
+            "unreliable boundary sensitivity.",
+            RuntimeWarning,
+            stacklevel=3,
+        )
 
 
 def initialization(device, er,se,mr,source_amplitudes,source_location,receiver_location,dx,dt,pmlthick,fdtd_order=2):
@@ -151,6 +175,20 @@ def initialization(device, er,se,mr,source_amplitudes,source_location,receiver_l
     
 
     pmlthick=pmlthick_revert(pmlthick,er)
+    if pmlthick.numel() != 6:
+        raise ValueError("pmlthick must contain six boundary thicknesses.")
+    pml_values = [int(value) for value in pmlthick.cpu().tolist()]
+    if any(value < 0 for value in pml_values):
+        raise ValueError("PML thicknesses must be non-negative.")
+    for axis, size in enumerate((nx, ny, nz)):
+        low, high = pml_values[2 * axis:2 * axis + 2]
+        if low + high > max(size - 2, 0):
+            raise ValueError(
+                f"PML thicknesses on axis {axis} leave no physical interior: "
+                f"low={low}, high={high}, size={size}."
+            )
+    _warn_if_locations_in_pml("source", source_location, (nx, ny, nz), pml_values)
+    _warn_if_locations_in_pml("receiver", receiver_location, (nx, ny, nz), pml_values)
     ere=F.pad(er, (0, 1, 0, 1, 0, 1)).to(dtype)
     see=F.pad(se, (0, 1, 0, 1, 0, 1)).to(dtype)
     mr=F.pad(mr, (0, 1, 0, 1, 0, 1)).to(dtype)
