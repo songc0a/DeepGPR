@@ -1,12 +1,13 @@
 import torch
 import ctypes
+import warnings
 from . import get_deepgpr_lib, set_library_fdtd_order
 from .common import (
     _normalize_grid_spacing,
     initialization,
     build_pml_phi,
     create_or_separate,
-    buildpmlcoeffs,
+    build_pml_coeffs,
     check_tensors_for_nan_inf,
 )
 
@@ -222,7 +223,7 @@ def _print_compute_preview(
     mr_supplied,
     pmlthick,
     source_direction,
-    reciever_direction,
+    receiver_component,
     model_gradient_sampling_interval,
     wavefield_storage_dtype,
     use_async_offload,
@@ -277,18 +278,18 @@ def _print_compute_preview(
     )
     print(f"  dt / simulated duration: {dt:.6e} s / {nt * dt:.6e} s")
     print(f"  FDTD order / gradient mode: {fdtd_order} / {mode}")
-    print(f"  source / receiver direction: {source_direction} / {reciever_direction}")
+    print(f"  source / receiver component: {source_direction} / {receiver_component}")
     print(f"  PML thickness [x0, x1, y0, y1, z0, z1]: {pml}")
     print("Model")
     print(
-        f"  er range / requires_grad: [{er_min:.6e}, {er_max:.6e}] "
+        f"  eps_r range / requires_grad: [{er_min:.6e}, {er_max:.6e}] "
         f"/ {er.requires_grad}"
     )
     print(
-        f"  se range / requires_grad: [{se_min:.6e}, {se_max:.6e}] "
+        f"  sigma range / requires_grad: [{se_min:.6e}, {se_max:.6e}] "
         f"/ {se.requires_grad}"
     )
-    print(f"  mr range / supplied: [{mr_min:.6e}, {mr_max:.6e}] / {mr_supplied}")
+    print(f"  mu_r range / supplied: [{mr_min:.6e}, {mr_max:.6e}] / {mr_supplied}")
     print(f"  propagation dtype: {er.dtype}")
     print("Wavefield and runtime options")
     print(
@@ -323,7 +324,7 @@ def _print_compute_preview(
         ("CPML auxiliary fields", "cpml_auxiliary_fields"),
         ("CPML coefficients", "cpml_coefficients"),
         ("source and acquisition locations", "source_and_locations"),
-        ("saved Eall and Rall wavefields", "saved_gradient_wavefields"),
+        ("saved E_saved and R_saved wavefields", "saved_gradient_wavefields"),
         ("FDTD update coefficients", "fdtd_update_coefficients"),
         ("six-component receiver buffer", "six_component_receiver_buffer"),
         ("material gradients", "material_gradients"),
@@ -454,7 +455,8 @@ def compute(device, dx=None, dt=None,
             fdtd_order=2,
             mode=2,
             debug=False,
-            print_parameters=False):
+            print_parameters=False,
+            *, eps_r=None, sigma=None, mu_r=None, receiver_component=None):
     """Run DeepGPR FDTD forward modeling with autograd support.
 
     Args:
@@ -464,15 +466,15 @@ def compute(device, dx=None, dt=None,
         source_amplitudes: Source waveform tensor with shape (nwaveforms, nt, 1).
         source_location: Source coordinates with shape (nstep, nsr, 3).
         receiver_location: Receiver coordinates with shape (nstep, nrx, 3).
-        er: Relative permittivity tensor with shape (nx, ny) or (nx, ny, nz).
-        se: Electrical conductivity tensor with the same shape as er.
-        mr: Relative permeability tensor, or None to use ones.
+        er: Deprecated alias for eps_r.
+        se: Deprecated alias for sigma.
+        mr: Deprecated alias for mu_r.
         E: Optional initial electric field tuple (Ex, Ey, Ez).
         H: Optional initial magnetic field tuple (Hx, Hy, Hz).
         PML: Optional tuple of 24 PML auxiliary tensors.
         pmlthick: PML thickness as an int, list, or tensor.
         source_direction: Source electric-field polarization, 0 for x, 1 for y, 2 for z.
-        reciever_direction: Receiver component to return, 0 for x, 1 for y, 2 for z.
+        reciever_direction: Deprecated alias for receiver_component.
         model_gradient_sampling_interval: Forward wavefield sampling interval for FWI gradients.
         wavefield_storage_dtype: Saved E/R wavefield dtype: float32, float16, or bfloat16.
         use_async_offload: Whether CUDA should offload saved wavefields to pinned CPU memory.
@@ -480,7 +482,22 @@ def compute(device, dx=None, dt=None,
         mode: FWI gradient mode; 2 uses Ez only, 3 uses Ex, Ey, and Ez.
         debug: Whether to run expensive tensor validation checks.
         print_parameters: Whether to print a preflight parameter and memory preview.
+        eps_r: Relative permittivity tensor with shape (nx, ny) or (nx, ny, nz).
+        sigma: Electrical conductivity tensor with the same shape as eps_r.
+        mu_r: Relative permeability tensor, or None to use ones.
+        receiver_component: Receiver component to return, 0 for x, 1 for y, 2 for z.
     """
+    if eps_r is not None and er is not None:
+        raise TypeError("Specify only one of eps_r and its deprecated alias er.")
+    if sigma is not None and se is not None:
+        raise TypeError("Specify only one of sigma and its deprecated alias se.")
+    if mu_r is not None and mr is not None:
+        raise TypeError("Specify only one of mu_r and its deprecated alias mr.")
+    eps_r = er if eps_r is None else eps_r
+    sigma = se if sigma is None else sigma
+    mu_r = mr if mu_r is None else mu_r
+    receiver_component = reciever_direction if receiver_component is None else receiver_component
+
     device = torch.device(device)
     if fdtd_order not in (2, 4, 8):
         raise ValueError("fdtd_order must be one of 2, 4, or 8.")
@@ -491,20 +508,25 @@ def compute(device, dx=None, dt=None,
     if not isinstance(model_gradient_sampling_interval, int) or model_gradient_sampling_interval < 1:
         raise ValueError("model_gradient_sampling_interval must be a positive integer.")
     wavefield_storage_dtype = _normalize_wavefield_storage_dtype(wavefield_storage_dtype)
-    if source_direction not in (0, 1, 2) or reciever_direction not in (0, 1, 2):
-        raise ValueError("source_direction and reciever_direction must be 0, 1, or 2.")
-    if getattr(source_amplitudes, "requires_grad", False):
-        raise NotImplementedError("DeepGPR does not currently return source-amplitude gradients.")
-    if getattr(mr, "requires_grad", False):
+    if source_direction not in (0, 1, 2) or receiver_component not in (0, 1, 2):
+        raise ValueError("source_direction and receiver_component must be 0, 1, or 2.")
+    if getattr(mu_r, "requires_grad", False):
         raise NotImplementedError("DeepGPR does not currently return relative-permeability gradients.")
 
     grid_spacing = _normalize_grid_spacing(dx)
-    mr_supplied = mr is not None
-    er,se,nx,ny,nz,nt,nstep,nsr,nrx,ere,see,mr,spatial_mode,dtype,pmlthick,source_amplitudes=initialization(device,er,se,mr,source_amplitudes,source_location,receiver_location,grid_spacing,dt,pmlthick,fdtd_order)
+    mu_r_supplied = mu_r is not None
+    eps_r,sigma,nx,ny,nz,nt,nstep,nsr,nrx,eps_r_pad,sigma_pad,mu_r,spatial_mode,dtype,pmlthick,source_amplitudes=initialization(device,eps_r,sigma,mu_r,source_amplitudes,source_location,receiver_location,grid_spacing,dt,pmlthick,fdtd_order)
 
-    needs_model_gradient = er.requires_grad or se.requires_grad
+    needs_model_gradient = eps_r.requires_grad or sigma.requires_grad
+    if needs_model_gradient and model_gradient_sampling_interval > 1:
+        warnings.warn(
+            "model_gradient_sampling_interval > 1 uses a weighted temporal-sampling "
+            "approximation; use interval 1 with float32 storage for exact gradients.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
     if needs_model_gradient and mode == 2:
-        if spatial_mode != 2 or source_direction != 2 or reciever_direction != 2:
+        if spatial_mode != 2 or source_direction != 2 or receiver_component != 2:
             raise ValueError(
                 "mode=2 is an exact model-gradient mode only for 2D Ez-TM modeling. "
                 "Use mode=3 for 3D or other electric-field components."
@@ -525,13 +547,13 @@ def compute(device, dx=None, dt=None,
             source_amplitudes=source_amplitudes,
             source_location=source_location,
             receiver_location=receiver_location,
-            er=er,
-            se=se,
-            mr=mr,
-            mr_supplied=mr_supplied,
+            er=eps_r,
+            se=sigma,
+            mr=mu_r,
+            mr_supplied=mu_r_supplied,
             pmlthick=pmlthick,
             source_direction=source_direction,
-            reciever_direction=reciever_direction,
+            receiver_component=receiver_component,
             model_gradient_sampling_interval=model_gradient_sampling_interval,
             wavefield_storage_dtype=wavefield_storage_dtype,
             use_async_offload=use_async_offload,
@@ -546,33 +568,33 @@ def compute(device, dx=None, dt=None,
     Ex,Ey,Ez=create_or_separate(E,nx,ny,nz,nstep,device,dtype)
     Hx,Hy,Hz=create_or_separate(H,nx,ny,nz,nstep,device,dtype)
 
-    x0,xm,y0,ym,z0,zm,x01,x02,xm1,xm2,y01,y02,ym1,ym2,z01,z02,zm1,zm2=buildpmlcoeffs(er,mr,dt,grid_spacing,nx,ny,nz,pmlthick,device,dtype)
+    x0,xm,y0,ym,z0,zm,x01,x02,xm1,xm2,y01,y02,ym1,ym2,z01,z02,zm1,zm2=build_pml_coeffs(eps_r,mu_r,dt,grid_spacing,nx,ny,nz,pmlthick,device,dtype)
 
     x0EPhi1,x0EPhi2,x0HPhi1,x0HPhi2,xmEPhi1,xmEPhi2,xmHPhi1,xmHPhi2,y0EPhi1,y0EPhi2,y0HPhi1,y0HPhi2,ymEPhi1,ymEPhi2,ymHPhi1,ymHPhi2,z0EPhi1,z0EPhi2,z0HPhi1,z0HPhi2,zmEPhi1,zmEPhi2,zmHPhi1,zmHPhi2=build_pml_phi(x0,xm,y0,ym,z0,zm,nstep,PML,device)
 
-    Ex,Ey,Ez,Hx,Hy,Hz,x0EPhi1,x0EPhi2,x0HPhi1,x0HPhi2,xmEPhi1,xmEPhi2,xmHPhi1,xmHPhi2,y0EPhi1,y0EPhi2,y0HPhi1,y0HPhi2,ymEPhi1,ymEPhi2,ymHPhi1,ymHPhi2,z0EPhi1,z0EPhi2,z0HPhi1,z0HPhi2,zmEPhi1,zmEPhi2,zmHPhi1,zmHPhi2,Eall,receiver_amplitudes = DeepGPR.apply(
-        er, se,Ex,Ey,Ez,Hx,Hy,Hz,x0EPhi1,x0EPhi2,x0HPhi1,x0HPhi2,xmEPhi1,xmEPhi2,xmHPhi1,xmHPhi2,y0EPhi1,y0EPhi2,y0HPhi1,y0HPhi2,ymEPhi1,ymEPhi2,ymHPhi1,ymHPhi2,z0EPhi1,z0EPhi2,z0HPhi1,z0HPhi2,zmEPhi1,zmEPhi2,zmHPhi1,zmHPhi2, mr,grid_spacing,nx,ny,nz,dt,nt,nstep,source_amplitudes,source_location,receiver_location,pmlthick,nsr,nrx,device,dtype,x0,xm,y0,ym,z0,zm,x01,x02,xm1,xm2,y01,y02,ym1,ym2,z01,z02,zm1,zm2,ere,see,source_direction, reciever_direction, model_gradient_sampling_interval, wavefield_storage_dtype, use_async_offload, fdtd_order, mode, debug)
+    Ex,Ey,Ez,Hx,Hy,Hz,x0EPhi1,x0EPhi2,x0HPhi1,x0HPhi2,xmEPhi1,xmEPhi2,xmHPhi1,xmHPhi2,y0EPhi1,y0EPhi2,y0HPhi1,y0HPhi2,ymEPhi1,ymEPhi2,ymHPhi1,ymHPhi2,z0EPhi1,z0EPhi2,z0HPhi1,z0HPhi2,zmEPhi1,zmEPhi2,zmHPhi1,zmHPhi2,E_saved,receiver_amplitudes = DeepGPR.apply(
+        eps_r, sigma,Ex,Ey,Ez,Hx,Hy,Hz,x0EPhi1,x0EPhi2,x0HPhi1,x0HPhi2,xmEPhi1,xmEPhi2,xmHPhi1,xmHPhi2,y0EPhi1,y0EPhi2,y0HPhi1,y0HPhi2,ymEPhi1,ymEPhi2,ymHPhi1,ymHPhi2,z0EPhi1,z0EPhi2,z0HPhi1,z0HPhi2,zmEPhi1,zmEPhi2,zmHPhi1,zmHPhi2, mu_r,grid_spacing,nx,ny,nz,dt,nt,nstep,source_amplitudes,source_location,receiver_location,pmlthick,nsr,nrx,device,dtype,x0,xm,y0,ym,z0,zm,x01,x02,xm1,xm2,y01,y02,ym1,ym2,z01,z02,zm1,zm2,eps_r_pad,sigma_pad,source_direction, receiver_component, model_gradient_sampling_interval, wavefield_storage_dtype, use_async_offload, fdtd_order, mode, debug)
 
-    return Eall,(Ex,Ey,Ez),(Hx,Hy,Hz),(x0EPhi1,x0EPhi2,x0HPhi1,x0HPhi2,xmEPhi1,xmEPhi2,xmHPhi1,xmHPhi2,y0EPhi1,y0EPhi2,y0HPhi1,y0HPhi2,ymEPhi1,ymEPhi2,ymHPhi1,ymHPhi2,z0EPhi1,z0EPhi2,z0HPhi1,z0HPhi2,zmEPhi1,zmEPhi2,zmHPhi1,zmHPhi2),receiver_amplitudes
+    return E_saved,(Ex,Ey,Ez),(Hx,Hy,Hz),(x0EPhi1,x0EPhi2,x0HPhi1,x0HPhi2,xmEPhi1,xmEPhi2,xmHPhi1,xmHPhi2,y0EPhi1,y0EPhi2,y0HPhi1,y0HPhi2,ymEPhi1,ymEPhi2,ymHPhi1,ymHPhi2,z0EPhi1,z0EPhi2,z0HPhi1,z0HPhi2,zmEPhi1,zmEPhi2,zmHPhi1,zmHPhi2),receiver_amplitudes
 
 
 class DeepGPR(torch.autograd.Function):
     """PyTorch autograd bridge for the native DeepGPR backends."""
 
     @staticmethod
-    def forward(ctx, er, se,Ex,Ey,Ez,Hx,Hy,Hz,x0EPhi1,x0EPhi2,x0HPhi1,x0HPhi2,xmEPhi1,xmEPhi2,xmHPhi1,xmHPhi2,y0EPhi1,y0EPhi2,y0HPhi1,y0HPhi2,ymEPhi1,ymEPhi2,ymHPhi1,ymHPhi2,z0EPhi1,z0EPhi2,z0HPhi1,z0HPhi2,zmEPhi1,zmEPhi2,zmHPhi1,zmHPhi2, mr,grid_spacing,nx,ny,nz,dt,
+    def forward(ctx, eps_r, sigma,Ex,Ey,Ez,Hx,Hy,Hz,x0EPhi1,x0EPhi2,x0HPhi1,x0HPhi2,xmEPhi1,xmEPhi2,xmHPhi1,xmHPhi2,y0EPhi1,y0EPhi2,y0HPhi1,y0HPhi2,ymEPhi1,ymEPhi2,ymHPhi1,ymHPhi2,z0EPhi1,z0EPhi2,z0HPhi1,z0HPhi2,zmEPhi1,zmEPhi2,zmHPhi1,zmHPhi2, mu_r,grid_spacing,nx,ny,nz,dt,
                 nt,nstep,source_amplitudes,source_location,receiver_location,
                 pmlthick,nsr,nrx,device,dtype,x0,xm,
                 y0,ym,z0,zm,x01,x02,xm1,xm2,
                 y01,y02,ym1,ym2,z01,z02,zm1,zm2,
-                ere,see,source_direction, reciever_direction, 
+                eps_r_pad,sigma_pad,source_direction, receiver_component,
                 model_gradient_sampling_interval, wavefield_storage_dtype, use_async_offload, fdtd_order, mode, debug):
         """Call the native forward solver and save tensors for backward.
 
         Args:
             ctx: PyTorch autograd context.
-            er: Trainable relative permittivity tensor.
-            se: Trainable electrical conductivity tensor.
+            eps_r: Trainable relative permittivity tensor.
+            sigma: Trainable electrical conductivity tensor.
             Ex, Ey, Ez: Electric field component tensors.
             Hx, Hy, Hz: Magnetic field component tensors.
             x0EPhi1, x0EPhi2, x0HPhi1, x0HPhi2: Low-x PML auxiliary tensors.
@@ -581,7 +603,7 @@ class DeepGPR(torch.autograd.Function):
             ymEPhi1, ymEPhi2, ymHPhi1, ymHPhi2: High-y PML auxiliary tensors.
             z0EPhi1, z0EPhi2, z0HPhi1, z0HPhi2: Low-z PML auxiliary tensors.
             zmEPhi1, zmEPhi2, zmHPhi1, zmHPhi2: High-z PML auxiliary tensors.
-            mr: Padded relative permeability tensor.
+            mu_r: Padded relative permeability tensor.
             grid_spacing: Three-value ``(dx, dy, dz)`` grid spacing tuple.
             nx: Number of model cells along the x axis.
             ny: Number of model cells along the y axis.
@@ -601,10 +623,10 @@ class DeepGPR(torch.autograd.Function):
             x01, x02, xm1, xm2: X-boundary PML coefficient tensors.
             y01, y02, ym1, ym2: Y-boundary PML coefficient tensors.
             z01, z02, zm1, zm2: Z-boundary PML coefficient tensors.
-            ere: Padded relative permittivity tensor.
-            see: Padded electrical conductivity tensor.
+            eps_r_pad: Padded relative permittivity tensor.
+            sigma_pad: Padded electrical conductivity tensor.
             source_direction: Source electric-field polarization, 0 for x, 1 for y, 2 for z.
-            reciever_direction: Receiver component to return, 0 for x, 1 for y, 2 for z.
+            receiver_component: Receiver component to return, 0 for x, 1 for y, 2 for z.
             model_gradient_sampling_interval: Forward wavefield sampling interval.
             wavefield_storage_dtype: Dtype used by saved E/R wavefield buffers.
             use_async_offload: Whether CUDA should offload saved wavefields to pinned CPU memory.
@@ -618,7 +640,9 @@ class DeepGPR(torch.autograd.Function):
         receiver_location=receiver_location.to(torch.int32).contiguous()
         c_lib = get_deepgpr_lib(device)
         set_library_fdtd_order(c_lib, fdtd_order)
-        ctx.save_for_backward(er, se, mr,receiver_location,x0,xm,y0,ym,z0,zm,x01,x02,xm1,xm2,y01,y02,ym1,ym2,z01,z02,zm1,zm2,ere,see)
+        ctx.save_for_backward(eps_r, sigma, mu_r, source_location, receiver_location,
+                              x0,xm,y0,ym,z0,zm,x01,x02,xm1,xm2,
+                              y01,y02,ym1,ym2,z01,z02,zm1,zm2,eps_r_pad,sigma_pad)
         dx, dy, dz = grid_spacing
         ctx.grid_spacing=grid_spacing
         ctx.nx=nx
@@ -629,6 +653,9 @@ class DeepGPR(torch.autograd.Function):
         ctx.nrx=nrx
         ctx.nsr=nsr
         ctx.nstep=nstep
+        ctx.source_requires_grad = bool(source_amplitudes.requires_grad)
+        ctx.source_shape = tuple(source_amplitudes.shape)
+        ctx.source_direction = source_direction
         ctx.pmlthick=pmlthick
         ctx.device=device
         ctx.dtype=dtype
@@ -637,41 +664,41 @@ class DeepGPR(torch.autograd.Function):
         ctx.use_async_offload = bool(use_async_offload and device.type == "cuda")
         ctx.fdtd_order = fdtd_order
         ctx.mode = mode
-        ctx.reciever_direction = reciever_direction
+        ctx.receiver_component = receiver_component
         ctx.debug = bool(debug)
 
         nt_saved = (nt + model_gradient_sampling_interval - 1) // model_gradient_sampling_interval
         e_components = 3 if mode == 3 else 1
         
         if mode == 3:
-            eall_shape = (e_components, nt_saved, nstep, nx, ny, nz)
+            saved_shape = (e_components, nt_saved, nstep, nx, ny, nz)
         else:
-            eall_shape = (nt_saved, nstep, nx, ny, nz)
+            saved_shape = (nt_saved, nstep, nx, ny, nz)
 
         if ctx.use_async_offload:
-            Eall = torch.zeros(eall_shape, device='cpu', dtype=wavefield_storage_dtype).pin_memory()
-            Rall = torch.zeros(eall_shape, device='cpu', dtype=wavefield_storage_dtype).pin_memory()
+            E_saved = torch.zeros(saved_shape, device='cpu', dtype=wavefield_storage_dtype).pin_memory()
+            R_saved = torch.zeros(saved_shape, device='cpu', dtype=wavefield_storage_dtype).pin_memory()
         else:
-            Eall = torch.zeros(eall_shape, device=device, dtype=wavefield_storage_dtype).contiguous()
-            Rall = torch.zeros(eall_shape, device=device, dtype=wavefield_storage_dtype).contiguous()
+            E_saved = torch.zeros(saved_shape, device=device, dtype=wavefield_storage_dtype).contiguous()
+            R_saved = torch.zeros(saved_shape, device=device, dtype=wavefield_storage_dtype).contiguous()
 
-        Eupdatecoffs0=torch.zeros((nx+1,ny+1,nz+1), device=device, dtype=dtype)
-        Eupdatecoffs1=torch.zeros((nx+1,ny+1,nz+1), device=device, dtype=dtype)
-        Eupdatecoffs4=torch.zeros((nx+1,ny+1,nz+1), device=device, dtype=dtype)
-        Hupdatecoffs0=torch.zeros((nx+1,ny+1,nz+1), device=device, dtype=dtype)
-        Hupdatecoffs1=torch.zeros((nx+1,ny+1,nz+1), device=device, dtype=dtype)
-        Hupdatecoffs4=torch.zeros((nx+1,ny+1,nz+1), device=device, dtype=dtype)
+        ce_hist=torch.zeros((nx+1,ny+1,nz+1), device=device, dtype=dtype)
+        ce_curl=torch.zeros((nx+1,ny+1,nz+1), device=device, dtype=dtype)
+        ce_rhs=torch.zeros((nx+1,ny+1,nz+1), device=device, dtype=dtype)
+        ch_hist=torch.zeros((nx+1,ny+1,nz+1), device=device, dtype=dtype)
+        ch_curl=torch.zeros((nx+1,ny+1,nz+1), device=device, dtype=dtype)
+        ch_rhs=torch.zeros((nx+1,ny+1,nz+1), device=device, dtype=dtype)
 
         receiver_amplitudes = torch.zeros((nstep, 6, nt, nrx),device=device, dtype=dtype).contiguous()
         pml = [int(pmlthick[i]) for i in range(6)]
 
         _sync_cuda_device(device)
         c_lib.forward(
-                ctypes.cast(ere.data_ptr(), ctypes.POINTER(ctypes.c_float)), 
-                ctypes.cast(see.data_ptr(), ctypes.POINTER(ctypes.c_float)), 
-                ctypes.cast(mr.data_ptr(), ctypes.POINTER(ctypes.c_float)),
-                ctypes.c_void_p(Eall.data_ptr()),
-                ctypes.c_void_p(Rall.data_ptr()),
+                ctypes.cast(eps_r_pad.data_ptr(), ctypes.POINTER(ctypes.c_float)),
+                ctypes.cast(sigma_pad.data_ptr(), ctypes.POINTER(ctypes.c_float)),
+                ctypes.cast(mu_r.data_ptr(), ctypes.POINTER(ctypes.c_float)),
+                ctypes.c_void_p(E_saved.data_ptr()),
+                ctypes.c_void_p(R_saved.data_ptr()),
                 ctypes.cast(Ex.data_ptr(), ctypes.POINTER(ctypes.c_float)),
                 ctypes.cast(Ey.data_ptr(), ctypes.POINTER(ctypes.c_float)),
                 ctypes.cast(Ez.data_ptr(), ctypes.POINTER(ctypes.c_float)),
@@ -679,9 +706,9 @@ class DeepGPR(torch.autograd.Function):
                 ctypes.cast(Hy.data_ptr(), ctypes.POINTER(ctypes.c_float)),
                 ctypes.cast(Hz.data_ptr(), ctypes.POINTER(ctypes.c_float)),
 
-                ctypes.cast(Eupdatecoffs0.data_ptr(), ctypes.POINTER(ctypes.c_float)), ctypes.cast(Eupdatecoffs1.data_ptr(), ctypes.POINTER(ctypes.c_float)),
-                ctypes.cast(Eupdatecoffs4.data_ptr(), ctypes.POINTER(ctypes.c_float)), ctypes.cast(Hupdatecoffs0.data_ptr(), ctypes.POINTER(ctypes.c_float)),
-                ctypes.cast(Hupdatecoffs1.data_ptr(), ctypes.POINTER(ctypes.c_float)), ctypes.cast(Hupdatecoffs4.data_ptr(), ctypes.POINTER(ctypes.c_float)),
+                ctypes.cast(ce_hist.data_ptr(), ctypes.POINTER(ctypes.c_float)), ctypes.cast(ce_curl.data_ptr(), ctypes.POINTER(ctypes.c_float)),
+                ctypes.cast(ce_rhs.data_ptr(), ctypes.POINTER(ctypes.c_float)), ctypes.cast(ch_hist.data_ptr(), ctypes.POINTER(ctypes.c_float)),
+                ctypes.cast(ch_curl.data_ptr(), ctypes.POINTER(ctypes.c_float)), ctypes.cast(ch_rhs.data_ptr(), ctypes.POINTER(ctypes.c_float)),
 
                 ctypes.cast(x0EPhi1.data_ptr(), ctypes.POINTER(ctypes.c_float)), ctypes.cast(x0EPhi2.data_ptr(), ctypes.POINTER(ctypes.c_float)),
                 ctypes.cast(x0HPhi1.data_ptr(), ctypes.POINTER(ctypes.c_float)), ctypes.cast(x0HPhi2.data_ptr(), ctypes.POINTER(ctypes.c_float)),
@@ -720,7 +747,7 @@ class DeepGPR(torch.autograd.Function):
             check_tensors_for_nan_inf(d="forward",
                 Ex=Ex, Ey=Ey, Ez=Ez,
                 Hx=Hx, Hy=Hy, Hz=Hz,
-                Eall=Eall, Rall=Rall,
+                E_saved=E_saved, R_saved=R_saved,
                 x0EPhi1=x0EPhi1, x0EPhi2=x0EPhi2,
                 x0HPhi1=x0HPhi1, x0HPhi2=x0HPhi2,
                 xmEPhi1=xmEPhi1, xmEPhi2=xmEPhi2,
@@ -736,37 +763,38 @@ class DeepGPR(torch.autograd.Function):
             )
             _check_nonzero_source_created_fields(c_lib, source_amplitudes, Ex, Ey, Ez, Hx, Hy, Hz)
 
-        ctx.Eall = Eall
-        ctx.Rall = Rall
-        ctx.mark_non_differentiable(Eall)
-        return (Ex,Ey,Ez,Hx,Hy,Hz,x0EPhi1,x0EPhi2,x0HPhi1,x0HPhi2,xmEPhi1,xmEPhi2,xmHPhi1,xmHPhi2,y0EPhi1,y0EPhi2,y0HPhi1,y0HPhi2,ymEPhi1,ymEPhi2,ymHPhi1,ymHPhi2,z0EPhi1,z0EPhi2,z0HPhi1,z0HPhi2,zmEPhi1,zmEPhi2,zmHPhi1,zmHPhi2,Eall,receiver_amplitudes[:,reciever_direction,:,:])
+        ctx.E_saved = E_saved
+        ctx.R_saved = R_saved
+        ctx.mark_non_differentiable(E_saved)
+        return (Ex,Ey,Ez,Hx,Hy,Hz,x0EPhi1,x0EPhi2,x0HPhi1,x0HPhi2,xmEPhi1,xmEPhi2,xmHPhi1,xmHPhi2,y0EPhi1,y0EPhi2,y0HPhi1,y0HPhi2,ymEPhi1,ymEPhi2,ymHPhi1,ymHPhi2,z0EPhi1,z0EPhi2,z0HPhi1,z0HPhi2,zmEPhi1,zmEPhi2,zmHPhi1,zmHPhi2,E_saved,receiver_amplitudes[:,receiver_component,:,:])
 
     @staticmethod
-    def backward(ctx,gEx,gEy,gEz,gHx,gHy,gHz,gx0EPhi1,gx0EPhi2,gx0HPhi1,gx0HPhi2,gxmEPhi1,gxmEPhi2,gxmHPhi1,gxmHPhi2,gy0EPhi1,gy0EPhi2,gy0HPhi1,gy0HPhi2,gymEPhi1,gymEPhi2,gymHPhi1,gymHPhi2,gz0EPhi1,gz0EPhi2,gz0HPhi1,gz0HPhi2,gzmEPhi1,gzmEPhi2,gzmHPhi1,gzmHPhi2,gEall,gezreciver):
+    def backward(ctx,lambda_ex,lambda_ey,lambda_ez,lambda_hx,lambda_hy,lambda_hz,lambda_x0_e_phi1,lambda_x0_e_phi2,lambda_x0_h_phi1,lambda_x0_h_phi2,lambda_xm_e_phi1,lambda_xm_e_phi2,lambda_xm_h_phi1,lambda_xm_h_phi2,lambda_y0_e_phi1,lambda_y0_e_phi2,lambda_y0_h_phi1,lambda_y0_h_phi2,lambda_ym_e_phi1,lambda_ym_e_phi2,lambda_ym_h_phi1,lambda_ym_h_phi2,lambda_z0_e_phi1,lambda_z0_e_phi2,lambda_z0_h_phi1,lambda_z0_h_phi2,lambda_zm_e_phi1,lambda_zm_e_phi2,lambda_zm_h_phi1,lambda_zm_h_phi2,_g_E_saved,data_grad):
         """Call the native adjoint solver and return gradients.
 
         Args:
             ctx: PyTorch autograd context saved by forward.
-            gEx, gEy, gEz: Incoming gradients for electric field components.
-            gHx, gHy, gHz: Incoming gradients for magnetic field components.
-            gx0EPhi1, gx0EPhi2, gx0HPhi1, gx0HPhi2: Gradients for low-x PML tensors.
-            gxmEPhi1, gxmEPhi2, gxmHPhi1, gxmHPhi2: Gradients for high-x PML tensors.
-            gy0EPhi1, gy0EPhi2, gy0HPhi1, gy0HPhi2: Gradients for low-y PML tensors.
-            gymEPhi1, gymEPhi2, gymHPhi1, gymHPhi2: Gradients for high-y PML tensors.
-            gz0EPhi1, gz0EPhi2, gz0HPhi1, gz0HPhi2: Gradients for low-z PML tensors.
-            gzmEPhi1, gzmEPhi2, gzmHPhi1, gzmHPhi2: Gradients for high-z PML tensors.
-            gEall: Incoming gradient for the saved forward electric field history.
-            gezreciver: Incoming gradient for receiver amplitudes.
+            lambda_ex, lambda_ey, lambda_ez: Incoming gradients for electric field components.
+            lambda_hx, lambda_hy, lambda_hz: Incoming gradients for magnetic field components.
+            lambda_x0_e_phi1, lambda_x0_e_phi2, lambda_x0_h_phi1, lambda_x0_h_phi2: Gradients for low-x PML tensors.
+            lambda_xm_e_phi1, lambda_xm_e_phi2, lambda_xm_h_phi1, lambda_xm_h_phi2: Gradients for high-x PML tensors.
+            lambda_y0_e_phi1, lambda_y0_e_phi2, lambda_y0_h_phi1, lambda_y0_h_phi2: Gradients for low-y PML tensors.
+            lambda_ym_e_phi1, lambda_ym_e_phi2, lambda_ym_h_phi1, lambda_ym_h_phi2: Gradients for high-y PML tensors.
+            lambda_z0_e_phi1, lambda_z0_e_phi2, lambda_z0_h_phi1, lambda_z0_h_phi2: Gradients for low-z PML tensors.
+            lambda_zm_e_phi1, lambda_zm_e_phi2, lambda_zm_h_phi1, lambda_zm_h_phi2: Gradients for high-z PML tensors.
+            _g_E_saved: Ignored gradient for the non-differentiable saved wavefield.
+            data_grad: Incoming gradient for receiver amplitudes.
         """
         
-        sourceamp=gezreciver
-        er, se, mr,receiver_location,x0,xm,y0,ym,z0,zm,x01,x02,xm1,xm2,y01,y02,ym1,ym2,z01,z02,zm1,zm2,ere,see=ctx.saved_tensors
+        del _g_E_saved
+        eps_r, sigma, mu_r, source_location, receiver_location, x0,xm,y0,ym,z0,zm,x01,x02,xm1,xm2,y01,y02,ym1,ym2,z01,z02,zm1,zm2,eps_r_pad,sigma_pad=ctx.saved_tensors
         
-        ere=ere.contiguous()
-        see=see.contiguous()
-        er=er.contiguous()
-        se=se.contiguous()
-        mr=mr.contiguous()
+        eps_r_pad=eps_r_pad.contiguous()
+        sigma_pad=sigma_pad.contiguous()
+        eps_r=eps_r.contiguous()
+        sigma=sigma.contiguous()
+        mu_r=mu_r.contiguous()
+        source_location=source_location.contiguous()
         receiver_location=receiver_location.contiguous()
         x0=x0.contiguous()
         xm=xm.contiguous()
@@ -793,105 +821,112 @@ class DeepGPR(torch.autograd.Function):
         nz=ctx.nz
         dt=ctx.dt
         nt=ctx.nt
-        nsr=ctx.nrx
-        nrx=ctx.nsr
+        nsource=ctx.nsr
+        nreceiver=ctx.nrx
         dtype=ctx.dtype
         nstep=ctx.nstep
         pmlthick=ctx.pmlthick
         device=ctx.device
-        Eall=ctx.Eall
-        Rall=ctx.Rall
+        E_saved=ctx.E_saved
+        R_saved=ctx.R_saved
         model_gradient_sampling_interval = ctx.model_gradient_sampling_interval
         c_lib = get_deepgpr_lib(device)
         set_library_fdtd_order(c_lib, ctx.fdtd_order)
 
-        Eall=Eall.contiguous()
-        Rall=Rall.contiguous()
-        gEx=gEx.contiguous()
-        gEy=gEy.contiguous()
-        gEz=gEz.contiguous()
-        gHx=gHx.contiguous()
-        gHy=gHy.contiguous()
-        gHz=gHz.contiguous()
-        gx0EPhi1=gx0EPhi1.contiguous()
-        gx0EPhi2=gx0EPhi2.contiguous()
-        gx0HPhi1=gx0HPhi1.contiguous()
-        gx0HPhi2=gx0HPhi2.contiguous()
-        gxmEPhi1=gxmEPhi1.contiguous()
-        gxmEPhi2=gxmEPhi2.contiguous()
-        gxmHPhi1=gxmHPhi1.contiguous()
-        gxmHPhi2=gxmHPhi2.contiguous()
-        gy0EPhi1=gy0EPhi1.contiguous()
-        gy0EPhi2=gy0EPhi2.contiguous()
-        gy0HPhi1=gy0HPhi1.contiguous()
-        gy0HPhi2=gy0HPhi2.contiguous()
-        gymEPhi1=gymEPhi1.contiguous()
-        gymEPhi2=gymEPhi2.contiguous()
-        gymHPhi1=gymHPhi1.contiguous()
-        gymHPhi2=gymHPhi2.contiguous()
-        gz0EPhi1=gz0EPhi1.contiguous()
-        gz0EPhi2=gz0EPhi2.contiguous()
-        gz0HPhi1=gz0HPhi1.contiguous()
-        gz0HPhi2=gz0HPhi2.contiguous()
-        gzmEPhi1=gzmEPhi1.contiguous()
-        gzmEPhi2=gzmEPhi2.contiguous()
-        gzmHPhi1=gzmHPhi1.contiguous()
-        gzmHPhi2=gzmHPhi2.contiguous()
-        sourceamp=sourceamp.contiguous()
+        E_saved=E_saved.contiguous()
+        R_saved=R_saved.contiguous()
+        lambda_ex=lambda_ex.contiguous()
+        lambda_ey=lambda_ey.contiguous()
+        lambda_ez=lambda_ez.contiguous()
+        lambda_hx=lambda_hx.contiguous()
+        lambda_hy=lambda_hy.contiguous()
+        lambda_hz=lambda_hz.contiguous()
+        lambda_x0_e_phi1=lambda_x0_e_phi1.contiguous()
+        lambda_x0_e_phi2=lambda_x0_e_phi2.contiguous()
+        lambda_x0_h_phi1=lambda_x0_h_phi1.contiguous()
+        lambda_x0_h_phi2=lambda_x0_h_phi2.contiguous()
+        lambda_xm_e_phi1=lambda_xm_e_phi1.contiguous()
+        lambda_xm_e_phi2=lambda_xm_e_phi2.contiguous()
+        lambda_xm_h_phi1=lambda_xm_h_phi1.contiguous()
+        lambda_xm_h_phi2=lambda_xm_h_phi2.contiguous()
+        lambda_y0_e_phi1=lambda_y0_e_phi1.contiguous()
+        lambda_y0_e_phi2=lambda_y0_e_phi2.contiguous()
+        lambda_y0_h_phi1=lambda_y0_h_phi1.contiguous()
+        lambda_y0_h_phi2=lambda_y0_h_phi2.contiguous()
+        lambda_ym_e_phi1=lambda_ym_e_phi1.contiguous()
+        lambda_ym_e_phi2=lambda_ym_e_phi2.contiguous()
+        lambda_ym_h_phi1=lambda_ym_h_phi1.contiguous()
+        lambda_ym_h_phi2=lambda_ym_h_phi2.contiguous()
+        lambda_z0_e_phi1=lambda_z0_e_phi1.contiguous()
+        lambda_z0_e_phi2=lambda_z0_e_phi2.contiguous()
+        lambda_z0_h_phi1=lambda_z0_h_phi1.contiguous()
+        lambda_z0_h_phi2=lambda_z0_h_phi2.contiguous()
+        lambda_zm_e_phi1=lambda_zm_e_phi1.contiguous()
+        lambda_zm_e_phi2=lambda_zm_e_phi2.contiguous()
+        lambda_zm_h_phi1=lambda_zm_h_phi1.contiguous()
+        lambda_zm_h_phi2=lambda_zm_h_phi2.contiguous()
+        data_grad=data_grad.contiguous()
 
-        Eupdatecoffs0=torch.zeros((nx+1,ny+1,nz+1), device=device, dtype=dtype)
-        Eupdatecoffs1=torch.zeros((nx+1,ny+1,nz+1), device=device, dtype=dtype)
-        Eupdatecoffs4=torch.zeros((nx+1,ny+1,nz+1), device=device, dtype=dtype)
-        Hupdatecoffs0=torch.zeros((nx+1,ny+1,nz+1), device=device, dtype=dtype)
-        Hupdatecoffs1=torch.zeros((nx+1,ny+1,nz+1), device=device, dtype=dtype)
-        Hupdatecoffs4=torch.zeros((nx+1,ny+1,nz+1), device=device, dtype=dtype)
+        ce_hist=torch.zeros((nx+1,ny+1,nz+1), device=device, dtype=dtype)
+        ce_curl=torch.zeros((nx+1,ny+1,nz+1), device=device, dtype=dtype)
+        ce_rhs=torch.zeros((nx+1,ny+1,nz+1), device=device, dtype=dtype)
+        ch_hist=torch.zeros((nx+1,ny+1,nz+1), device=device, dtype=dtype)
+        ch_curl=torch.zeros((nx+1,ny+1,nz+1), device=device, dtype=dtype)
+        ch_rhs=torch.zeros((nx+1,ny+1,nz+1), device=device, dtype=dtype)
 
-        if er.requires_grad:
-            grad_er=torch.zeros((nx,ny,nz),device=device,dtype=dtype).contiguous()
-            errequiregrad=1
+        if eps_r.requires_grad:
+            grad_eps_r=torch.zeros((nx,ny,nz),device=device,dtype=dtype).contiguous()
+            eps_r_requires_grad=1
         else:
-            grad_er=torch.empty(0)
-            errequiregrad=0
+            grad_eps_r=torch.empty(0)
+            eps_r_requires_grad=0
 
-        if se.requires_grad: 
-            grad_se=torch.zeros((nx,ny,nz),device=device,dtype=dtype).contiguous()
-            serequiregrad=1
+        if sigma.requires_grad:
+            grad_sigma=torch.zeros((nx,ny,nz),device=device,dtype=dtype).contiguous()
+            sigma_requires_grad=1
         else:
-            grad_se=torch.empty(0)
-            serequiregrad=0
+            grad_sigma=torch.empty(0)
+            sigma_requires_grad=0
+
+        if ctx.source_requires_grad:
+            grad_source = torch.zeros(ctx.source_shape, device=device, dtype=dtype).contiguous()
+            source_requires_grad = 1
+        else:
+            grad_source = torch.empty(0, device=device, dtype=dtype)
+            source_requires_grad = 0
 
         pml = [int(pmlthick[i]) for i in range(6)]
 
         _sync_cuda_device(device)
         c_lib.backward(
-                ctypes.cast(ere.data_ptr(), ctypes.POINTER(ctypes.c_float)), 
-                ctypes.cast(see.data_ptr(), ctypes.POINTER(ctypes.c_float)), 
-                ctypes.cast(mr.data_ptr(), ctypes.POINTER(ctypes.c_float)),
-                ctypes.c_void_p(Eall.data_ptr()),
-                ctypes.c_void_p(Rall.data_ptr()),
-                ctypes.cast(gEx.data_ptr(), ctypes.POINTER(ctypes.c_float)),
-                ctypes.cast(gEy.data_ptr(), ctypes.POINTER(ctypes.c_float)),
-                ctypes.cast(gEz.data_ptr(), ctypes.POINTER(ctypes.c_float)),
-                ctypes.cast(gHx.data_ptr(), ctypes.POINTER(ctypes.c_float)),
-                ctypes.cast(gHy.data_ptr(), ctypes.POINTER(ctypes.c_float)),
-                ctypes.cast(gHz.data_ptr(), ctypes.POINTER(ctypes.c_float)), 
+                ctypes.cast(eps_r_pad.data_ptr(), ctypes.POINTER(ctypes.c_float)),
+                ctypes.cast(sigma_pad.data_ptr(), ctypes.POINTER(ctypes.c_float)),
+                ctypes.cast(mu_r.data_ptr(), ctypes.POINTER(ctypes.c_float)),
+                ctypes.c_void_p(E_saved.data_ptr()),
+                ctypes.c_void_p(R_saved.data_ptr()),
+                ctypes.cast(lambda_ex.data_ptr(), ctypes.POINTER(ctypes.c_float)),
+                ctypes.cast(lambda_ey.data_ptr(), ctypes.POINTER(ctypes.c_float)),
+                ctypes.cast(lambda_ez.data_ptr(), ctypes.POINTER(ctypes.c_float)),
+                ctypes.cast(lambda_hx.data_ptr(), ctypes.POINTER(ctypes.c_float)),
+                ctypes.cast(lambda_hy.data_ptr(), ctypes.POINTER(ctypes.c_float)),
+                ctypes.cast(lambda_hz.data_ptr(), ctypes.POINTER(ctypes.c_float)),
 
-                ctypes.cast(Eupdatecoffs0.data_ptr(), ctypes.POINTER(ctypes.c_float)), ctypes.cast(Eupdatecoffs1.data_ptr(), ctypes.POINTER(ctypes.c_float)),
-                ctypes.cast(Eupdatecoffs4.data_ptr(), ctypes.POINTER(ctypes.c_float)), ctypes.cast(Hupdatecoffs0.data_ptr(), ctypes.POINTER(ctypes.c_float)),
-                ctypes.cast(Hupdatecoffs1.data_ptr(), ctypes.POINTER(ctypes.c_float)), ctypes.cast(Hupdatecoffs4.data_ptr(), ctypes.POINTER(ctypes.c_float)), 
+                ctypes.cast(ce_hist.data_ptr(), ctypes.POINTER(ctypes.c_float)), ctypes.cast(ce_curl.data_ptr(), ctypes.POINTER(ctypes.c_float)),
+                ctypes.cast(ce_rhs.data_ptr(), ctypes.POINTER(ctypes.c_float)), ctypes.cast(ch_hist.data_ptr(), ctypes.POINTER(ctypes.c_float)),
+                ctypes.cast(ch_curl.data_ptr(), ctypes.POINTER(ctypes.c_float)), ctypes.cast(ch_rhs.data_ptr(), ctypes.POINTER(ctypes.c_float)),
 
-                ctypes.cast(gx0EPhi1.data_ptr(), ctypes.POINTER(ctypes.c_float)), ctypes.cast(gx0EPhi2.data_ptr(), ctypes.POINTER(ctypes.c_float)),
-                ctypes.cast(gx0HPhi1.data_ptr(), ctypes.POINTER(ctypes.c_float)), ctypes.cast(gx0HPhi2.data_ptr(), ctypes.POINTER(ctypes.c_float)),
-                ctypes.cast(gxmEPhi1.data_ptr(), ctypes.POINTER(ctypes.c_float)), ctypes.cast(gxmEPhi2.data_ptr(), ctypes.POINTER(ctypes.c_float)),
-                ctypes.cast(gxmHPhi1.data_ptr(), ctypes.POINTER(ctypes.c_float)), ctypes.cast(gxmHPhi2.data_ptr(), ctypes.POINTER(ctypes.c_float)),
-                ctypes.cast(gy0EPhi1.data_ptr(), ctypes.POINTER(ctypes.c_float)), ctypes.cast(gy0EPhi2.data_ptr(), ctypes.POINTER(ctypes.c_float)),
-                ctypes.cast(gy0HPhi1.data_ptr(), ctypes.POINTER(ctypes.c_float)), ctypes.cast(gy0HPhi2.data_ptr(), ctypes.POINTER(ctypes.c_float)),
-                ctypes.cast(gymEPhi1.data_ptr(), ctypes.POINTER(ctypes.c_float)), ctypes.cast(gymEPhi2.data_ptr(), ctypes.POINTER(ctypes.c_float)),
-                ctypes.cast(gymHPhi1.data_ptr(), ctypes.POINTER(ctypes.c_float)), ctypes.cast(gymHPhi2.data_ptr(), ctypes.POINTER(ctypes.c_float)),
-                ctypes.cast(gz0EPhi1.data_ptr(), ctypes.POINTER(ctypes.c_float)), ctypes.cast(gz0EPhi2.data_ptr(), ctypes.POINTER(ctypes.c_float)),
-                ctypes.cast(gz0HPhi1.data_ptr(), ctypes.POINTER(ctypes.c_float)), ctypes.cast(gz0HPhi2.data_ptr(), ctypes.POINTER(ctypes.c_float)),
-                ctypes.cast(gzmEPhi1.data_ptr(), ctypes.POINTER(ctypes.c_float)), ctypes.cast(gzmEPhi2.data_ptr(), ctypes.POINTER(ctypes.c_float)),
-                ctypes.cast(gzmHPhi1.data_ptr(), ctypes.POINTER(ctypes.c_float)), ctypes.cast(gzmHPhi2.data_ptr(), ctypes.POINTER(ctypes.c_float)), 
+                ctypes.cast(lambda_x0_e_phi1.data_ptr(), ctypes.POINTER(ctypes.c_float)), ctypes.cast(lambda_x0_e_phi2.data_ptr(), ctypes.POINTER(ctypes.c_float)),
+                ctypes.cast(lambda_x0_h_phi1.data_ptr(), ctypes.POINTER(ctypes.c_float)), ctypes.cast(lambda_x0_h_phi2.data_ptr(), ctypes.POINTER(ctypes.c_float)),
+                ctypes.cast(lambda_xm_e_phi1.data_ptr(), ctypes.POINTER(ctypes.c_float)), ctypes.cast(lambda_xm_e_phi2.data_ptr(), ctypes.POINTER(ctypes.c_float)),
+                ctypes.cast(lambda_xm_h_phi1.data_ptr(), ctypes.POINTER(ctypes.c_float)), ctypes.cast(lambda_xm_h_phi2.data_ptr(), ctypes.POINTER(ctypes.c_float)),
+                ctypes.cast(lambda_y0_e_phi1.data_ptr(), ctypes.POINTER(ctypes.c_float)), ctypes.cast(lambda_y0_e_phi2.data_ptr(), ctypes.POINTER(ctypes.c_float)),
+                ctypes.cast(lambda_y0_h_phi1.data_ptr(), ctypes.POINTER(ctypes.c_float)), ctypes.cast(lambda_y0_h_phi2.data_ptr(), ctypes.POINTER(ctypes.c_float)),
+                ctypes.cast(lambda_ym_e_phi1.data_ptr(), ctypes.POINTER(ctypes.c_float)), ctypes.cast(lambda_ym_e_phi2.data_ptr(), ctypes.POINTER(ctypes.c_float)),
+                ctypes.cast(lambda_ym_h_phi1.data_ptr(), ctypes.POINTER(ctypes.c_float)), ctypes.cast(lambda_ym_h_phi2.data_ptr(), ctypes.POINTER(ctypes.c_float)),
+                ctypes.cast(lambda_z0_e_phi1.data_ptr(), ctypes.POINTER(ctypes.c_float)), ctypes.cast(lambda_z0_e_phi2.data_ptr(), ctypes.POINTER(ctypes.c_float)),
+                ctypes.cast(lambda_z0_h_phi1.data_ptr(), ctypes.POINTER(ctypes.c_float)), ctypes.cast(lambda_z0_h_phi2.data_ptr(), ctypes.POINTER(ctypes.c_float)),
+                ctypes.cast(lambda_zm_e_phi1.data_ptr(), ctypes.POINTER(ctypes.c_float)), ctypes.cast(lambda_zm_e_phi2.data_ptr(), ctypes.POINTER(ctypes.c_float)),
+                ctypes.cast(lambda_zm_h_phi1.data_ptr(), ctypes.POINTER(ctypes.c_float)), ctypes.cast(lambda_zm_h_phi2.data_ptr(), ctypes.POINTER(ctypes.c_float)),
 
                 pml[0],pml[1],pml[2],
                 pml[3],pml[4],pml[5],
@@ -903,57 +938,81 @@ class DeepGPR(torch.autograd.Function):
                 ctypes.cast(y02.data_ptr(), ctypes.POINTER(ctypes.c_float)), ctypes.cast(ym2.data_ptr(), ctypes.POINTER(ctypes.c_float)),         
                 ctypes.cast(z02.data_ptr(), ctypes.POINTER(ctypes.c_float)), ctypes.cast(zm2.data_ptr(), ctypes.POINTER(ctypes.c_float)), 
 
-                dt, nt, nstep, nrx, dx, dy, dz,
-                nx+1, ny+1, nz+1, nsr,
-                ctypes.cast(receiver_location.data_ptr(), ctypes.POINTER(ctypes.c_int)), ctypes.cast(sourceamp.data_ptr(), ctypes.POINTER(ctypes.c_float)),
-                ctx.reciever_direction,
-                ctypes.cast(grad_er.data_ptr(), ctypes.POINTER(ctypes.c_float)), ctypes.cast(grad_se.data_ptr(), ctypes.POINTER(ctypes.c_float)),errequiregrad,serequiregrad,
+                dt, nt, nstep, nreceiver, dx, dy, dz,
+                nx+1, ny+1, nz+1, nreceiver,
+                ctypes.cast(receiver_location.data_ptr(), ctypes.POINTER(ctypes.c_int)), ctypes.cast(data_grad.data_ptr(), ctypes.POINTER(ctypes.c_float)),
+                ctx.receiver_component,
+                nsource,
+                ctypes.cast(source_location.data_ptr(), ctypes.POINTER(ctypes.c_int)),
+                ctx.source_direction,
+                ctypes.cast(grad_source.data_ptr(), ctypes.POINTER(ctypes.c_float)),
+                source_requires_grad,
+                ctypes.cast(grad_eps_r.data_ptr(), ctypes.POINTER(ctypes.c_float)), ctypes.cast(grad_sigma.data_ptr(), ctypes.POINTER(ctypes.c_float)),eps_r_requires_grad,sigma_requires_grad,
                 model_gradient_sampling_interval,
                 ctx.mode,
                 ctx.wavefield_storage_type)
         _sync_cuda_device(device)
         
-        tensors_to_check = dict(
-            gEx=gEx, gEy=gEy, gEz=gEz,
-            gHx=gHx, gHy=gHy, gHz=gHz,
-            gx0EPhi1=gx0EPhi1, gx0EPhi2=gx0EPhi2,
-            gx0HPhi1=gx0HPhi1, gx0HPhi2=gx0HPhi2,
-            gxmEPhi1=gxmEPhi1, gxmEPhi2=gxmEPhi2,
-            gxmHPhi1=gxmHPhi1, gxmHPhi2=gxmHPhi2,
-            gy0EPhi1=gy0EPhi1, gy0EPhi2=gy0EPhi2,
-            gy0HPhi1=gy0HPhi1, gy0HPhi2=gy0HPhi2,
-            gymEPhi1=gymEPhi1, gymEPhi2=gymEPhi2,
-            gymHPhi1=gymHPhi1, gymHPhi2=gymHPhi2,
-            gz0EPhi1=gz0EPhi1, gz0EPhi2=gz0EPhi2,
-            gz0HPhi1=gz0HPhi1, gz0HPhi2=gz0HPhi2,
-            gzmEPhi1=gzmEPhi1, gzmEPhi2=gzmEPhi2,
-            gzmHPhi1=gzmHPhi1, gzmHPhi2=gzmHPhi2
+        state_gradient_names = (
+            "lambda_ex", "lambda_ey", "lambda_ez",
+            "lambda_hx", "lambda_hy", "lambda_hz",
+            "lambda_x0_e_phi1", "lambda_x0_e_phi2",
+            "lambda_x0_h_phi1", "lambda_x0_h_phi2",
+            "lambda_xm_e_phi1", "lambda_xm_e_phi2",
+            "lambda_xm_h_phi1", "lambda_xm_h_phi2",
+            "lambda_y0_e_phi1", "lambda_y0_e_phi2",
+            "lambda_y0_h_phi1", "lambda_y0_h_phi2",
+            "lambda_ym_e_phi1", "lambda_ym_e_phi2",
+            "lambda_ym_h_phi1", "lambda_ym_h_phi2",
+            "lambda_z0_e_phi1", "lambda_z0_e_phi2",
+            "lambda_z0_h_phi1", "lambda_z0_h_phi2",
+            "lambda_zm_e_phi1", "lambda_zm_e_phi2",
+            "lambda_zm_h_phi1", "lambda_zm_h_phi2",
         )
-        if errequiregrad == 1:
-            tensors_to_check["grad_er"] = grad_er
-        if serequiregrad == 1:
-            tensors_to_check["grad_se"] = grad_se
+        state_gradients = (
+            lambda_ex, lambda_ey, lambda_ez,
+            lambda_hx, lambda_hy, lambda_hz,
+            lambda_x0_e_phi1, lambda_x0_e_phi2,
+            lambda_x0_h_phi1, lambda_x0_h_phi2,
+            lambda_xm_e_phi1, lambda_xm_e_phi2,
+            lambda_xm_h_phi1, lambda_xm_h_phi2,
+            lambda_y0_e_phi1, lambda_y0_e_phi2,
+            lambda_y0_h_phi1, lambda_y0_h_phi2,
+            lambda_ym_e_phi1, lambda_ym_e_phi2,
+            lambda_ym_h_phi1, lambda_ym_h_phi2,
+            lambda_z0_e_phi1, lambda_z0_e_phi2,
+            lambda_z0_h_phi1, lambda_z0_h_phi2,
+            lambda_zm_e_phi1, lambda_zm_e_phi2,
+            lambda_zm_h_phi1, lambda_zm_h_phi2,
+        )
+        state_needs_grad = ctx.needs_input_grad[2:32]
+        tensors_to_check = {
+            name: gradient
+            for name, gradient, required in zip(
+                state_gradient_names, state_gradients, state_needs_grad
+            )
+            if required
+        }
+        if eps_r_requires_grad == 1:
+            tensors_to_check["grad_eps_r"] = grad_eps_r
+        if sigma_requires_grad == 1:
+            tensors_to_check["grad_sigma"] = grad_sigma
+        if source_requires_grad == 1:
+            tensors_to_check["grad_source"] = grad_source
 
         if ctx.debug:
             check_tensors_for_nan_inf(d="backward", **tensors_to_check)
 
-        ctx.Eall = None
-        ctx.Rall = None
-        del Eall,Rall,er, se, mr,receiver_location,x0,xm,y0,ym,z0,zm,x01,x02,xm1,xm2,y01,y02,ym1,ym2,z01,z02,zm1,zm2,ere,see, Eupdatecoffs0, Eupdatecoffs1, Eupdatecoffs4, Hupdatecoffs0, Hupdatecoffs1, Hupdatecoffs4
+        ctx.E_saved = None
+        ctx.R_saved = None
+        del E_saved,R_saved,eps_r,sigma,mu_r,source_location,receiver_location,x0,xm,y0,ym,z0,zm,x01,x02,xm1,xm2,y01,y02,ym1,ym2,z01,z02,zm1,zm2,eps_r_pad,sigma_pad,ce_hist,ce_curl,ce_rhs,ch_hist,ch_curl,ch_rhs
 
-        return (
-                    grad_er, grad_se,         
-                    gEx,gEy,gEz, gHx,gHy,gHz, 
-                    gx0EPhi1,gx0EPhi2,gx0HPhi1,gx0HPhi2,
-                    gxmEPhi1,gxmEPhi2,gxmHPhi1,gxmHPhi2,
-                    gy0EPhi1,gy0EPhi2,gy0HPhi1,gy0HPhi2,
-                    gymEPhi1,gymEPhi2,gymHPhi1,gymHPhi2,
-                    gz0EPhi1,gz0EPhi2,gz0HPhi1,gz0HPhi2,
-                    gzmEPhi1,gzmEPhi2,gzmHPhi1,gzmHPhi2,   
-                    None, None, None, None, None, None, None, None,   
-                    None, None, None, None, None, None, None,
-                    None, None, None, None, None, None, None, None,
-                    None, None, None, None, None, None, None, None, 
-                    None, None, None, None, None, None, None, None, 
-                    None, None, None, None, None
-                )
+        gradients = [None] * 76
+        gradients[0] = grad_eps_r if eps_r_requires_grad else None
+        gradients[1] = grad_sigma if sigma_requires_grad else None
+        for index, (gradient, required) in enumerate(
+            zip(state_gradients, state_needs_grad), start=2
+        ):
+            gradients[index] = gradient if required else None
+        gradients[40] = grad_source if source_requires_grad else None
+        return tuple(gradients)

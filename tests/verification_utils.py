@@ -35,7 +35,7 @@ def source_tree_sha256() -> str:
     source_files = sorted(
         path
         for path in source_root.rglob("*")
-        if path.is_file() and path.suffix in {".py", ".c", ".cu"}
+        if path.is_file() and path.suffix in {".py", ".c", ".cu", ".h"}
     )
     digest = hashlib.sha256()
     for path in source_files:
@@ -117,8 +117,8 @@ def runtime_metadata(deepgpr: Any, device: torch.device | str) -> dict[str, Any]
         ) from exc
     library = deepgpr.get_deepgpr_lib(device)
     abi = int(library.deepgpr_abi_version())
-    if abi != 4:
-        raise RuntimeError(f"Expected native ABI 4, received ABI {abi}.")
+    if abi != 5:
+        raise RuntimeError(f"Expected native ABI 5, received ABI {abi}.")
 
     metadata: dict[str, Any] = {
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),

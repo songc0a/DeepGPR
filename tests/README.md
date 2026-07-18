@@ -3,7 +3,7 @@
 This directory contains the fast numerical unit tests and executable notebook
 verification suite for the repository-local DeepGPR implementation. Every test
 entry point places `../src` first on `sys.path`, verifies the local package and
-native library where applicable, and requires native ABI 4. An installed
+native library where applicable, and requires native ABI 5. An installed
 DeepGPR package is neither used nor required.
 
 Run the fast terminal suite with:
@@ -11,6 +11,11 @@ Run the fast terminal suite with:
 ```bash
 python -m unittest discover -s tests -p "test_*.py"
 ```
+
+`test_discrete_adjoint.py` contains the strict reverse-mode checks for weighted
+curl operators, native field updates, all-face CPML state transposes, source
+waveform gradients, material Taylor tests, incomplete temporal sampling, and
+optional CPU/CUDA parity.
 
 No finite test suite can prove that a numerical program is correct for every
 possible input. The suite instead combines independent checks that are
@@ -38,7 +43,8 @@ sensitive to different implementation errors:
 10. `09_anisotropic_grid.ipynb`: verifies unequal constant `dx`, `dy`, and `dz`
     through API contracts, CFL limits, directional updates, CPML coefficients,
     2D and 3D propagation, adjoint gradients, and optional CPU/CUDA parity.
-11. `99_verification_summary.ipynb`: validates and summarizes the JSON reports.
+11. `99_verification_summary.ipynb`: validates and summarizes the JSON reports,
+    rejecting reports produced by a different ABI, source tree, or native library.
 
 Run the notebooks in numeric order from this directory. Each successful
 notebook writes a JSON report to `tests/results`. The summary notebook

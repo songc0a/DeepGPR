@@ -158,9 +158,9 @@ def _configure_deepgpr_library(lib: ctypes.CDLL) -> None:
     lib.deepgpr_abi_version.argtypes = []
     lib.deepgpr_abi_version.restype = ctypes.c_int
     abi_version = int(lib.deepgpr_abi_version())
-    if abi_version != 4:
+    if abi_version != 5:
         raise RuntimeError(
-            f"Incompatible DeepGPR native ABI {abi_version}; expected ABI 4. "
+            f"Incompatible DeepGPR native ABI {abi_version}; expected ABI 5. "
             "Rebuild the CPU/CUDA shared libraries from the current sources."
         )
 
@@ -220,6 +220,7 @@ def _configure_deepgpr_library(lib: ctypes.CDLL) -> None:
         ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
         _INT_P, _FLOAT_P,
         ctypes.c_int,
+        ctypes.c_int, _INT_P, ctypes.c_int, _FLOAT_P, ctypes.c_int,
         _FLOAT_P, _FLOAT_P,
         ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
     ]

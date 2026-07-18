@@ -178,17 +178,17 @@ result = DeepGPR.compute(
 | **`dt`** | `float` | Time step size. It is checked against a material-aware CFL limit that includes the selected 2/4/8-order stencil. Typically in seconds (s). |
 | **`fdtd_order`** | `int` | Spatial finite-difference order used by the FDTD field updates. Supported values are `2`, `4`, and `8`; default is `2` for compatibility with earlier versions. |
 | **`mode`** | `int` | FWI gradient mode. `2` keeps the previous Ez-only model-gradient calculation. `3` uses Ex, Ey, and Ez electric-field contributions for relative permittivity and conductivity gradients. |
-| **`debug`** | `bool` | Runs expensive NaN/Inf and zero-field validation checks when `True`. The default `False` keeps these checks disabled for faster production runs. |
-| **`print_parameters`** | `bool` | Prints a preflight summary before native FDTD execution. The summary includes all simulation options and a tensor-payload memory estimate for model/state tensors, CPML, saved `Eall`/`Rall` wavefields, receiver buffers, gradients, low-precision snapshots, and CUDA offload buffers. CPU and CUDA estimates are reported separately with a 20% capacity margin. |
+| **`debug`** | `bool` | Runs expensive NaN/Inf and zero-field validation checks when `True`. Backward validation covers material, source, and initial-state gradients actually requested by autograd. The default `False` keeps these checks disabled for faster production runs. |
+| **`print_parameters`** | `bool` | Prints a preflight summary before native FDTD execution. The summary includes all simulation options and a tensor-payload memory estimate for model/state tensors, CPML, saved `E_saved`/`R_saved` wavefields, receiver buffers, gradients, low-precision snapshots, and CUDA offload buffers. CPU and CUDA estimates are reported separately with a 20% capacity margin. |
 ### 2. Medium Model Parameters
 
 This section defines the electromagnetic properties of the simulation space. For 2D simulations, set `nz=1`.
 
 | Parameter | Data Type | Shape | Description |
 | :--- | :--- | :--- | :--- |
-| **`er`** | `Tensor` (float) | `(nx, ny, nz)` or `(nx, ny)` | Relative permittivity ($\epsilon_r$). Values must be $\ge 1$. |
-| **`se`** | `Tensor` (float) | `(nx, ny, nz)` or `(nx, ny)` | Electrical conductivity ($\sigma$). Values must be non-negative. |
-| **`mr`** | `Tensor` (float) | `(nx, ny, nz)` or `(nx, ny)` | Relative permeability ($\mu_r$). Optional; defaults to 1 for the entire space. Shape must match `er`. |
+| **`eps_r`** (`er`) | `Tensor` (float) | `(nx, ny, nz)` or `(nx, ny)` | Relative permittivity ($\epsilon_r$). Values must be $\ge 1$. `er` is the deprecated alias. |
+| **`sigma`** (`se`) | `Tensor` (float) | `(nx, ny, nz)` or `(nx, ny)` | Electrical conductivity ($\sigma$). Values must be non-negative. `se` is the deprecated alias. |
+| **`mu_r`** (`mr`) | `Tensor` (float) | `(nx, ny, nz)` or `(nx, ny)` | Relative permeability ($\mu_r$). Optional; defaults to 1 for the entire space. `mr` is the deprecated alias. |
 
 > **Dimension Key**: `nx`, `ny`, and `nz` represent the number of grid cells along the X, Y, and Z axes, respectively. 
 
@@ -202,7 +202,7 @@ This section defines the geometric observation system (coordinates) and the exci
 | **`source_location`** | `Tensor` (int) | `(nstep, nsr, 3)` | Grid coordinate indices of the sources.<br>The last dimension corresponds to `[x_idx, y_idx, z_idx]`. |
 | **`receiver_location`** | `Tensor` (int) | `(nstep, nrx, 3)` | Grid coordinate indices of the receivers.<br>The last dimension corresponds to `[x_idx, y_idx, z_idx]`. |
 | **`source_direction`** | `int` | Scalar | Polarization direction/component of the source excitation.<br>`0` = X, `1` = Y, `2` = Z (e.g., exciting $E_z$). |
-| **`reciever_direction`** | `int` | Scalar | The component direction recorded by the receivers. (Note: typo in variable name is kept as-is to match code).<br>`0` = $E_x$, `1` = $E_y$, `2` = $E_z$. |
+| **`receiver_component`** (`reciever_direction`) | `int` | Scalar | The component recorded by the receivers.<br>`0` = $E_x$, `1` = $E_y$, `2` = $E_z$. The misspelled name remains as a deprecated alias. |
 
 > **Core Shape Definitions**:
 > *   `nstep`: Number of shots/batches (independent simulation tasks running in parallel).
@@ -215,24 +215,26 @@ This section defines the geometric observation system (coordinates) and the exci
 | Parameter | Data Type | Format | Description |
 | :--- | :--- | :--- | :--- |
 | **`pmlthick`** | `int` / `list` / `Tensor`| Scalar or list of 6 | Thickness (in grid layers) of the PML (Perfectly Matched Layer) absorbing boundaries.<br>- Integer `p`: All six boundaries have thickness `p` (Z-boundaries are ignored in 2D).<br>- List `[x0, xm, y0, ym, z0, zm]`: Specific thicknesses for the 6 boundaries. |
-| **`model_gradient_sampling_interval`**| `int` | Scalar | Wavefield sampling interval during forward propagation (Default: 1).<br>A larger integer reduces the VRAM usage for the saved `Eall` tensor, but may decrease the accuracy of backpropagated gradients. |
-| **`wavefield_storage_dtype`** | `torch.dtype` / `str` | `float32`, `float16`, or `bfloat16` | Storage format for saved `Eall` and internal `Rall` model-gradient wavefields. FDTD propagation remains float32. `float16` and `bfloat16` halve saved-wavefield memory at the cost of gradient accuracy; `bfloat16` has the safer dynamic range. String aliases such as `"fp16"` and `"bf16"` are accepted. |
-| **`use_async_offload`** | `bool` | Scalar | CUDA-only VRAM optimization flag (Default: `False`).<br>If `True`, the internal full wavefield tensor (`Eall`) is asynchronously offloaded to page-locked host memory (`pin_memory` CPU RAM). This drastically reduces GPU VRAM consumption at the cost of slightly slower computation times due to PCIe data transfer latency. On CPU this option is ignored. |
+| **`model_gradient_sampling_interval`**| `int` | Scalar | Wavefield sampling interval during forward propagation (Default: 1).<br>A larger integer reduces VRAM use for `E_saved` and `R_saved`, but uses an explicitly approximate model gradient. The last incomplete sampling block is weighted by its actual length. |
+| **`wavefield_storage_dtype`** | `torch.dtype` / `str` | `float32`, `float16`, or `bfloat16` | Storage format for saved `E_saved` and `R_saved` model-gradient wavefields. FDTD propagation remains float32. `float16` and `bfloat16` halve saved-wavefield memory at the cost of gradient accuracy; `bfloat16` has the safer dynamic range. String aliases such as `"fp16"` and `"bf16"` are accepted. |
+| **`use_async_offload`** | `bool` | Scalar | CUDA-only VRAM optimization flag (Default: `False`).<br>If `True`, `E_saved` and `R_saved` are asynchronously offloaded to page-locked host memory (`pin_memory` CPU RAM). This reduces GPU VRAM consumption at the cost of PCIe transfers. On CPU this option is ignored. |
 
 ### 4.1 FWI Gradient Mode
 
 `mode` only changes how the model gradients are accumulated during backpropagation:
 
-- `mode=2` (default): Saves Ez in `Eall` and computes relative permittivity/conductivity gradients from Ez only.
-- `mode=3`: Saves Ex, Ey, and Ez in `Eall` and computes relative permittivity/conductivity gradients from all three electric-field components. This is intended for complete 3D Maxwell FWI. The adjoint source polarization is not changed by this option.
+- `mode=2` (default): Saves Ez in `E_saved` and computes relative permittivity/conductivity gradients from Ez only.
+- `mode=3`: Saves Ex, Ey, and Ez in `E_saved` and computes relative permittivity/conductivity gradients from all three electric-field components. This is intended for complete 3D Maxwell FWI. The receiver component is not changed by this option.
 
-When `er` or `se` requires gradients, `mode=2` is restricted to 2D Ez-TM modeling; use `mode=3` for 3D gradients. Gradients with respect to `source_amplitudes` and `mr` are not currently implemented and are rejected explicitly.
+When `eps_r` or `sigma` requires gradients, `mode=2` is restricted to 2D Ez-TM modeling; use `mode=3` for 3D gradients. Source-waveform gradients are supported. Gradients with respect to `mu_r` are not currently implemented and are rejected explicitly.
 
 ### 4.2 Discrete Adjoint Gradient
 
-The backward solver uses reciprocal reverse-time Maxwell propagation with the same dissipative CPML recurrence as the forward solver, following the stable strategy used by tide-GPR. It correlates the adjoint electric field with the saved discrete `ca`/`cb` update terms and then applies the analytic chain rule to `er` and `se`. This avoids the long-time transient growth of unscaled explicitly transposed CPML memory variables. CPML cells are treated as a numerical boundary and are excluded from the returned material gradients.
+The backward solver applies the exact reverse-mode transpose of each executed operation in reverse order: receiver sampling, source injection, electric CPML, electric update, magnetic CPML, and magnetic update. The derivative transpose is applied to the material-weighted field cotangent, so heterogeneous update coefficients and anisotropic grid spacing are handled by the executed discrete operator. Every electric and magnetic CPML auxiliary state has a separate cotangent recurrence on all six faces.
 
-Use `model_gradient_sampling_interval=1` and `wavefield_storage_dtype=torch.float32` for a directional derivative check in the physical model region. Temporal subsampling and lower-precision storage deliberately approximate the gradient. Run [the gradient-check notebook](examples/4.GradientCheck.ipynb) after rebuilding the native ABI 4 libraries.
+CPML is treated as a fixed numerical boundary. Its boundary material averages are explicitly detached, and CPML cells are excluded from the returned material gradients. This separation must be retained when optimizing a model.
+
+Use `model_gradient_sampling_interval=1` and `wavefield_storage_dtype=torch.float32` for a directional derivative check in the physical model region. Temporal subsampling and lower-precision storage deliberately approximate the gradient. Run [the gradient-check notebook](examples/4.GradientCheck.ipynb) after rebuilding the native ABI 5 libraries.
 
 ## CPU Backend Build
 
@@ -278,10 +280,10 @@ For starting a forward simulation from scratch ($t=0$), these three parameters s
 The function returns a tuple of 5 elements. These are used to extract synthetic data, initiate the gradient flow for backpropagation, or serve as initial parameters (`E`, `H`, `PML`) for subsequent time-stepped calculations.
 
 ```python
-return Eall, (Ex, Ey, Ez), (Hx, Hy, Hz), (x0EPhi1...zmHPhi2), receiver_amplitudes
+return E_saved, (Ex, Ey, Ez), (Hx, Hy, Hz), (x0EPhi1...zmHPhi2), receiver_amplitudes
 ```
 
-1.  **`Eall`**: The pre-update electric field history `E^n` saved for gradient calculation and diagnostics. An internal tensor stores the corresponding discrete right-hand side `R^n`.
+1.  **`E_saved`**: The pre-update electric field history `E^n` saved for gradient calculation and diagnostics. An internal `R_saved` tensor stores the corresponding discrete right-hand side `R^n`.
     *   **Shape when `mode=2`**: `(nt_saved, nstep, nx, ny, nz)`, storing Ez only.
     *   **Shape when `mode=3`**: `(3, nt_saved, nstep, nx, ny, nz)`, storing components in `[Ex, Ey, Ez]` order.
     *   `nt_saved` depends on `nt` and `model_gradient_sampling_interval`.
@@ -291,7 +293,7 @@ return Eall, (Ex, Ey, Ez), (Hx, Hy, Hz), (x0EPhi1...zmHPhi2), receiver_amplitude
 4.  **`(PML_Tuple)`**: A tuple of 24 Tensors recording the final time step state of the PML auxiliary $\Phi$ variables.
 5.  **`receiver_amplitudes`**: **The core output.** The waveform signals recorded by the receivers over the entire simulation time.
     *   **Shape**: `(nstep, nt, nrx)`
-    *   **Meaning**: `[Shot Index, Time Step, Receiver Index]`. Note that this output is already sliced to extract only the component specified by `reciever_direction`.
+    *   **Meaning**: `[Shot Index, Time Step, Receiver Index]`. This output is sliced to the component specified by `receiver_component` (or its deprecated alias `reciever_direction`).
 
 
 ## Tests and Verification

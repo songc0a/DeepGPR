@@ -150,7 +150,7 @@ class NumericsValidationTests(unittest.TestCase):
         self.assertIn("=== DeepGPR compute preview ===", preview)
         self.assertIn("dx / dy / dz", preview)
         self.assertIn("FDTD order / gradient mode: 4 / 2", preview)
-        self.assertIn("saved Eall and Rall wavefields", preview)
+        self.assertIn("saved E_saved and R_saved wavefields", preview)
         self.assertIn("adjoint fields and CPML", preview)
         self.assertIn("estimated peak CPU memory", preview)
         self.assertIn("recommended CPU capacity with 20% margin", preview)
@@ -487,6 +487,7 @@ class NumericsValidationTests(unittest.TestCase):
             wavefield_storage_dtype=torch.float32,
             fdtd_order=2,
             mode=3,
+            debug=True,
         )
         receiver = result[-1]
         receiver.square().mean().backward()

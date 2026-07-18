@@ -456,12 +456,16 @@ def check_tensors_for_nan_inf(d,**tensors):
         raise FloatingPointError(f"{d} produced tensors containing NaN or Inf values.")
 
 
-def buildpmlcoeffs(er,mr,dt,dx,nx,ny,nz,pmlthick,device,dtype):
-    """Build CPML region descriptors and update coefficients.
+def build_pml_coeffs(eps_r,mu_r,dt,dx,nx,ny,nz,pmlthick,device,dtype):
+    """Build fixed CPML region descriptors and update coefficients.
+
+    CPML is a numerical boundary rather than an inversion parameter. Boundary
+    material averages are detached explicitly, and gradients in CPML cells are
+    excluded by the native material-gradient kernels.
 
     Args:
-        er: Relative permittivity tensor.
-        mr: Relative permeability tensor.
+        eps_r: Relative permittivity tensor.
+        mu_r: Relative permeability tensor.
         dt: Time step size.
         dx: Scalar grid spacing or a three-value ``(dx, dy, dz)`` sequence.
         nx: Number of model cells along the x axis.
@@ -472,6 +476,8 @@ def buildpmlcoeffs(er,mr,dt,dx,nx,ny,nz,pmlthick,device,dtype):
         dtype: PyTorch dtype for output tensors.
     """
     dx, dy, dz = _normalize_grid_spacing(dx)
+    eps_r_fixed = eps_r.detach()
+    mu_r_fixed = mu_r.detach()
     averageer=torch.zeros(6, device=device, dtype=dtype)
     averagemr=torch.zeros(6, device=device, dtype=dtype)
     lencfs=1
@@ -495,8 +501,8 @@ def buildpmlcoeffs(er,mr,dt,dx,nx,ny,nz,pmlthick,device,dtype):
     zm2 = torch.empty(0)
     if pmlthick[0]>0:
         x0=torch.tensor((pmlthick[0],0,pmlthick[0],0,ny,0,nz), device=device, dtype=torch.int)
-        averageer[0]=er[x0[1],:ny,:nz].mean()
-        averagemr[0]=mr[x0[1],:ny,:nz].mean()
+        averageer[0]=eps_r_fixed[x0[1],:ny,:nz].mean()
+        averagemr[0]=mu_r_fixed[x0[1],:ny,:nz].mean()
         CFS0=CFS(device=device)
         x01=torch.zeros((4,lencfs,pmlthick[0]), device=device, dtype=dtype)
         x02=torch.zeros((4,lencfs,pmlthick[0]), device=device, dtype=dtype)
@@ -504,8 +510,8 @@ def buildpmlcoeffs(er,mr,dt,dx,nx,ny,nz,pmlthick,device,dtype):
 
     if pmlthick[1]>0:
         xm=torch.tensor((pmlthick[1],nx-pmlthick[1],nx,0,ny,0,nz), device=device, dtype=torch.int)
-        averageer[1]=er[xm[1],:ny,:nz].mean()
-        averagemr[1]=mr[xm[1],:ny,:nz].mean()
+        averageer[1]=eps_r_fixed[xm[1],:ny,:nz].mean()
+        averagemr[1]=mu_r_fixed[xm[1],:ny,:nz].mean()
         CFS1=CFS(device=device)
         xm1=torch.zeros((4,lencfs,pmlthick[1]), device=device, dtype=dtype)
         xm2=torch.zeros((4,lencfs,pmlthick[1]), device=device, dtype=dtype)
@@ -513,8 +519,8 @@ def buildpmlcoeffs(er,mr,dt,dx,nx,ny,nz,pmlthick,device,dtype):
 
     if pmlthick[2]>0:
         y0=torch.tensor((pmlthick[2],0,nx,0,pmlthick[2],0,nz), device=device, dtype=torch.int)
-        averageer[2]=er[:nx,y0[3],:nz].mean()
-        averagemr[2]=mr[:nx,y0[3],:nz].mean()
+        averageer[2]=eps_r_fixed[:nx,y0[3],:nz].mean()
+        averagemr[2]=mu_r_fixed[:nx,y0[3],:nz].mean()
         CFS2=CFS(device=device)
         y01=torch.zeros((4,lencfs,pmlthick[2]), device=device, dtype=dtype)
         y02=torch.zeros((4,lencfs,pmlthick[2]), device=device, dtype=dtype)
@@ -522,8 +528,8 @@ def buildpmlcoeffs(er,mr,dt,dx,nx,ny,nz,pmlthick,device,dtype):
 
     if pmlthick[3]>0:
         ym=torch.tensor((pmlthick[3],0,nx,ny-pmlthick[3],ny,0,nz), device=device, dtype=torch.int)
-        averageer[3]=er[:nx,ym[3],:nz].mean()
-        averagemr[3]=mr[:nx,ym[3],:nz].mean()
+        averageer[3]=eps_r_fixed[:nx,ym[3],:nz].mean()
+        averagemr[3]=mu_r_fixed[:nx,ym[3],:nz].mean()
         CFS3=CFS(device=device)
         ym1=torch.zeros((4,lencfs,pmlthick[3]), device=device, dtype=dtype)
         ym2=torch.zeros((4,lencfs,pmlthick[3]), device=device, dtype=dtype)
@@ -531,8 +537,8 @@ def buildpmlcoeffs(er,mr,dt,dx,nx,ny,nz,pmlthick,device,dtype):
 
     if pmlthick[4]>0:
         z0=torch.tensor((pmlthick[4],0,nx,0,ny,0,pmlthick[4]), device=device, dtype=torch.int)
-        averageer[4]=er[:nx,:ny,z0[5]].mean()
-        averagemr[4]=mr[:nx,:ny,z0[5]].mean()
+        averageer[4]=eps_r_fixed[:nx,:ny,z0[5]].mean()
+        averagemr[4]=mu_r_fixed[:nx,:ny,z0[5]].mean()
         CFS4=CFS(device=device)
         z01=torch.zeros((4,lencfs,pmlthick[4]), device=device, dtype=dtype)
         z02=torch.zeros((4,lencfs,pmlthick[4]), device=device, dtype=dtype)
@@ -540,13 +546,22 @@ def buildpmlcoeffs(er,mr,dt,dx,nx,ny,nz,pmlthick,device,dtype):
 
     if pmlthick[5]>0:
         zm=torch.tensor((pmlthick[5],0,nx,0,ny,nz-pmlthick[5],nz), device=device, dtype=torch.int)
-        averageer[5]=er[:nx,:ny,zm[5]].mean()
-        averagemr[5]=mr[:nx,:ny,zm[5]].mean()
+        averageer[5]=eps_r_fixed[:nx,:ny,zm[5]].mean()
+        averagemr[5]=mu_r_fixed[:nx,:ny,zm[5]].mean()
         CFS5=CFS(device=device)
         zm1=torch.zeros((4,lencfs,pmlthick[5]), device=device, dtype=dtype)
         zm2=torch.zeros((4,lencfs,pmlthick[5]), device=device, dtype=dtype)
         calculate_pml_update_coeffs(CFS5,zm1,zm2, averageer[5], averagemr[5], dt,dz,pmlthick[5])
     return x0,xm,y0,ym,z0,zm,x01,x02,xm1,xm2,y01,y02,ym1,ym2,z01,z02,zm1,zm2
+
+
+def buildpmlcoeffs(*args, **kwargs):
+    """Deprecated compatibility alias for :func:`build_pml_coeffs`."""
+    if "er" in kwargs:
+        kwargs["eps_r"] = kwargs.pop("er")
+    if "mr" in kwargs:
+        kwargs["mu_r"] = kwargs.pop("mr")
+    return build_pml_coeffs(*args, **kwargs)
 
 
 
@@ -828,16 +843,12 @@ def checkpoint_initial_field(device=None,per_nstep=None, dx=None, dt=None,
     Ex,Ey,Ez=create_or_separate(E,nx,ny,nz,nstep,device,dtype)
     Hx,Hy,Hz=create_or_separate(H,nx,ny,nz,nstep,device,dtype)
 
-    x0,xm,y0,ym,z0,zm,x01,x02,xm1,xm2,y01,y02,ym1,ym2,z01,z02,zm1,zm2=buildpmlcoeffs(er,mr,dt,dx,nx,ny,nz,pmlthick,device,dtype)
+    x0,xm,y0,ym,z0,zm,x01,x02,xm1,xm2,y01,y02,ym1,ym2,z01,z02,zm1,zm2=build_pml_coeffs(er,mr,dt,dx,nx,ny,nz,pmlthick,device,dtype)
 
 
     x0EPhi1,x0EPhi2,x0HPhi1,x0HPhi2,xmEPhi1,xmEPhi2,xmHPhi1,xmHPhi2,y0EPhi1,y0EPhi2,y0HPhi1,y0HPhi2,ymEPhi1,ymEPhi2,ymHPhi1,ymHPhi2,z0EPhi1,z0EPhi2,z0HPhi1,z0HPhi2,zmEPhi1,zmEPhi2,zmHPhi1,zmHPhi2=build_pml_phi(x0,xm,y0,ym,z0,zm,nstep,PML,device)
 
     del x01,x02,xm1,xm2,y01,y02,ym1,ym2,z01,z02,zm1,zm2
-
-    print("per_nstep:"+str(per_nstep))
-    print("total step:"+str(nstep))
-    # print_field_shapes((Ex,Ey,Ez),(Hx,Hy,Hz),(x0EPhi1,x0EPhi2,x0HPhi1,x0HPhi2,xmEPhi1,xmEPhi2,xmHPhi1,xmHPhi2,y0EPhi1,y0EPhi2,y0HPhi1,y0HPhi2,ymEPhi1,ymEPhi2,ymHPhi1,ymHPhi2,z0EPhi1,z0EPhi2,z0HPhi1,z0HPhi2,zmEPhi1,zmEPhi2,zmHPhi1,zmHPhi2))
 
     if per_nstep==None:
         return (Ex,Ey,Ez),(Hx,Hy,Hz),(x0EPhi1,x0EPhi2,x0HPhi1,x0HPhi2,xmEPhi1,xmEPhi2,xmHPhi1,xmHPhi2,y0EPhi1,y0EPhi2,y0HPhi1,y0HPhi2,ymEPhi1,ymEPhi2,ymHPhi1,ymHPhi2,z0EPhi1,z0EPhi2,z0HPhi1,z0HPhi2,zmEPhi1,zmEPhi2,zmHPhi1,zmHPhi2)

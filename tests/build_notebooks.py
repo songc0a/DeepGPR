@@ -106,7 +106,7 @@ NOTEBOOKS["00_local_backend_and_contracts.ipynb"] = notebook(
             vu.record_check(
                 CHECKS,
                 "native ABI and required exports",
-                METADATA["native_abi"] == 4 and not missing_symbols,
+                METADATA["native_abi"] == 5 and not missing_symbols,
                 abi=METADATA["native_abi"],
                 missing_symbols=missing_symbols,
                 library=METADATA["native_library"],
@@ -1296,10 +1296,10 @@ NOTEBOOKS["07_long_run_stability.ipynb"] = notebook(
             """
             # Long-Run CPML Stability
 
-            Long 2D and 3D simulations exercise forward propagation, reverse-time CPML,
+            Long 2D and 3D simulations exercise forward propagation, reverse-mode CPML,
             float32 saved wavefields, and both material gradients for orders 2, 4, and 8.
-            Every available backend is tested and every returned field is checked for
-            finite values.
+            Initial fields and CPML memories are fixed in this FWI test, so validation
+            covers the returned fields and the material gradients requested by autograd.
             """
         ),
         code(BOOTSTRAP),
@@ -2142,14 +2142,21 @@ NOTEBOOKS["99_verification_summary.ipynb"] = notebook(
             """
             # Verification Summary
 
-            This notebook requires all component reports, rejects failed reports, and
-            displays skipped checks separately from required passing checks.
+            This notebook requires all component reports, rejects failed or stale
+            reports, and displays skipped checks separately from required passing checks.
             """
         ),
         code(BOOTSTRAP),
         code(
             r"""
             import json
+
+            current_metadata = vu.runtime_metadata(DeepGPR, "cpu")
+            freshness_keys = (
+                "native_abi",
+                "source_tree_sha256",
+                "native_library_sha256",
+            )
 
             expected_reports = [
                 "00_local_backend_and_contracts",
@@ -2173,6 +2180,20 @@ NOTEBOOKS["99_verification_summary.ipynb"] = notebook(
                 report = json.loads(path.read_text())
                 if report.get("overall_status") != "PASS":
                     raise AssertionError(f"Report failed: {path}")
+                report_metadata = report.get("metadata", {})
+                mismatches = {
+                    key: {
+                        "report": report_metadata.get(key),
+                        "current": current_metadata.get(key),
+                    }
+                    for key in freshness_keys
+                    if report_metadata.get(key) != current_metadata.get(key)
+                }
+                if mismatches:
+                    raise RuntimeError(
+                        f"Stale report {path}. Re-run its component notebook. "
+                        f"Metadata mismatches: {mismatches}"
+                    )
                 reports.append(report)
             """
         ),
@@ -2220,7 +2241,7 @@ NOTEBOOKS["99_verification_summary.ipynb"] = notebook(
                         **summary_metadata,
                     }
                 ],
-                {"repository_root": str(REPO_ROOT), "deepgpr_package": str(LOADED_PACKAGE)},
+                {**current_metadata, "repository_root": str(REPO_ROOT)},
             )
             """
         ),
