@@ -1,7 +1,14 @@
 
 import torch
 
-def design_fir_filter(cutoff: float, fs: float, numtaps: int) -> torch.Tensor:
+def design_fir_filter(
+    cutoff: float,
+    fs: float,
+    numtaps: int,
+    *,
+    device=None,
+    dtype: torch.dtype = torch.float32,
+) -> torch.Tensor:
     """Create a low-pass FIR filter with a Hamming window.
 
     Args:
@@ -9,7 +16,7 @@ def design_fir_filter(cutoff: float, fs: float, numtaps: int) -> torch.Tensor:
         fs: Sampling frequency of the input signal.
         numtaps: Number of FIR coefficients.
     """
-    n = torch.arange(numtaps, dtype=torch.float32)
+    n = torch.arange(numtaps, dtype=dtype, device=device)
     window = 0.54 - 0.46 * torch.cos(2 * torch.pi * n / (numtaps - 1))
     sinc = torch.sin(2 * torch.pi * (cutoff/fs) * (n - (numtaps-1)/2)) / (torch.pi * (n - (numtaps-1)/2))
     center = (numtaps-1) // 2
@@ -27,8 +34,9 @@ def apply_filter(data: torch.Tensor, fs: float, cutoff: float) -> torch.Tensor:
         cutoff: Cutoff frequency of the low-pass filter.
     """
     numtaps = int(1 * (fs / cutoff))
-    fir_coeff = design_fir_filter(cutoff, fs, numtaps)
-    fir_coeff = fir_coeff.to(data.device)
+    fir_coeff = design_fir_filter(
+        cutoff, fs, numtaps, device=data.device, dtype=data.dtype
+    )
 
     if data.ndim == 1:
         data_2d = data.view(1, 1, -1)
@@ -62,10 +70,9 @@ def hilbert_transform(data_in, p=1):
       p: Power applied to the output envelope.
   """
   ns, nt, nr = data_in.shape
-  transforms = torch.fft.fftn(data_in,dim=1)
-  #print(transforms.shape)
+  transforms = torch.fft.fft(data_in, dim=1)
   transforms[:,1:nt//2,:]      *= 2.0
   transforms[:,nt//2 + 1: nt,:]  = 0+0j
-  transforms[:,0,:] = 0;
-  data_out = torch.abs(torch.fft.ifftn(transforms,dim=1))**p
+  transforms[:,0,:] = 0
+  data_out = torch.abs(torch.fft.ifft(transforms, dim=1))**p
   return data_out

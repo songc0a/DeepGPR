@@ -38,19 +38,8 @@ def _normalize_grid_spacing(value):
         raise ValueError("dx, dy, and dz must be finite positive scalars.")
     return spacing
 
-def _require_finite_tensor(name, tensor):
-    """Validate that a tensor contains only finite values.
-
-    Args:
-        name: Name used in the error message.
-        tensor: Tensor to check, or None to skip the check.
-    """
-    if tensor is not None and not torch.isfinite(tensor).all().item():
-        raise ValueError(f"`{name}` contains NaN or Inf values.")
-
-
-def _warn_if_locations_in_pml(name, locations, shape, pml):
-    """Warn when acquisition coordinates overlap DeepGPR's in-model CPML."""
+def _locations_in_pml(locations, shape, pml):
+    """Return a mask for acquisition coordinates that overlap CPML."""
     inside = torch.zeros(locations.shape[:-1], dtype=torch.bool, device=locations.device)
     for axis, size in enumerate(shape):
         low = int(pml[2 * axis])
@@ -59,8 +48,11 @@ def _warn_if_locations_in_pml(name, locations, shape, pml):
             inside |= locations[..., axis] <= low
         if high > 0:
             inside |= locations[..., axis] >= size - high
+    return inside
 
-    count = int(inside.sum().item())
+
+def _warn_for_pml_location_count(name, count):
+    """Emit the standard acquisition-in-CPML warning for a known count."""
     if count:
         warnings.warn(
             f"{count} {name} coordinate(s) lie inside CPML. DeepGPR's CPML occupies "
@@ -96,16 +88,8 @@ def initialization(device, er,se,mr,source_amplitudes,source_location,receiver_l
         raise TypeError("dt must be a finite positive scalar.") from exc
     if not math.isfinite(dt) or dt <= 0.0:
         raise ValueError("dt must be a finite positive scalar.")
-    _require_finite_tensor("er", er)
-    _require_finite_tensor("se", se)
-    _require_finite_tensor("mr", mr)
-    _require_finite_tensor("source_amplitudes", source_amplitudes)
-
-    if er.min()<1 :
-        raise ValueError('The values of epsilon is incorrect.(should be greater than 1)')
-    if se.min()<0:
-        raise ValueError('The values of sigma is incorrect.(should be non-negative)')
-    
+    if not torch.is_tensor(er) or not torch.is_tensor(se):
+        raise TypeError("er and se must be PyTorch tensors.")
     if len(er.shape) == 2:
         er = er.reshape(*er.shape, 1)
     elif len(er.shape) != 3:
@@ -122,65 +106,33 @@ def initialization(device, er,se,mr,source_amplitudes,source_location,receiver_l
         elif len(mr.shape) != 3:
             raise ValueError('The shape of mr should be 2-d or 3-d.')
 
-    if er.shape == se.shape:
-        nx=er.shape[0]
-        ny=er.shape[1]
-        nz=er.shape[2]
-        if nz==1:
-            mode=2
-        else:
-            mode=3
-        er=er.to(device=device, dtype=dtype)
-        se=se.to(device=device, dtype=dtype)
-        if mr is None:
-            mr=torch.ones_like(er, device=device)
-        else:
-            if mr.shape == er.shape:
-                mr=mr.to(device=device, dtype=dtype)
-            else:
-                raise ValueError('The shape of mr should be the same as epsilon and sigma.')
-    else:
+    if er.shape != se.shape:
         raise ValueError('The shape of epsilon and sigma should be the same.')
-
-    if source_location.shape[0] == receiver_location.shape[0]:
-        source_location=source_location.to(torch.int)
-        receiver_location=receiver_location.to(torch.int)
-
-        source_check = (source_location >= 0).all()
-        receiver_check = (receiver_location >= 0).all()
-
-        source_check &= (source_location[..., 0] < nx).all()
-        source_check &= (source_location[..., 1] < ny).all()
-        source_check &= (source_location[..., 2] < nz).all()
-
-        if not (source_check):
-            raise ValueError(
-                "Error: Source coordinates out of range! "
-                f"Valid ranges are x∈[0,{nx}), y∈[0,{ny}), z∈[0,{nz})"
-            )
-        
-        receiver_check &= (receiver_location[..., 0] < nx).all()
-        receiver_check &= (receiver_location[..., 1] < ny).all()
-        receiver_check &= (receiver_location[..., 2] < nz).all()
-
-        if not (receiver_check):
-            raise ValueError(
-                "Error: Receiver coordinates out of range! "
-                f"Valid ranges are x∈[0,{nx}), y∈[0,{ny}), z∈[0,{nz})"
-            )
-        nstep=source_location.shape[0]
-
-        nsr=source_location.shape[1]
-        nrx=receiver_location.shape[1]
-        
-        source_location=source_location.to(device)
-        receiver_location=receiver_location.to(device)
+    nx, ny, nz = er.shape
+    mode = 2 if nz == 1 else 3
+    er=er.to(device=device, dtype=dtype)
+    se=se.to(device=device, dtype=dtype)
+    if mr is None:
+        mr=torch.ones_like(er, device=device)
+    elif mr.shape == er.shape:
+        mr=mr.to(device=device, dtype=dtype)
     else:
-        raise ValueError('The first dimension (nstep) of source_location and receiver_location should be the same.')
-    
-    if mr.min() <= 0:
-        raise ValueError('The values of mr are incorrect (must be positive).')
+        raise ValueError('The shape of mr should be the same as epsilon and sigma.')
 
+    if source_location.shape[0] != receiver_location.shape[0]:
+        raise ValueError('The first dimension (nstep) of source_location and receiver_location should be the same.')
+    if source_location.ndim != 3 or receiver_location.ndim != 3:
+        raise ValueError("source_location and receiver_location must have shape (nstep, count, 3).")
+    if source_location.shape[2] != 3 or receiver_location.shape[2] != 3:
+        raise ValueError("The last dimension of source_location and receiver_location must be 3.")
+    nstep=source_location.shape[0]
+    nsr=source_location.shape[1]
+    nrx=receiver_location.shape[1]
+    source_location=source_location.to(device=device, dtype=torch.int32).contiguous()
+    receiver_location=receiver_location.to(device=device, dtype=torch.int32).contiguous()
+
+    if not torch.is_tensor(source_amplitudes):
+        raise TypeError("source_amplitudes must be a PyTorch tensor.")
     if source_amplitudes.ndim not in (2, 3):
         raise ValueError('source_amplitudes must have shape (num_waveforms, nt) or (num_waveforms, nt, 1).')
     if source_amplitudes.ndim == 2:
@@ -197,15 +149,11 @@ def initialization(device, er,se,mr,source_amplitudes,source_location,receiver_l
         source_amplitudes=source_amplitudes.repeat(nsr,1,1).contiguous()
         print('Tips: The number of source waveforms is 1, but the number of sources is ',nsr,'. The source waveform is repeated for all sources.')
 
-    check_cfl(spacing, dt,nx,ny,nz,er=er,mr=mr,fdtd_order=fdtd_order)
-
     nt=source_amplitudes.shape[1]
-    
-
     pmlthick=pmlthick_revert(pmlthick,er)
     if pmlthick.numel() != 6:
         raise ValueError("pmlthick must contain six boundary thicknesses.")
-    pml_values = [int(value) for value in pmlthick.cpu().tolist()]
+    pml_values = [int(value) for value in pmlthick.tolist()]
     if any(value < 0 for value in pml_values):
         raise ValueError("PML thicknesses must be non-negative.")
     for axis, size in enumerate((nx, ny, nz)):
@@ -215,16 +163,71 @@ def initialization(device, er,se,mr,source_amplitudes,source_location,receiver_l
                 f"PML thicknesses on axis {axis} leave no physical interior: "
                 f"low={low}, high={high}, size={size}."
             )
-    _warn_if_locations_in_pml("source", source_location, (nx, ny, nz), pml_values)
-    _warn_if_locations_in_pml("receiver", receiver_location, (nx, ny, nz), pml_values)
-    ere=F.pad(er, (0, 1, 0, 1, 0, 1)).to(dtype)
-    see=F.pad(se, (0, 1, 0, 1, 0, 1)).to(dtype)
-    mr=F.pad(mr, (0, 1, 0, 1, 0, 1)).to(dtype)
+
+    shape_tensor = torch.tensor((nx, ny, nz), dtype=torch.int32, device=device)
+    source_valid = ((source_location >= 0) & (source_location < shape_tensor)).all()
+    receiver_valid = ((receiver_location >= 0) & (receiver_location < shape_tensor)).all()
+    source_in_pml = _locations_in_pml(source_location, (nx, ny, nz), pml_values)
+    receiver_in_pml = _locations_in_pml(receiver_location, (nx, ny, nz), pml_values)
+    stats = torch.stack(
+        (
+            torch.isfinite(er).all().to(dtype),
+            torch.isfinite(se).all().to(dtype),
+            torch.isfinite(mr).all().to(dtype),
+            torch.isfinite(source_amplitudes).all().to(dtype),
+            er.amin(),
+            se.amin(),
+            mr.amin(),
+            (er.detach() * mr.detach()).amin(),
+            source_valid.to(dtype),
+            receiver_valid.to(dtype),
+            source_in_pml.sum().to(dtype),
+            receiver_in_pml.sum().to(dtype),
+        )
+    ).detach().cpu().tolist()
+    er_finite, se_finite, mr_finite, source_finite = (bool(value) for value in stats[:4])
+    er_min, se_min, mr_min, min_er_mr = stats[4:8]
+    source_valid, receiver_valid = (bool(value) for value in stats[8:10])
+    source_pml_count, receiver_pml_count = (int(value) for value in stats[10:12])
+
+    for name, finite in (
+        ("er", er_finite), ("se", se_finite), ("mr", mr_finite),
+        ("source_amplitudes", source_finite),
+    ):
+        if not finite:
+            raise ValueError(f"`{name}` contains NaN or Inf values.")
+    if er_min < 1:
+        raise ValueError('The values of epsilon is incorrect.(should be greater than 1)')
+    if se_min < 0:
+        raise ValueError('The values of sigma is incorrect.(should be non-negative)')
+    if mr_min <= 0:
+        raise ValueError('The values of mr are incorrect (must be positive).')
+    if not source_valid:
+        raise ValueError(
+            "Error: Source coordinates out of range! "
+            f"Valid ranges are x∈[0,{nx}), y∈[0,{ny}), z∈[0,{nz})"
+        )
+    if not receiver_valid:
+        raise ValueError(
+            "Error: Receiver coordinates out of range! "
+            f"Valid ranges are x∈[0,{nx}), y∈[0,{ny}), z∈[0,{nz})"
+        )
+
+    check_cfl(
+        spacing, dt, nx, ny, nz, fdtd_order=fdtd_order,
+        _material_min_er_mr=min_er_mr,
+    )
+    _warn_for_pml_location_count("source", source_pml_count)
+    _warn_for_pml_location_count("receiver", receiver_pml_count)
+
+    ere=F.pad(er, (0, 1, 0, 1, 0, 1))
+    see=F.pad(se, (0, 1, 0, 1, 0, 1))
+    mr=F.pad(mr, (0, 1, 0, 1, 0, 1))
 
     return er,se,nx,ny,nz,nt,nstep,nsr,nrx,ere,see,mr,mode,dtype,pmlthick,source_amplitudes
 
 
-def check_cfl(dx, dt, nx,ny,nz,er=None,mr=None,fdtd_order=2):
+def check_cfl(dx, dt, nx,ny,nz,er=None,mr=None,fdtd_order=2, _material_min_er_mr=None):
     """Check the CFL stability condition for the simulation grid.
 
     Args:
@@ -262,7 +265,12 @@ def check_cfl(dx, dt, nx,ny,nz,er=None,mr=None,fdtd_order=2):
         raise ValueError("At least one model dimension must contain more than one cell.")
 
     material_factor = 1.0
-    if er is not None and mr is not None:
+    if _material_min_er_mr is not None:
+        min_er_mr = float(_material_min_er_mr)
+        if not math.isfinite(min_er_mr) or min_er_mr <= 0.0:
+            raise ValueError("epsilon_r * mu_r must be finite and positive for the CFL check.")
+        material_factor = math.sqrt(min_er_mr)
+    elif er is not None and mr is not None:
         min_er_mr = float((er.detach() * mr.detach()).amin().item())
         if not math.isfinite(min_er_mr) or min_er_mr <= 0.0:
             raise ValueError("epsilon_r * mu_r must be finite and positive for the CFL check.")
@@ -298,7 +306,7 @@ def pmlthick_revert(p, er):
             raise ValueError(f"Unsupported list length: {len(p)}. Must be 4 or 6.")
     
     elif isinstance(p, torch.Tensor):
-        return p.to(dtype=torch.int32)
+        return p.detach().to(device="cpu", dtype=torch.int32)
     
     else:
         raise TypeError(f"Unsupported type: {type(p)}")
@@ -478,8 +486,7 @@ def build_pml_coeffs(eps_r,mu_r,dt,dx,nx,ny,nz,pmlthick,device,dtype):
     dx, dy, dz = _normalize_grid_spacing(dx)
     eps_r_fixed = eps_r.detach()
     mu_r_fixed = mu_r.detach()
-    averageer=torch.zeros(6, device=device, dtype=dtype)
-    averagemr=torch.zeros(6, device=device, dtype=dtype)
+    pml = tuple(int(value) for value in pmlthick.tolist())
     lencfs=1
     x0 = torch.empty(0)
     xm = torch.empty(0)
@@ -499,59 +506,59 @@ def build_pml_coeffs(eps_r,mu_r,dt,dx,nx,ny,nz,pmlthick,device,dtype):
     z02 = torch.empty(0)
     zm1 = torch.empty(0)
     zm2 = torch.empty(0)
-    if pmlthick[0]>0:
-        x0=torch.tensor((pmlthick[0],0,pmlthick[0],0,ny,0,nz), device=device, dtype=torch.int)
-        averageer[0]=eps_r_fixed[x0[1],:ny,:nz].mean()
-        averagemr[0]=mu_r_fixed[x0[1],:ny,:nz].mean()
+    if pml[0]>0:
+        x0=torch.tensor((pml[0],0,pml[0],0,ny,0,nz), dtype=torch.int)
+        average_eps=eps_r_fixed[0,:ny,:nz].mean()
+        average_mu=mu_r_fixed[0,:ny,:nz].mean()
         CFS0=CFS(device=device)
-        x01=torch.zeros((4,lencfs,pmlthick[0]), device=device, dtype=dtype)
-        x02=torch.zeros((4,lencfs,pmlthick[0]), device=device, dtype=dtype)
-        calculate_pml_update_coeffs(CFS0,x01,x02, averageer[0], averagemr[0], dt,dx,pmlthick[0])
+        x01=torch.zeros((4,lencfs,pml[0]), device=device, dtype=dtype)
+        x02=torch.zeros((4,lencfs,pml[0]), device=device, dtype=dtype)
+        calculate_pml_update_coeffs(CFS0,x01,x02, average_eps, average_mu, dt,dx,pml[0])
 
-    if pmlthick[1]>0:
-        xm=torch.tensor((pmlthick[1],nx-pmlthick[1],nx,0,ny,0,nz), device=device, dtype=torch.int)
-        averageer[1]=eps_r_fixed[xm[1],:ny,:nz].mean()
-        averagemr[1]=mu_r_fixed[xm[1],:ny,:nz].mean()
+    if pml[1]>0:
+        xm=torch.tensor((pml[1],nx-pml[1],nx,0,ny,0,nz), dtype=torch.int)
+        average_eps=eps_r_fixed[nx-pml[1],:ny,:nz].mean()
+        average_mu=mu_r_fixed[nx-pml[1],:ny,:nz].mean()
         CFS1=CFS(device=device)
-        xm1=torch.zeros((4,lencfs,pmlthick[1]), device=device, dtype=dtype)
-        xm2=torch.zeros((4,lencfs,pmlthick[1]), device=device, dtype=dtype)
-        calculate_pml_update_coeffs(CFS1,xm1,xm2, averageer[1], averagemr[1], dt,dx,pmlthick[1])
+        xm1=torch.zeros((4,lencfs,pml[1]), device=device, dtype=dtype)
+        xm2=torch.zeros((4,lencfs,pml[1]), device=device, dtype=dtype)
+        calculate_pml_update_coeffs(CFS1,xm1,xm2, average_eps, average_mu, dt,dx,pml[1])
 
-    if pmlthick[2]>0:
-        y0=torch.tensor((pmlthick[2],0,nx,0,pmlthick[2],0,nz), device=device, dtype=torch.int)
-        averageer[2]=eps_r_fixed[:nx,y0[3],:nz].mean()
-        averagemr[2]=mu_r_fixed[:nx,y0[3],:nz].mean()
+    if pml[2]>0:
+        y0=torch.tensor((pml[2],0,nx,0,pml[2],0,nz), dtype=torch.int)
+        average_eps=eps_r_fixed[:nx,0,:nz].mean()
+        average_mu=mu_r_fixed[:nx,0,:nz].mean()
         CFS2=CFS(device=device)
-        y01=torch.zeros((4,lencfs,pmlthick[2]), device=device, dtype=dtype)
-        y02=torch.zeros((4,lencfs,pmlthick[2]), device=device, dtype=dtype)
-        calculate_pml_update_coeffs(CFS2,y01,y02, averageer[2], averagemr[2], dt,dy,pmlthick[2])
+        y01=torch.zeros((4,lencfs,pml[2]), device=device, dtype=dtype)
+        y02=torch.zeros((4,lencfs,pml[2]), device=device, dtype=dtype)
+        calculate_pml_update_coeffs(CFS2,y01,y02, average_eps, average_mu, dt,dy,pml[2])
 
-    if pmlthick[3]>0:
-        ym=torch.tensor((pmlthick[3],0,nx,ny-pmlthick[3],ny,0,nz), device=device, dtype=torch.int)
-        averageer[3]=eps_r_fixed[:nx,ym[3],:nz].mean()
-        averagemr[3]=mu_r_fixed[:nx,ym[3],:nz].mean()
+    if pml[3]>0:
+        ym=torch.tensor((pml[3],0,nx,ny-pml[3],ny,0,nz), dtype=torch.int)
+        average_eps=eps_r_fixed[:nx,ny-pml[3],:nz].mean()
+        average_mu=mu_r_fixed[:nx,ny-pml[3],:nz].mean()
         CFS3=CFS(device=device)
-        ym1=torch.zeros((4,lencfs,pmlthick[3]), device=device, dtype=dtype)
-        ym2=torch.zeros((4,lencfs,pmlthick[3]), device=device, dtype=dtype)
-        calculate_pml_update_coeffs(CFS3,ym1,ym2, averageer[3], averagemr[3], dt,dy,pmlthick[3])
+        ym1=torch.zeros((4,lencfs,pml[3]), device=device, dtype=dtype)
+        ym2=torch.zeros((4,lencfs,pml[3]), device=device, dtype=dtype)
+        calculate_pml_update_coeffs(CFS3,ym1,ym2, average_eps, average_mu, dt,dy,pml[3])
 
-    if pmlthick[4]>0:
-        z0=torch.tensor((pmlthick[4],0,nx,0,ny,0,pmlthick[4]), device=device, dtype=torch.int)
-        averageer[4]=eps_r_fixed[:nx,:ny,z0[5]].mean()
-        averagemr[4]=mu_r_fixed[:nx,:ny,z0[5]].mean()
+    if pml[4]>0:
+        z0=torch.tensor((pml[4],0,nx,0,ny,0,pml[4]), dtype=torch.int)
+        average_eps=eps_r_fixed[:nx,:ny,0].mean()
+        average_mu=mu_r_fixed[:nx,:ny,0].mean()
         CFS4=CFS(device=device)
-        z01=torch.zeros((4,lencfs,pmlthick[4]), device=device, dtype=dtype)
-        z02=torch.zeros((4,lencfs,pmlthick[4]), device=device, dtype=dtype)
-        calculate_pml_update_coeffs(CFS4,z01,z02, averageer[4], averagemr[4], dt,dz,pmlthick[4])
+        z01=torch.zeros((4,lencfs,pml[4]), device=device, dtype=dtype)
+        z02=torch.zeros((4,lencfs,pml[4]), device=device, dtype=dtype)
+        calculate_pml_update_coeffs(CFS4,z01,z02, average_eps, average_mu, dt,dz,pml[4])
 
-    if pmlthick[5]>0:
-        zm=torch.tensor((pmlthick[5],0,nx,0,ny,nz-pmlthick[5],nz), device=device, dtype=torch.int)
-        averageer[5]=eps_r_fixed[:nx,:ny,zm[5]].mean()
-        averagemr[5]=mu_r_fixed[:nx,:ny,zm[5]].mean()
+    if pml[5]>0:
+        zm=torch.tensor((pml[5],0,nx,0,ny,nz-pml[5],nz), dtype=torch.int)
+        average_eps=eps_r_fixed[:nx,:ny,nz-pml[5]].mean()
+        average_mu=mu_r_fixed[:nx,:ny,nz-pml[5]].mean()
         CFS5=CFS(device=device)
-        zm1=torch.zeros((4,lencfs,pmlthick[5]), device=device, dtype=dtype)
-        zm2=torch.zeros((4,lencfs,pmlthick[5]), device=device, dtype=dtype)
-        calculate_pml_update_coeffs(CFS5,zm1,zm2, averageer[5], averagemr[5], dt,dz,pmlthick[5])
+        zm1=torch.zeros((4,lencfs,pml[5]), device=device, dtype=dtype)
+        zm2=torch.zeros((4,lencfs,pml[5]), device=device, dtype=dtype)
+        calculate_pml_update_coeffs(CFS5,zm1,zm2, average_eps, average_mu, dt,dz,pml[5])
     return x0,xm,y0,ym,z0,zm,x01,x02,xm1,xm2,y01,y02,ym1,ym2,z01,z02,zm1,zm2
 
 

@@ -1,7 +1,7 @@
 #ifndef DEEPGPR_NATIVE_API_H
 #define DEEPGPR_NATIVE_API_H
 
-#define DEEPGPR_ABI_VERSION 5
+#define DEEPGPR_ABI_VERSION 6
 
 #if defined(_WIN32)
 #if defined(DEEPGPR_BUILD)
@@ -42,10 +42,11 @@ DEEPGPR_API void forward(
     const float* z0_h_coeff, const float* zm_h_coeff,
     float dt, int nt, int nshot, int nreceiver,
     float dx, float dy, float dz,
-    const int* receiver_location, float* receiver_data,
+    const int* receiver_location, float* receiver_data, int receiver_component,
     int nx_fields, int ny_fields, int nz_fields, int nsource,
     const int* source_location, const float* source_waveform,
-    int source_component, int sampling_interval, int fwi_mode, int storage_type);
+    int source_component, int sampling_interval, int fwi_mode, int storage_type,
+    int save_model_history, int use_async_offload);
 
 DEEPGPR_API void backward(
     const float* eps_r_pad, const float* sigma_pad, const float* mu_r_pad,
@@ -82,7 +83,7 @@ DEEPGPR_API void backward(
     float* grad_source, int source_requires_grad,
     float* grad_eps_r, float* grad_sigma,
     int eps_r_requires_grad, int sigma_requires_grad,
-    int sampling_interval, int fwi_mode, int storage_type);
+    int sampling_interval, int fwi_mode, int storage_type, int use_async_offload);
 
 #ifdef __cplusplus
 }

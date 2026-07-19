@@ -118,7 +118,7 @@ def runtime_metadata(deepgpr: Any, device: torch.device | str) -> dict[str, Any]
     library = deepgpr.get_deepgpr_lib(device)
     abi = int(library.deepgpr_abi_version())
     if abi != 5:
-        raise RuntimeError(f"Expected native ABI 5, received ABI {abi}.")
+        raise RuntimeError(f"Expected native ABI 6, received ABI {abi}.")
 
     metadata: dict[str, Any] = {
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),

@@ -234,7 +234,7 @@ The backward solver applies the exact reverse-mode transpose of each executed op
 
 CPML is treated as a fixed numerical boundary. Its boundary material averages are explicitly detached, and CPML cells are excluded from the returned material gradients. This separation must be retained when optimizing a model.
 
-Use `model_gradient_sampling_interval=1` and `wavefield_storage_dtype=torch.float32` for a directional derivative check in the physical model region. Temporal subsampling and lower-precision storage deliberately approximate the gradient. Run [the gradient-check notebook](examples/4.GradientCheck.ipynb) after rebuilding the native ABI 5 libraries.
+Use `model_gradient_sampling_interval=1` and `wavefield_storage_dtype=torch.float32` for a directional derivative check in the physical model region. Temporal subsampling and lower-precision storage deliberately approximate the gradient. Run [the gradient-check notebook](examples/4.GradientCheck.ipynb) after rebuilding the native ABI 6 libraries.
 
 ## CPU Backend Build
 

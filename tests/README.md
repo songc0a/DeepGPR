@@ -3,7 +3,7 @@
 This directory contains the fast numerical unit tests and executable notebook
 verification suite for the repository-local DeepGPR implementation. Every test
 entry point places `../src` first on `sys.path`, verifies the local package and
-native library where applicable, and requires native ABI 5. An installed
+native library where applicable, and requires native ABI 6. An installed
 DeepGPR package is neither used nor required.
 
 Run the fast terminal suite with:
@@ -80,3 +80,26 @@ Use identical arguments, power limit, application clocks, PyTorch version, and
 native build when comparing revisions. Board power is diagnostic metadata, not
 an optimization objective; memory-bound FDTD kernels may reach their best
 runtime below the GPU's maximum power limit.
+
+`benchmark_runtime.py` provides the same deterministic case on CPU or CUDA,
+reports peak memory, saves outputs and gradients, and can compare a run with a
+saved reference:
+
+```bash
+OMP_NUM_THREADS=4 OMP_DYNAMIC=FALSE python tests/benchmark_runtime.py \
+  --device cpu --warmup 2 --repeats 7 --save-result cpu_result.pt
+python tests/benchmark_runtime.py --device cuda:0 --nx 384 --ny 256 \
+  --nt 800 --shots 4 --receivers 32 --warmup 2 --repeats 7 \
+  --torch-profile deepgpr_trace.json --save-result cuda_result.pt
+python tests/benchmark_runtime.py --device cuda:0 --reference cuda_reference.pt
+```
+
+Use NVIDIA Nsight tools for native timelines and kernel metrics when they are
+available on the CUDA host:
+
+```bash
+nsys profile -o deepgpr_nsys --force-overwrite=true \
+  python tests/benchmark_runtime.py --device cuda:0 --warmup 1 --repeats 1
+ncu --set full --target-processes all -o deepgpr_ncu \
+  python tests/benchmark_runtime.py --device cuda:0 --warmup 0 --repeats 1
+```

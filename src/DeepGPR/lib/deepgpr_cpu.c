@@ -8,10 +8,14 @@
 
 #if defined(_OPENMP) || defined(DEEPGPR_USE_OPENMP)
 #include <omp.h>
-#define DEEPGPR_OMP_PARALLEL_FOR _Pragma("omp parallel for schedule(static)")
+#define DEEPGPR_OMP_PARALLEL _Pragma("omp parallel")
+#define DEEPGPR_OMP_PARALLEL_FOR _Pragma("omp for schedule(static)")
+#define DEEPGPR_OMP_STANDALONE_PARALLEL_FOR _Pragma("omp parallel for schedule(static)")
 #define DEEPGPR_OMP_ATOMIC_UPDATE _Pragma("omp atomic update")
 #else
+#define DEEPGPR_OMP_PARALLEL
 #define DEEPGPR_OMP_PARALLEL_FOR
+#define DEEPGPR_OMP_STANDALONE_PARALLEL_FOR
 #define DEEPGPR_OMP_ATOMIC_UPDATE
 #endif
 
@@ -356,7 +360,7 @@ static void build_update_coeffs_cpu(const float* RESTRICT eps_r_pad, const float
     long long ny_nz = (long long)NY_FIELDS * NZ_FIELDS;
     long long idx;
 
-    DEEPGPR_OMP_PARALLEL_FOR
+    DEEPGPR_OMP_STANDALONE_PARALLEL_FOR
     for (idx = 0; idx < total; ++idx) {
         long long i = idx / ny_nz;
         long long rem = idx % ny_nz;
@@ -387,7 +391,7 @@ static void build_update_coeffs_cpu(const float* RESTRICT eps_r_pad, const float
 }
 
 /*
- * Store receiver samples for all six field components.
+ * Store receiver samples for the requested electric-field component.
  *
  * Parameters:
  *   step: Number of shots or simulations in the batch.
@@ -404,8 +408,7 @@ static void sample_receivers_cpu(
     int step, int NRX, int iteration,
     const int* RESTRICT receiverlocation, float* RESTRICT rxs,
     const float* RESTRICT Ex, const float* RESTRICT Ey, const float* RESTRICT Ez,
-    const float* RESTRICT Hx, const float* RESTRICT Hy, const float* RESTRICT Hz,
-    int NX, int NY, int NZ, int N_ITER)
+    int NX, int NY, int NZ, int N_ITER, int receiver_component)
 {
     long long field_stride = (long long)NX * NY * NZ;
     long long total = (long long)step * NRX;
@@ -421,12 +424,8 @@ static void sample_receivers_cpu(
 
         long long id4 = (long long)s * field_stride + i * NY * NZ + j * NZ + k;
 
-        rxs[((s * 6 + 0) * N_ITER + iteration) * NRX + rx] = Ex[id4];
-        rxs[((s * 6 + 1) * N_ITER + iteration) * NRX + rx] = Ey[id4];
-        rxs[((s * 6 + 2) * N_ITER + iteration) * NRX + rx] = Ez[id4];
-        rxs[((s * 6 + 3) * N_ITER + iteration) * NRX + rx] = Hx[id4];
-        rxs[((s * 6 + 4) * N_ITER + iteration) * NRX + rx] = Hy[id4];
-        rxs[((s * 6 + 5) * N_ITER + iteration) * NRX + rx] = Hz[id4];
+        const float* field = receiver_component == 0 ? Ex : (receiver_component == 1 ? Ey : Ez);
+        rxs[((long long)s * N_ITER + iteration) * NRX + rx] = field[id4];
     }
 }
 
@@ -1472,13 +1471,10 @@ static void accumulate_material_gradients_cpu(
     long long total_cells = sx * sy * sz;
     long long snap_stride = (long long)step * total_cells;
     long long component_stride = (long long)nt_saved * snap_stride;
-    long long total_work = (long long)step * total_cells;
-    long long work;
+    long long idx;
 
     DEEPGPR_OMP_PARALLEL_FOR
-    for (work = 0; work < total_work; ++work) {
-        int s = (int)(work / total_cells);
-        long long idx = work % total_cells;
+    for (idx = 0; idx < total_cells; ++idx) {
         long long ix = idx / (sy * sz);
         long long rem = idx % (sy * sz);
         long long iy = rem / sz;
@@ -1494,50 +1490,49 @@ static void accumulate_material_gradients_cpu(
             continue;
         }
 
-        long long e_stride = (long long)NX * NY * NZ;
-        long long idx_E = (long long)s * e_stride + ix * NY * NZ + iy * NZ + iz;
         long long material_idx = ix * NY * NZ + iy * NZ + iz;
         float local_grader = 0.0f;
         float local_gradse = 0.0f;
-
-        long long base_idx = (long long)s * total_cells + idx;
+        long long e_stride = (long long)NX * NY * NZ;
         int components = (fwi_mode == 3) ? 3 : 1;
-        float adjoint_values[3];
-        adjoint_values[0] = lambda_ex[idx_E];
-        adjoint_values[1] = lambda_ey[idx_E];
-        adjoint_values[2] = lambda_ez[idx_E];
 
-        for (int c = 0; c < components; ++c) {
-            long long comp_offset = (fwi_mode == 3) ? (long long)c * component_stride : 0;
-            long long saved_idx = comp_offset + (long long)(i / S) * snap_stride + base_idx;
-            float e_old = load_wavefield_value(E_saved, saved_idx, storage_type);
-            float rhs = load_wavefield_value(R_saved, saved_idx, storage_type);
-            float adjoint_val = adjoint_values[(fwi_mode == 3) ? c : 2];
-            float grad_ca = adjoint_val * e_old * (float)sample_weight;
-            float grad_cb = adjoint_val * rhs * (float)sample_weight;
-            float ca_value = ca[material_idx];
-            float cb_value = cb[material_idx];
+        for (int s = 0; s < step; ++s) {
+            long long idx_E = (long long)s * e_stride + material_idx;
+            long long base_idx = (long long)s * total_cells + idx;
+            float adjoint_values[3] = {
+                lambda_ex[idx_E], lambda_ey[idx_E], lambda_ez[idx_E]
+            };
 
-            if (sigma_pad[material_idx] <= 100.0f) {
-                if (eps_r_requires_grad == 1) {
-                    float dca_der = E0 * (1.0f - ca_value) * cb_value / dt;
-                    float dcb_der = -E0 * cb_value * cb_value / dt;
-                    local_grader += grad_ca * dca_der + grad_cb * dcb_der;
-                }
-                if (sigma_requires_grad == 1) {
-                    float dca_dse = -0.5f * (1.0f + ca_value) * cb_value;
-                    float dcb_dse = -0.5f * cb_value * cb_value;
-                    local_gradse += grad_ca * dca_dse + grad_cb * dcb_dse;
+            for (int c = 0; c < components; ++c) {
+                long long comp_offset = (fwi_mode == 3) ? (long long)c * component_stride : 0;
+                long long saved_idx = comp_offset + (long long)(i / S) * snap_stride + base_idx;
+                float e_old = load_wavefield_value(E_saved, saved_idx, storage_type);
+                float rhs = load_wavefield_value(R_saved, saved_idx, storage_type);
+                float adjoint_val = adjoint_values[(fwi_mode == 3) ? c : 2];
+                float grad_ca = adjoint_val * e_old * (float)sample_weight;
+                float grad_cb = adjoint_val * rhs * (float)sample_weight;
+                float ca_value = ca[material_idx];
+                float cb_value = cb[material_idx];
+
+                if (sigma_pad[material_idx] <= 100.0f) {
+                    if (eps_r_requires_grad == 1) {
+                        float dca_der = E0 * (1.0f - ca_value) * cb_value / dt;
+                        float dcb_der = -E0 * cb_value * cb_value / dt;
+                        local_grader += grad_ca * dca_der + grad_cb * dcb_der;
+                    }
+                    if (sigma_requires_grad == 1) {
+                        float dca_dse = -0.5f * (1.0f + ca_value) * cb_value;
+                        float dcb_dse = -0.5f * cb_value * cb_value;
+                        local_gradse += grad_ca * dca_dse + grad_cb * dcb_dse;
+                    }
                 }
             }
         }
 
         if (eps_r_requires_grad == 1) {
-            DEEPGPR_OMP_ATOMIC_UPDATE
             grad_eps_r[idx] += local_grader;
         }
         if (sigma_requires_grad == 1) {
-            DEEPGPR_OMP_ATOMIC_UPDATE
             grad_sigma[idx] += local_gradse;
         }
     }
@@ -1599,25 +1594,30 @@ DEEPGPR_API void forward(const float* RESTRICT eps_r_pad, const float* RESTRICT 
             const float* RESTRICT y0HR,const float* RESTRICT ymHR, const float* RESTRICT z0HR,const float* RESTRICT zmHR,
 
              float dt, int nt, int step, int nrx, float dx, float dy, float dz,
-             const int* RESTRICT receiverlocation, float* RESTRICT rxs,
+             const int* RESTRICT receiverlocation, float* RESTRICT rxs, int receiver_component,
 
              int NX_FIELDS, int NY_FIELDS, int NZ_FIELDS, int nsrc,
              const int* RESTRICT sourcelocation, const float* RESTRICT srcwaveforms, int polarisation,
-             int sampling_interval, int fwi_mode, int storage_type)
+             int sampling_interval, int fwi_mode, int storage_type, int save_model_history,
+             int use_async_offload)
 {
+    (void)use_async_offload;
     int fdtd_order = g_fdtd_order;
     int e_components = (fwi_mode == 3) ? 3 : 1;
+    int has_cpml = pml0 || pml1 || pml2 || pml3 || pml4 || pml5;
     int nt_saved = (nt + sampling_interval - 1) / sampling_interval;
     long long snap_size = (long long)step * (NX_FIELDS - 1) * (NY_FIELDS - 1) * (NZ_FIELDS - 1);
     long long component_stride = (long long)nt_saved * snap_size;
     float* exact_Eold = NULL;
 
-    if (storage_type != WAVEFIELD_FLOAT32) {
+    if (save_model_history && storage_type != WAVEFIELD_FLOAT32) {
         exact_Eold = (float*)malloc((size_t)e_components * (size_t)snap_size * sizeof(float));
     }
 
     build_update_coeffs_cpu(eps_r_pad, sigma_pad, mu_r_pad, ce_hist, ce_curl, ce_rhs, ch_hist, ch_curl, ch_rhs, NX_FIELDS, NY_FIELDS, NZ_FIELDS, dt, dx);
 
+    DEEPGPR_OMP_PARALLEL
+    {
     for (int i = 0; i < nt; i++) {
         if (i % sampling_interval == 0) {
             int t_saved = i / sampling_interval;
@@ -1634,24 +1634,28 @@ DEEPGPR_API void forward(const float* RESTRICT eps_r_pad, const float* RESTRICT 
 
         update_h_cpu(ch_hist, ch_curl, Ex, Ey, Ez, Hx, Hy, Hz,
             step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, dx, dy, dz, fdtd_order);
-        cpml_h_cpu(
-            Ex, Ey, Ez, Hx, Hy, Hz, dx, dy, dz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
-            pml0, pml1, pml2, pml3, pml4, pml5, x0HR, xmHR, y0HR, ymHR, z0HR, zmHR, ch_rhs,
-            x0HPhi1, x0HPhi2, xmHPhi1, xmHPhi2, y0HPhi1, y0HPhi2, ymHPhi1, ymHPhi2, z0HPhi1, z0HPhi2, zmHPhi1, zmHPhi2,
-            fdtd_order);
+        if (has_cpml) {
+            cpml_h_cpu(
+                Ex, Ey, Ez, Hx, Hy, Hz, dx, dy, dz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
+                pml0, pml1, pml2, pml3, pml4, pml5, x0HR, xmHR, y0HR, ymHR, z0HR, zmHR, ch_rhs,
+                x0HPhi1, x0HPhi2, xmHPhi1, xmHPhi2, y0HPhi1, y0HPhi2, ymHPhi1, ymHPhi2, z0HPhi1, z0HPhi2, zmHPhi1, zmHPhi2,
+                fdtd_order);
+        }
 
         update_e_cpu(ce_hist, ce_curl, Ex, Ey, Ez, Hx, Hy, Hz,
             step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, dx, dy, dz, fdtd_order);
-        cpml_e_cpu(
-            Ex, Ey, Ez, Hx, Hy, Hz, dx, dy, dz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
-            pml0, pml1, pml2, pml3, pml4, pml5, x0ER, xmER, y0ER, ymER, z0ER, zmER, ce_rhs,
-            x0EPhi1, x0EPhi2, xmEPhi1, xmEPhi2, y0EPhi1, y0EPhi2, ymEPhi1, ymEPhi2, z0EPhi1, z0EPhi2, zmEPhi1, zmEPhi2,
-            fdtd_order);
+        if (has_cpml) {
+            cpml_e_cpu(
+                Ex, Ey, Ez, Hx, Hy, Hz, dx, dy, dz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
+                pml0, pml1, pml2, pml3, pml4, pml5, x0ER, xmER, y0ER, ymER, z0ER, zmER, ce_rhs,
+                x0EPhi1, x0EPhi2, xmEPhi1, xmEPhi2, y0EPhi1, y0EPhi2, ymEPhi1, ymEPhi2, z0EPhi1, z0EPhi2, zmEPhi1, zmEPhi2,
+                fdtd_order);
+        }
 
         inject_sources_cpu(step, i, dx, dy, dz, sourcelocation, srcwaveforms,
             Ex, Ey, Ez, ce_rhs, NX_FIELDS, NY_FIELDS, NZ_FIELDS, nsrc, polarisation, nt);
 
-        if (i % sampling_interval == 0) {
+        if (save_model_history && i % sampling_interval == 0) {
             int t_saved = i / sampling_interval;
             if (fwi_mode == 3) {
                 save_rhs_snapshot_cpu(R_saved, t_saved, Ex, E_saved, exact_Eold, ce_hist, ce_rhs,
@@ -1668,7 +1672,8 @@ DEEPGPR_API void forward(const float* RESTRICT eps_r_pad, const float* RESTRICT 
             }
         }
 
-        sample_receivers_cpu(step, nrx, i, receiverlocation, rxs, Ex, Ey, Ez, Hx, Hy, Hz, NX_FIELDS, NY_FIELDS, NZ_FIELDS, nt);
+        sample_receivers_cpu(step, nrx, i, receiverlocation, rxs, Ex, Ey, Ez, NX_FIELDS, NY_FIELDS, NZ_FIELDS, nt, receiver_component);
+    }
     }
 
     free(exact_Eold);
@@ -1743,15 +1748,19 @@ DEEPGPR_API void backward(const float* RESTRICT eps_r_pad, const float* RESTRICT
              int nsource, const int* RESTRICT source_location,
              int source_component, float* RESTRICT grad_source, int source_requires_grad,
              float* RESTRICT grad_eps_r,float* RESTRICT grad_sigma, int eps_r_requires_grad, int sigma_requires_grad,
-             int sampling_interval, int fwi_mode, int storage_type)
+             int sampling_interval, int fwi_mode, int storage_type, int use_async_offload)
 {
     (void)nrx;
+    (void)use_async_offload;
 
     int fdtd_order = g_fdtd_order;
     int nt_saved = (nt + sampling_interval - 1) / sampling_interval;
+    int has_cpml = pml0 || pml1 || pml2 || pml3 || pml4 || pml5;
 
     build_update_coeffs_cpu(eps_r_pad, sigma_pad, mu_r_pad, ce_hist, ce_curl, ce_rhs, ch_hist, ch_curl, ch_rhs, NX_FIELDS, NY_FIELDS, NZ_FIELDS, dt, dx);
 
+    DEEPGPR_OMP_PARALLEL
+    {
     for (int i = nt - 1; i >= 0; i--) {
         /* receiver sampling^T */
         adjoint_receivers_cpu(step, i, receiver_location, data_grad, lambda_ex, lambda_ey, lambda_ez,
@@ -1766,7 +1775,7 @@ DEEPGPR_API void backward(const float* RESTRICT eps_r_pad, const float* RESTRICT
                 nsource, source_component, nt, grad_source);
         }
 
-        if (i % sampling_interval == 0) {
+        if ((eps_r_requires_grad || sigma_requires_grad) && i % sampling_interval == 0) {
             int sample_weight = sampling_interval;
             if (i + sample_weight > nt) sample_weight = nt - i;
             accumulate_material_gradients_cpu(lambda_ex, lambda_ey, lambda_ez, E_saved, R_saved, ce_hist, ce_rhs, sigma_pad,
@@ -1777,19 +1786,24 @@ DEEPGPR_API void backward(const float* RESTRICT eps_r_pad, const float* RESTRICT
         }
 
         /* Strict reverse-mode order for the executed forward time step. */
-        adjoint_cpml_e_cpu(
-            lambda_ex, lambda_ey, lambda_ez, lambda_hx, lambda_hy, lambda_hz, dx, dy, dz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
-            pml0, pml1, pml2, pml3, pml4, pml5, x0ER, xmER, y0ER, ymER, z0ER, zmER, ce_rhs,
-            x0EPhi1, x0EPhi2, xmEPhi1, xmEPhi2, y0EPhi1, y0EPhi2, ymEPhi1, ymEPhi2,
-            z0EPhi1, z0EPhi2, zmEPhi1, zmEPhi2, fdtd_order);
+        if (has_cpml) {
+            adjoint_cpml_e_cpu(
+                lambda_ex, lambda_ey, lambda_ez, lambda_hx, lambda_hy, lambda_hz, dx, dy, dz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
+                pml0, pml1, pml2, pml3, pml4, pml5, x0ER, xmER, y0ER, ymER, z0ER, zmER, ce_rhs,
+                x0EPhi1, x0EPhi2, xmEPhi1, xmEPhi2, y0EPhi1, y0EPhi2, ymEPhi1, ymEPhi2,
+                z0EPhi1, z0EPhi2, zmEPhi1, zmEPhi2, fdtd_order);
+        }
         adjoint_e_cpu(ce_hist, ce_curl, lambda_ex, lambda_ey, lambda_ez, lambda_hx, lambda_hy, lambda_hz,
             step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, dx, dy, dz, fdtd_order);
-        adjoint_cpml_h_cpu(
-            lambda_ex, lambda_ey, lambda_ez, lambda_hx, lambda_hy, lambda_hz, dx, dy, dz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
-            pml0, pml1, pml2, pml3, pml4, pml5, x0HR, xmHR, y0HR, ymHR, z0HR, zmHR, ch_rhs,
-            x0HPhi1, x0HPhi2, xmHPhi1, xmHPhi2, y0HPhi1, y0HPhi2, ymHPhi1, ymHPhi2,
-            z0HPhi1, z0HPhi2, zmHPhi1, zmHPhi2, fdtd_order);
+        if (has_cpml) {
+            adjoint_cpml_h_cpu(
+                lambda_ex, lambda_ey, lambda_ez, lambda_hx, lambda_hy, lambda_hz, dx, dy, dz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
+                pml0, pml1, pml2, pml3, pml4, pml5, x0HR, xmHR, y0HR, ymHR, z0HR, zmHR, ch_rhs,
+                x0HPhi1, x0HPhi2, xmHPhi1, xmHPhi2, y0HPhi1, y0HPhi2, ymHPhi1, ymHPhi2,
+                z0HPhi1, z0HPhi2, zmHPhi1, zmHPhi2, fdtd_order);
+        }
         adjoint_h_cpu(ch_hist, ch_curl, lambda_ex, lambda_ey, lambda_ez, lambda_hx, lambda_hy, lambda_hz,
             step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, dx, dy, dz, fdtd_order);
+    }
     }
 }

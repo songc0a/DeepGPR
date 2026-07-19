@@ -469,7 +469,7 @@ __global__ void build_update_coeffs_gpu(const float* __restrict__ eps_r_pad, con
 }
 
 /*
- * Store receiver samples for all six field components.
+ * Store receiver samples for the requested electric-field component.
  *
  * Parameters:
  *   step: Number of shots or simulations in the batch.
@@ -485,9 +485,8 @@ __global__ void build_update_coeffs_gpu(const float* __restrict__ eps_r_pad, con
 __global__ void sample_receivers_gpu(
     int step, int NRX, int iteration,
     const int* __restrict__ receiverlocation, float* __restrict__ rxs,
-    const float* __restrict__ Ex, const float* __restrict__ Ey, const float* __restrict__ Ez, 
-    const float* __restrict__ Hx, const float* __restrict__ Hy, const float* __restrict__ Hz,
-    int NX, int NY, int NZ, int N_ITER) 
+    const float* __restrict__ Ex, const float* __restrict__ Ey, const float* __restrict__ Ez,
+    int NX, int NY, int NZ, int N_ITER, int receiver_component)
 {
     long long field_stride = (long long)NX * NY * NZ;
     long long work = blockIdx.x * blockDim.x + threadIdx.x;
@@ -503,12 +502,8 @@ __global__ void sample_receivers_gpu(
 
     long long id4 = (long long)s * field_stride + i * NY * NZ + j * NZ + k;
 
-    rxs[((s * 6 + 0) * N_ITER + iteration) * NRX + rx] = Ex[id4];
-    rxs[((s * 6 + 1) * N_ITER + iteration) * NRX + rx] = Ey[id4];
-    rxs[((s * 6 + 2) * N_ITER + iteration) * NRX + rx] = Ez[id4];
-    rxs[((s * 6 + 3) * N_ITER + iteration) * NRX + rx] = Hx[id4];
-    rxs[((s * 6 + 4) * N_ITER + iteration) * NRX + rx] = Hy[id4];
-    rxs[((s * 6 + 5) * N_ITER + iteration) * NRX + rx] = Hz[id4];
+    const float* field = receiver_component == 0 ? Ex : (receiver_component == 1 ? Ey : Ez);
+    rxs[((long long)s * N_ITER + iteration) * NRX + rx] = field[id4];
 }
 
 
@@ -555,6 +550,51 @@ __global__ void inject_sources_gpu(
     if (polarisation == 0) Ex[id4] -= ce_rhs[id3] * scale;
     else if (polarisation == 1) Ey[id4] -= ce_rhs[id3] * scale;
     else if (polarisation == 2) Ez[id4] -= ce_rhs[id3] * scale;
+}
+
+
+/* Inject all sources, then sample the selected receiver component. */
+__global__ void inject_sources_and_sample_gpu(
+    int step, int iteration, float dx, float dy, float dz,
+    const int* __restrict__ sourcelocation, const float* __restrict__ srcwaveforms,
+    float* __restrict__ Ex, float* __restrict__ Ey, float* __restrict__ Ez,
+    const float* __restrict__ ce_rhs,
+    int NX, int NY, int NZ, int nsrc, int source_component, int nt,
+    int nrx, const int* __restrict__ receiverlocation,
+    float* __restrict__ receiver_data, int receiver_component)
+{
+    long long field_stride = (long long)NX * NY * NZ;
+    long long total_sources = (long long)step * nsrc;
+    for (long long work = threadIdx.x; work < total_sources; work += blockDim.x) {
+        int s = (int)(work / nsrc);
+        long long src = work % nsrc;
+        long long i = sourcelocation[s * nsrc * 3 + src * 3 + 0];
+        long long j = sourcelocation[s * nsrc * 3 + src * 3 + 1];
+        long long k = sourcelocation[s * nsrc * 3 + src * 3 + 2];
+        long long material_idx = i * NY * NZ + j * NZ + k;
+        long long field_idx = (long long)s * field_stride + material_idx;
+        float dipole_length = source_component == 0 ? dx : (source_component == 1 ? dy : dz);
+        float scale = srcwaveforms[src * nt + iteration] * dipole_length / (dx * dy * dz);
+        float value = ce_rhs[material_idx] * scale;
+
+        if (source_component == 0) Ex[field_idx] -= value;
+        else if (source_component == 1) Ey[field_idx] -= value;
+        else Ez[field_idx] -= value;
+    }
+
+    __syncthreads();
+
+    long long total_receivers = (long long)step * nrx;
+    for (long long work = threadIdx.x; work < total_receivers; work += blockDim.x) {
+        int s = (int)(work / nrx);
+        long long rx = work % nrx;
+        long long i = receiverlocation[s * nrx * 3 + rx * 3 + 0];
+        long long j = receiverlocation[s * nrx * 3 + rx * 3 + 1];
+        long long k = receiverlocation[s * nrx * 3 + rx * 3 + 2];
+        long long field_idx = (long long)s * field_stride + i * NY * NZ + j * NZ + k;
+        const float* field = receiver_component == 0 ? Ex : (receiver_component == 1 ? Ey : Ez);
+        receiver_data[((long long)s * nt + iteration) * nrx + rx] = field[field_idx];
+    }
 }
 
 
@@ -1368,7 +1408,9 @@ __global__ void save_e_snapshot_gpu(
     long long dst_idx = (long long)t_idx * step * total + (long long)s * total + idx;
     float value = E[src_idx];
     store_wavefield_value_device<STORAGE_TYPE>(dst_ptr, dst_idx, value);
-    if (STORAGE_TYPE != WAVEFIELD_FLOAT32) exact_Eold[work] = value;
+    if (STORAGE_TYPE != WAVEFIELD_FLOAT32 && exact_Eold != nullptr) {
+        exact_Eold[work] = value;
+    }
 }
 
 
@@ -1579,23 +1621,17 @@ DEEPGPR_API void forward(const float* __restrict__ eps_r_pad, const float* __res
             const float* __restrict__ y0HR,const float* __restrict__ ymHR, const float* __restrict__ z0HR,const float* __restrict__ zmHR,
 
              float dt, int nt, int step, int nrx, float dx, float dy, float dz,
-             const int* __restrict__ receiverlocation, float* __restrict__ rxs, 
+             const int* __restrict__ receiverlocation, float* __restrict__ rxs, int receiver_component,
 
              int NX_FIELDS, int NY_FIELDS, int NZ_FIELDS, int nsrc, 
              const int* __restrict__ sourcelocation, const float* __restrict__ srcwaveforms, int polarisation,
-             int sampling_interval, int fwi_mode, int storage_type)
+             int sampling_interval, int fwi_mode, int storage_type, int save_model_history,
+             int use_async_offload)
 {
-    cudaPointerAttributes attr;
-    cudaError_t err = cudaPointerGetAttributes(&attr, E_saved);
-    int use_async = 0;
-    if (err == cudaSuccess && attr.type == cudaMemoryTypeDevice) {
-        use_async = 0; 
-    } else {
-        cudaGetLastError(); 
-        use_async = 1; 
-    }
+    int use_async = use_async_offload != 0;
     int fdtd_order = g_fdtd_order;
     int e_components = (fwi_mode == 3) ? 3 : 1;
+    int has_cpml = pml0 || pml1 || pml2 || pml3 || pml4 || pml5;
     int nt_saved = (nt + sampling_interval - 1) / sampling_interval;
 
     unsigned char* d_E_buf = nullptr;
@@ -1606,15 +1642,23 @@ DEEPGPR_API void forward(const float* __restrict__ eps_r_pad, const float* __res
     size_t storage_size = wavefield_element_size_host(storage_type);
     
     cudaStream_t stream_comp = 0, stream_trans = 0;
-    cudaEvent_t event_comp;
+    cudaEvent_t event_input, event_comp, event_transfer[2];
+    int transfer_buffer_in_use[2] = {0, 0};
     if (use_async) {
         CUDA_CHECK(cudaStreamCreate(&stream_comp));
         CUDA_CHECK(cudaStreamCreate(&stream_trans));
+        CUDA_CHECK(cudaEventCreate(&event_input));
         CUDA_CHECK(cudaEventCreate(&event_comp));
+        CUDA_CHECK(cudaEventCreate(&event_transfer[0]));
+        CUDA_CHECK(cudaEventCreate(&event_transfer[1]));
         CUDA_CHECK(cudaMalloc(&d_E_buf, 2 * e_components * snap_size * storage_size));
-        CUDA_CHECK(cudaMalloc(&d_R_buf, 2 * e_components * snap_size * storage_size));
+        if (save_model_history) {
+            CUDA_CHECK(cudaMalloc(&d_R_buf, 2 * e_components * snap_size * storage_size));
+        }
+        CUDA_CHECK(cudaEventRecord(event_input, 0));
+        CUDA_CHECK(cudaStreamWaitEvent(stream_comp, event_input, 0));
     }
-    if (storage_type != WAVEFIELD_FLOAT32) {
+    if (save_model_history && storage_type != WAVEFIELD_FLOAT32) {
         CUDA_CHECK(cudaMalloc(&d_exact_Eold, e_components * snap_size * sizeof(float)));
     }
 
@@ -1626,8 +1670,6 @@ DEEPGPR_API void forward(const float* __restrict__ eps_r_pad, const float* __res
     build_update_coeffs_gpu<<<grid_material, blockSize, 0, stream_comp>>>(eps_r_pad, sigma_pad, mu_r_pad, ce_hist, ce_curl, ce_rhs, ch_hist, ch_curl, ch_rhs, NX_FIELDS, NY_FIELDS, NZ_FIELDS, dt, dx);
     CUDA_CHECK_LAST();
   
-    dim3 grid_rx(CEIL_DIV((long long)step * nrx, blockSize));
-    dim3 grid_src(CEIL_DIV((long long)step * nsrc, blockSize));
     long long total_copy = (long long)(NX_FIELDS - 1) * (NY_FIELDS - 1) * (NZ_FIELDS - 1); 
     dim3 grid_copy(CEIL_DIV((long long)step * total_copy, blockSize));
 
@@ -1638,7 +1680,9 @@ DEEPGPR_API void forward(const float* __restrict__ eps_r_pad, const float* __res
                 int buf_idx = t_saved % 2;
                 long long buf_base = (long long)buf_idx * e_components * snap_size;
                 unsigned char* buffer = d_E_buf + buf_base * storage_size;
-                CUDA_CHECK(cudaStreamSynchronize(stream_trans));
+                if (transfer_buffer_in_use[buf_idx]) {
+                    CUDA_CHECK(cudaStreamWaitEvent(stream_comp, event_transfer[buf_idx], 0));
+                }
                 if (fwi_mode == 3) {
                     LAUNCH_STORAGE_KERNEL(save_e_snapshot_gpu, grid_copy, blockSize, stream_comp, storage_type,
                         buffer, 0, Ex, d_exact_Eold, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
@@ -1673,63 +1717,77 @@ DEEPGPR_API void forward(const float* __restrict__ eps_r_pad, const float* __res
         if (fdtd_order == 8) {
             update_h_gpu<8><<<grid_fields, blockSize, 0, stream_comp>>>(ch_hist, ch_curl, Ex, Ey, Ez, Hx, Hy, Hz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, dx, dy, dz);
             CUDA_CHECK_LAST();
-            cpml_h_gpu<8><<<grid_fields, blockSize, 0, stream_comp>>>(
-                Ex, Ey, Ez, Hx, Hy, Hz, dx, dy, dz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
-                pml0, pml1, pml2, pml3, pml4, pml5, x0HR, xmHR, y0HR, ymHR, z0HR, zmHR, ch_rhs,
-                x0HPhi1, x0HPhi2, xmHPhi1, xmHPhi2, y0HPhi1, y0HPhi2, ymHPhi1, ymHPhi2, z0HPhi1, z0HPhi2, zmHPhi1, zmHPhi2);
-            CUDA_CHECK_LAST();
+            if (has_cpml) {
+                cpml_h_gpu<8><<<grid_fields, blockSize, 0, stream_comp>>>(
+                    Ex, Ey, Ez, Hx, Hy, Hz, dx, dy, dz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
+                    pml0, pml1, pml2, pml3, pml4, pml5, x0HR, xmHR, y0HR, ymHR, z0HR, zmHR, ch_rhs,
+                    x0HPhi1, x0HPhi2, xmHPhi1, xmHPhi2, y0HPhi1, y0HPhi2, ymHPhi1, ymHPhi2, z0HPhi1, z0HPhi2, zmHPhi1, zmHPhi2);
+                CUDA_CHECK_LAST();
+            }
             update_e_gpu<8><<<grid_fields, blockSize, 0, stream_comp>>>(ce_hist, ce_curl, Ex, Ey, Ez, Hx, Hy, Hz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, dx, dy, dz);
             CUDA_CHECK_LAST();
-            cpml_e_gpu<8><<<grid_fields, blockSize, 0, stream_comp>>>(
-                Ex, Ey, Ez, Hx, Hy, Hz, dx, dy, dz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
-                pml0, pml1, pml2, pml3, pml4, pml5, x0ER, xmER, y0ER, ymER, z0ER, zmER, ce_rhs,
-                x0EPhi1, x0EPhi2, xmEPhi1, xmEPhi2, y0EPhi1, y0EPhi2, ymEPhi1, ymEPhi2, z0EPhi1, z0EPhi2, zmEPhi1, zmEPhi2);
-            CUDA_CHECK_LAST();
+            if (has_cpml) {
+                cpml_e_gpu<8><<<grid_fields, blockSize, 0, stream_comp>>>(
+                    Ex, Ey, Ez, Hx, Hy, Hz, dx, dy, dz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
+                    pml0, pml1, pml2, pml3, pml4, pml5, x0ER, xmER, y0ER, ymER, z0ER, zmER, ce_rhs,
+                    x0EPhi1, x0EPhi2, xmEPhi1, xmEPhi2, y0EPhi1, y0EPhi2, ymEPhi1, ymEPhi2, z0EPhi1, z0EPhi2, zmEPhi1, zmEPhi2);
+                CUDA_CHECK_LAST();
+            }
         } else if (fdtd_order == 4) {
             update_h_gpu<4><<<grid_fields, blockSize, 0, stream_comp>>>(ch_hist, ch_curl, Ex, Ey, Ez, Hx, Hy, Hz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, dx, dy, dz);
             CUDA_CHECK_LAST();
-            cpml_h_gpu<4><<<grid_fields, blockSize, 0, stream_comp>>>(
-                Ex, Ey, Ez, Hx, Hy, Hz, dx, dy, dz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
-                pml0, pml1, pml2, pml3, pml4, pml5, x0HR, xmHR, y0HR, ymHR, z0HR, zmHR, ch_rhs,
-                x0HPhi1, x0HPhi2, xmHPhi1, xmHPhi2, y0HPhi1, y0HPhi2, ymHPhi1, ymHPhi2, z0HPhi1, z0HPhi2, zmHPhi1, zmHPhi2);
-            CUDA_CHECK_LAST();
+            if (has_cpml) {
+                cpml_h_gpu<4><<<grid_fields, blockSize, 0, stream_comp>>>(
+                    Ex, Ey, Ez, Hx, Hy, Hz, dx, dy, dz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
+                    pml0, pml1, pml2, pml3, pml4, pml5, x0HR, xmHR, y0HR, ymHR, z0HR, zmHR, ch_rhs,
+                    x0HPhi1, x0HPhi2, xmHPhi1, xmHPhi2, y0HPhi1, y0HPhi2, ymHPhi1, ymHPhi2, z0HPhi1, z0HPhi2, zmHPhi1, zmHPhi2);
+                CUDA_CHECK_LAST();
+            }
             update_e_gpu<4><<<grid_fields, blockSize, 0, stream_comp>>>(ce_hist, ce_curl, Ex, Ey, Ez, Hx, Hy, Hz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, dx, dy, dz);
             CUDA_CHECK_LAST();
-            cpml_e_gpu<4><<<grid_fields, blockSize, 0, stream_comp>>>(
-                Ex, Ey, Ez, Hx, Hy, Hz, dx, dy, dz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
-                pml0, pml1, pml2, pml3, pml4, pml5, x0ER, xmER, y0ER, ymER, z0ER, zmER, ce_rhs,
-                x0EPhi1, x0EPhi2, xmEPhi1, xmEPhi2, y0EPhi1, y0EPhi2, ymEPhi1, ymEPhi2, z0EPhi1, z0EPhi2, zmEPhi1, zmEPhi2);
-            CUDA_CHECK_LAST();
+            if (has_cpml) {
+                cpml_e_gpu<4><<<grid_fields, blockSize, 0, stream_comp>>>(
+                    Ex, Ey, Ez, Hx, Hy, Hz, dx, dy, dz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
+                    pml0, pml1, pml2, pml3, pml4, pml5, x0ER, xmER, y0ER, ymER, z0ER, zmER, ce_rhs,
+                    x0EPhi1, x0EPhi2, xmEPhi1, xmEPhi2, y0EPhi1, y0EPhi2, ymEPhi1, ymEPhi2, z0EPhi1, z0EPhi2, zmEPhi1, zmEPhi2);
+                CUDA_CHECK_LAST();
+            }
         } else {
             update_h_gpu<2><<<grid_fields, blockSize, 0, stream_comp>>>(ch_hist, ch_curl, Ex, Ey, Ez, Hx, Hy, Hz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, dx, dy, dz);
             CUDA_CHECK_LAST();
-            cpml_h_gpu<2><<<grid_fields, blockSize, 0, stream_comp>>>(
-                Ex, Ey, Ez, Hx, Hy, Hz, dx, dy, dz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
-                pml0, pml1, pml2, pml3, pml4, pml5, x0HR, xmHR, y0HR, ymHR, z0HR, zmHR, ch_rhs,
-                x0HPhi1, x0HPhi2, xmHPhi1, xmHPhi2, y0HPhi1, y0HPhi2, ymHPhi1, ymHPhi2, z0HPhi1, z0HPhi2, zmHPhi1, zmHPhi2);
-            CUDA_CHECK_LAST();
+            if (has_cpml) {
+                cpml_h_gpu<2><<<grid_fields, blockSize, 0, stream_comp>>>(
+                    Ex, Ey, Ez, Hx, Hy, Hz, dx, dy, dz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
+                    pml0, pml1, pml2, pml3, pml4, pml5, x0HR, xmHR, y0HR, ymHR, z0HR, zmHR, ch_rhs,
+                    x0HPhi1, x0HPhi2, xmHPhi1, xmHPhi2, y0HPhi1, y0HPhi2, ymHPhi1, ymHPhi2, z0HPhi1, z0HPhi2, zmHPhi1, zmHPhi2);
+                CUDA_CHECK_LAST();
+            }
             update_e_gpu<2><<<grid_fields, blockSize, 0, stream_comp>>>(ce_hist, ce_curl, Ex, Ey, Ez, Hx, Hy, Hz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, dx, dy, dz);
             CUDA_CHECK_LAST();
-            cpml_e_gpu<2><<<grid_fields, blockSize, 0, stream_comp>>>(
-                Ex, Ey, Ez, Hx, Hy, Hz, dx, dy, dz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
-                pml0, pml1, pml2, pml3, pml4, pml5, x0ER, xmER, y0ER, ymER, z0ER, zmER, ce_rhs,
-                x0EPhi1, x0EPhi2, xmEPhi1, xmEPhi2, y0EPhi1, y0EPhi2, ymEPhi1, ymEPhi2, z0EPhi1, z0EPhi2, zmEPhi1, zmEPhi2);
-            CUDA_CHECK_LAST();
+            if (has_cpml) {
+                cpml_e_gpu<2><<<grid_fields, blockSize, 0, stream_comp>>>(
+                    Ex, Ey, Ez, Hx, Hy, Hz, dx, dy, dz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
+                    pml0, pml1, pml2, pml3, pml4, pml5, x0ER, xmER, y0ER, ymER, z0ER, zmER, ce_rhs,
+                    x0EPhi1, x0EPhi2, xmEPhi1, xmEPhi2, y0EPhi1, y0EPhi2, ymEPhi1, ymEPhi2, z0EPhi1, z0EPhi2, zmEPhi1, zmEPhi2);
+                CUDA_CHECK_LAST();
+            }
         }
 
-        inject_sources_gpu<<<grid_src, blockSize, 0, stream_comp>>>(
-            step, i, dx, dy, dz, sourcelocation, srcwaveforms, Ex, Ey, Ez,
-            ce_rhs, NX_FIELDS, NY_FIELDS, NZ_FIELDS, nsrc, polarisation, nt);
+        inject_sources_and_sample_gpu<<<1, blockSize, 0, stream_comp>>>(
+            step, i, dx, dy, dz, sourcelocation, srcwaveforms,
+            Ex, Ey, Ez, ce_rhs, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
+            nsrc, polarisation, nt, nrx, receiverlocation, rxs, receiver_component);
         CUDA_CHECK_LAST();
-        
+
         if (i % sampling_interval == 0) {
             int t_saved = i / sampling_interval;
             if (use_async) {
                 int buf_idx = t_saved % 2;
                 long long buf_base = (long long)buf_idx * e_components * snap_size;
                 unsigned char* e_buffer = d_E_buf + buf_base * storage_size;
-                unsigned char* r_buffer = d_R_buf + buf_base * storage_size;
-                if (fwi_mode == 3) {
+                unsigned char* r_buffer = save_model_history
+                    ? d_R_buf + buf_base * storage_size : nullptr;
+                if (save_model_history && fwi_mode == 3) {
                     LAUNCH_STORAGE_KERNEL(save_rhs_snapshot_gpu, grid_copy, blockSize, stream_comp, storage_type,
                         r_buffer, 0, Ex, e_buffer, d_exact_Eold,
                         ce_hist, ce_rhs, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
@@ -1741,7 +1799,7 @@ DEEPGPR_API void forward(const float* __restrict__ eps_r_pad, const float* __res
                         r_buffer + 2 * snap_size * storage_size, 0, Ez,
                         e_buffer + 2 * snap_size * storage_size, d_exact_Eold != nullptr ? d_exact_Eold + 2 * snap_size : nullptr,
                         ce_hist, ce_rhs, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
-                } else {
+                } else if (save_model_history) {
                     LAUNCH_STORAGE_KERNEL(save_rhs_snapshot_gpu, grid_copy, blockSize, stream_comp, storage_type,
                         r_buffer, 0, Ez, e_buffer, d_exact_Eold,
                         ce_hist, ce_rhs, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
@@ -1753,15 +1811,21 @@ DEEPGPR_API void forward(const float* __restrict__ eps_r_pad, const float* __res
                     CUDA_CHECK(cudaMemcpyAsync(wavefield_offset_host(E_saved, (long long)t_saved * snap_size, storage_type), e_buffer, snap_size * storage_size, cudaMemcpyDeviceToHost, stream_trans));
                     CUDA_CHECK(cudaMemcpyAsync(wavefield_offset_host(E_saved, component_stride + (long long)t_saved * snap_size, storage_type), e_buffer + snap_size * storage_size, snap_size * storage_size, cudaMemcpyDeviceToHost, stream_trans));
                     CUDA_CHECK(cudaMemcpyAsync(wavefield_offset_host(E_saved, 2 * component_stride + (long long)t_saved * snap_size, storage_type), e_buffer + 2 * snap_size * storage_size, snap_size * storage_size, cudaMemcpyDeviceToHost, stream_trans));
-                    CUDA_CHECK(cudaMemcpyAsync(wavefield_offset_host(R_saved, (long long)t_saved * snap_size, storage_type), r_buffer, snap_size * storage_size, cudaMemcpyDeviceToHost, stream_trans));
-                    CUDA_CHECK(cudaMemcpyAsync(wavefield_offset_host(R_saved, component_stride + (long long)t_saved * snap_size, storage_type), r_buffer + snap_size * storage_size, snap_size * storage_size, cudaMemcpyDeviceToHost, stream_trans));
-                    CUDA_CHECK(cudaMemcpyAsync(wavefield_offset_host(R_saved, 2 * component_stride + (long long)t_saved * snap_size, storage_type), r_buffer + 2 * snap_size * storage_size, snap_size * storage_size, cudaMemcpyDeviceToHost, stream_trans));
+                    if (save_model_history) {
+                        CUDA_CHECK(cudaMemcpyAsync(wavefield_offset_host(R_saved, (long long)t_saved * snap_size, storage_type), r_buffer, snap_size * storage_size, cudaMemcpyDeviceToHost, stream_trans));
+                        CUDA_CHECK(cudaMemcpyAsync(wavefield_offset_host(R_saved, component_stride + (long long)t_saved * snap_size, storage_type), r_buffer + snap_size * storage_size, snap_size * storage_size, cudaMemcpyDeviceToHost, stream_trans));
+                        CUDA_CHECK(cudaMemcpyAsync(wavefield_offset_host(R_saved, 2 * component_stride + (long long)t_saved * snap_size, storage_type), r_buffer + 2 * snap_size * storage_size, snap_size * storage_size, cudaMemcpyDeviceToHost, stream_trans));
+                    }
                 } else {
                     CUDA_CHECK(cudaMemcpyAsync(wavefield_offset_host(E_saved, (long long)t_saved * snap_size, storage_type), e_buffer, snap_size * storage_size, cudaMemcpyDeviceToHost, stream_trans));
-                    CUDA_CHECK(cudaMemcpyAsync(wavefield_offset_host(R_saved, (long long)t_saved * snap_size, storage_type), r_buffer, snap_size * storage_size, cudaMemcpyDeviceToHost, stream_trans));
+                    if (save_model_history) {
+                        CUDA_CHECK(cudaMemcpyAsync(wavefield_offset_host(R_saved, (long long)t_saved * snap_size, storage_type), r_buffer, snap_size * storage_size, cudaMemcpyDeviceToHost, stream_trans));
+                    }
                 }
+                CUDA_CHECK(cudaEventRecord(event_transfer[buf_idx], stream_trans));
+                transfer_buffer_in_use[buf_idx] = 1;
             } else {
-                if (fwi_mode == 3) {
+                if (save_model_history && fwi_mode == 3) {
                     LAUNCH_STORAGE_KERNEL(save_rhs_snapshot_gpu, grid_copy, blockSize, stream_comp, storage_type,
                         R_saved, t_saved, Ex, E_saved, d_exact_Eold,
                         ce_hist, ce_rhs, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
@@ -1773,7 +1837,7 @@ DEEPGPR_API void forward(const float* __restrict__ eps_r_pad, const float* __res
                         wavefield_offset_host(R_saved, 2 * component_stride, storage_type), t_saved, Ez,
                         wavefield_const_offset_host(E_saved, 2 * component_stride, storage_type), d_exact_Eold != nullptr ? d_exact_Eold + 2 * snap_size : nullptr,
                         ce_hist, ce_rhs, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
-                } else {
+                } else if (save_model_history) {
                     LAUNCH_STORAGE_KERNEL(save_rhs_snapshot_gpu, grid_copy, blockSize, stream_comp, storage_type,
                         R_saved, t_saved, Ez, E_saved, d_exact_Eold,
                         ce_hist, ce_rhs, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
@@ -1782,16 +1846,17 @@ DEEPGPR_API void forward(const float* __restrict__ eps_r_pad, const float* __res
             }
         }
 
-        sample_receivers_gpu<<<grid_rx, blockSize, 0, stream_comp>>>(step, nrx, i, receiverlocation, rxs, Ex, Ey, Ez, Hx, Hy, Hz, NX_FIELDS, NY_FIELDS, NZ_FIELDS, nt);
-        CUDA_CHECK_LAST();
     }
 
     if (use_async) {
         CUDA_CHECK(cudaStreamSynchronize(stream_comp));
         CUDA_CHECK(cudaStreamSynchronize(stream_trans));
         CUDA_CHECK(cudaFree(d_E_buf));
-        CUDA_CHECK(cudaFree(d_R_buf));
+        if (d_R_buf != nullptr) CUDA_CHECK(cudaFree(d_R_buf));
+        CUDA_CHECK(cudaEventDestroy(event_input));
         CUDA_CHECK(cudaEventDestroy(event_comp));
+        CUDA_CHECK(cudaEventDestroy(event_transfer[0]));
+        CUDA_CHECK(cudaEventDestroy(event_transfer[1]));
         CUDA_CHECK(cudaStreamDestroy(stream_comp));
         CUDA_CHECK(cudaStreamDestroy(stream_trans));
     }
@@ -1867,19 +1932,13 @@ DEEPGPR_API void backward(const float* __restrict__ eps_r_pad, const float* __re
              int nsource, const int* __restrict__ source_location,
              int source_component, float* __restrict__ grad_source, int source_requires_grad,
              float*__restrict__ grad_eps_r,float*__restrict__ grad_sigma, int eps_r_requires_grad, int sigma_requires_grad,
-             int sampling_interval, int fwi_mode, int storage_type)
+             int sampling_interval, int fwi_mode, int storage_type, int use_async_offload)
 {
-    cudaPointerAttributes attr;
-    cudaError_t err = cudaPointerGetAttributes(&attr, E_saved);
-    int use_async = 0;
-    if (err == cudaSuccess && attr.type == cudaMemoryTypeDevice) {
-        use_async = 0;
-    } else {
-        cudaGetLastError(); 
-        use_async = 1;
-    }
+    int need_material_gradient = eps_r_requires_grad || sigma_requires_grad;
+    int use_async = need_material_gradient && use_async_offload != 0;
     int fdtd_order = g_fdtd_order;
     int e_components = (fwi_mode == 3) ? 3 : 1;
+    int has_cpml = pml0 || pml1 || pml2 || pml3 || pml4 || pml5;
 
     unsigned char* d_E_buf = nullptr;
     unsigned char* d_R_buf = nullptr;
@@ -1887,15 +1946,18 @@ DEEPGPR_API void backward(const float* __restrict__ eps_r_pad, const float* __re
     size_t storage_size = wavefield_element_size_host(storage_type);
     
     cudaStream_t stream_comp = 0, stream_trans = 0;
-    cudaEvent_t event_trans, event_comp;
+    cudaEvent_t event_input, event_trans, event_comp;
     int staging_buffer_in_use = 0;
     if (use_async) {
         CUDA_CHECK(cudaStreamCreate(&stream_comp));
         CUDA_CHECK(cudaStreamCreate(&stream_trans));
+        CUDA_CHECK(cudaEventCreate(&event_input));
         CUDA_CHECK(cudaEventCreate(&event_trans));
         CUDA_CHECK(cudaEventCreate(&event_comp));
         CUDA_CHECK(cudaMalloc(&d_E_buf, e_components * snap_size * storage_size));
         CUDA_CHECK(cudaMalloc(&d_R_buf, e_components * snap_size * storage_size));
+        CUDA_CHECK(cudaEventRecord(event_input, 0));
+        CUDA_CHECK(cudaStreamWaitEvent(stream_comp, event_input, 0));
     }
 
     long long blockSize = 256;
@@ -1953,7 +2015,7 @@ DEEPGPR_API void backward(const float* __restrict__ eps_r_pad, const float* __re
             CUDA_CHECK_LAST();
         }
 
-        if (i % sampling_interval == 0) {
+        if (need_material_gradient && i % sampling_interval == 0) {
             int sample_weight = sampling_interval;
             if (i + sample_weight > nt) sample_weight = nt - i;
             LAUNCH_STORAGE_KERNEL(accumulate_material_gradients_gpu, grid_grad, blockSize, stream_comp, storage_type,
@@ -1970,22 +2032,26 @@ DEEPGPR_API void backward(const float* __restrict__ eps_r_pad, const float* __re
         }
 
         /* E CPML^T -> E update^T -> H CPML^T -> H update^T. */
-        LAUNCH_ORDER_KERNEL(adjoint_cpml_e_gpu, grid_fields, blockSize, stream_comp, fdtd_order,
-            lambda_ex, lambda_ey, lambda_ez, lambda_hx, lambda_hy, lambda_hz, dx, dy, dz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
-            pml0, pml1, pml2, pml3, pml4, pml5, x0ER, xmER, y0ER, ymER, z0ER, zmER, ce_rhs,
-            x0EPhi1, x0EPhi2, xmEPhi1, xmEPhi2, y0EPhi1, y0EPhi2, ymEPhi1, ymEPhi2,
-            z0EPhi1, z0EPhi2, zmEPhi1, zmEPhi2);
-        CUDA_CHECK_LAST();
+        if (has_cpml) {
+            LAUNCH_ORDER_KERNEL(adjoint_cpml_e_gpu, grid_fields, blockSize, stream_comp, fdtd_order,
+                lambda_ex, lambda_ey, lambda_ez, lambda_hx, lambda_hy, lambda_hz, dx, dy, dz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
+                pml0, pml1, pml2, pml3, pml4, pml5, x0ER, xmER, y0ER, ymER, z0ER, zmER, ce_rhs,
+                x0EPhi1, x0EPhi2, xmEPhi1, xmEPhi2, y0EPhi1, y0EPhi2, ymEPhi1, ymEPhi2,
+                z0EPhi1, z0EPhi2, zmEPhi1, zmEPhi2);
+            CUDA_CHECK_LAST();
+        }
         LAUNCH_ORDER_KERNEL(adjoint_e_gpu, grid_fields, blockSize, stream_comp, fdtd_order,
             ce_hist, ce_curl, lambda_ex, lambda_ey, lambda_ez, lambda_hx, lambda_hy, lambda_hz,
             step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, dx, dy, dz);
         CUDA_CHECK_LAST();
-        LAUNCH_ORDER_KERNEL(adjoint_cpml_h_gpu, grid_fields, blockSize, stream_comp, fdtd_order,
-            lambda_ex, lambda_ey, lambda_ez, lambda_hx, lambda_hy, lambda_hz, dx, dy, dz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
-            pml0, pml1, pml2, pml3, pml4, pml5, x0HR, xmHR, y0HR, ymHR, z0HR, zmHR, ch_rhs,
-            x0HPhi1, x0HPhi2, xmHPhi1, xmHPhi2, y0HPhi1, y0HPhi2, ymHPhi1, ymHPhi2,
-            z0HPhi1, z0HPhi2, zmHPhi1, zmHPhi2);
-        CUDA_CHECK_LAST();
+        if (has_cpml) {
+            LAUNCH_ORDER_KERNEL(adjoint_cpml_h_gpu, grid_fields, blockSize, stream_comp, fdtd_order,
+                lambda_ex, lambda_ey, lambda_ez, lambda_hx, lambda_hy, lambda_hz, dx, dy, dz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
+                pml0, pml1, pml2, pml3, pml4, pml5, x0HR, xmHR, y0HR, ymHR, z0HR, zmHR, ch_rhs,
+                x0HPhi1, x0HPhi2, xmHPhi1, xmHPhi2, y0HPhi1, y0HPhi2, ymHPhi1, ymHPhi2,
+                z0HPhi1, z0HPhi2, zmHPhi1, zmHPhi2);
+            CUDA_CHECK_LAST();
+        }
         LAUNCH_ORDER_KERNEL(adjoint_h_gpu, grid_fields, blockSize, stream_comp, fdtd_order,
             ch_hist, ch_curl, lambda_ex, lambda_ey, lambda_ez, lambda_hx, lambda_hy, lambda_hz,
             step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, dx, dy, dz);
@@ -1997,6 +2063,7 @@ DEEPGPR_API void backward(const float* __restrict__ eps_r_pad, const float* __re
         CUDA_CHECK(cudaStreamSynchronize(stream_trans));
         CUDA_CHECK(cudaFree(d_E_buf));
         CUDA_CHECK(cudaFree(d_R_buf));
+        CUDA_CHECK(cudaEventDestroy(event_input));
         CUDA_CHECK(cudaEventDestroy(event_trans));
         CUDA_CHECK(cudaEventDestroy(event_comp));
         CUDA_CHECK(cudaStreamDestroy(stream_comp));

@@ -108,15 +108,16 @@ def _estimate_compute_memory(
         + acquisition_bytes
     )
 
+    needs_backward = er_requires_grad or se_requires_grad
     saved_wavefield_bytes = (
-        2 * components * nt_saved * snapshot_cells * storage_bytes
+        (1 + int(needs_backward))
+        * components * nt_saved * snapshot_cells * storage_bytes
     )
     update_coefficient_bytes = 6 * field_cells * float_bytes
-    receiver_bytes = nstep * 6 * nt * nrx * float_bytes
+    receiver_bytes = nstep * nt * nrx * float_bytes
     gradient_bytes = (
         int(er_requires_grad) + int(se_requires_grad)
     ) * model_cells * float_bytes
-    needs_backward = er_requires_grad or se_requires_grad
     adjoint_state_bytes = (
         field_bytes + pml_phi_bytes if needs_backward else 0
     )
@@ -131,8 +132,13 @@ def _estimate_compute_memory(
     effective_async = bool(use_async_offload and device.type == "cuda")
 
     if device.type == "cuda" and effective_async:
-        forward_transfer_bytes = 4 * components * snapshot_cells * storage_bytes
-        backward_transfer_bytes = 2 * components * snapshot_cells * storage_bytes
+        forward_transfer_bytes = (
+            (2 + 2 * int(needs_backward))
+            * components * snapshot_cells * storage_bytes
+        )
+        backward_transfer_bytes = (
+            2 * int(needs_backward) * components * snapshot_cells * storage_bytes
+        )
         forward_device_peak = (
             core_bytes
             + update_coefficient_bytes
@@ -186,7 +192,7 @@ def _estimate_compute_memory(
         "source_and_locations": acquisition_bytes,
         "saved_gradient_wavefields": saved_wavefield_bytes,
         "fdtd_update_coefficients": update_coefficient_bytes,
-        "six_component_receiver_buffer": receiver_bytes,
+        "receiver_data": receiver_bytes,
         "material_gradients": gradient_bytes,
         "adjoint_fields_and_cpml": adjoint_state_bytes,
         "receiver_adjoint": receiver_adjoint_bytes,
@@ -326,7 +332,7 @@ def _print_compute_preview(
         ("source and acquisition locations", "source_and_locations"),
         ("saved E_saved and R_saved wavefields", "saved_gradient_wavefields"),
         ("FDTD update coefficients", "fdtd_update_coefficients"),
-        ("six-component receiver buffer", "six_component_receiver_buffer"),
+        ("receiver data", "receiver_data"),
         ("material gradients", "material_gradients"),
         ("adjoint fields and CPML", "adjoint_fields_and_cpml"),
         ("receiver adjoint", "receiver_adjoint"),
@@ -399,21 +405,24 @@ def _normalize_wavefield_storage_dtype(value):
     return value
 
 
-def _sync_cuda_device(device):
-    """Synchronize a CUDA device when the selected backend is CUDA.
-
-    Args:
-        device: PyTorch device object to synchronize.
-    """
+def _begin_native_call(device):
+    """Order the native default stream after PyTorch's current CUDA stream."""
     if device.type != "cuda":
-        return
+        return None
 
-    if device.index is None:
-        torch.cuda.synchronize()
-        return
+    current_stream = torch.cuda.current_stream(device)
+    default_stream = torch.cuda.default_stream(device)
+    if current_stream.cuda_stream != default_stream.cuda_stream:
+        default_stream.wait_stream(current_stream)
+        return current_stream, default_stream
+    return None
 
-    torch.cuda.set_device(device.index)
-    torch.cuda.synchronize(device.index)
+
+def _end_native_call(streams):
+    """Make PyTorch's current stream wait for an asynchronous native call."""
+    if streams is not None:
+        current_stream, default_stream = streams
+        current_stream.wait_stream(default_stream)
 
 
 def _check_nonzero_source_created_fields(c_lib, source_amplitudes, *fields):
@@ -640,8 +649,8 @@ class DeepGPR(torch.autograd.Function):
         receiver_location=receiver_location.to(torch.int32).contiguous()
         c_lib = get_deepgpr_lib(device)
         set_library_fdtd_order(c_lib, fdtd_order)
-        ctx.save_for_backward(eps_r, sigma, mu_r, source_location, receiver_location,
-                              x0,xm,y0,ym,z0,zm,x01,x02,xm1,xm2,
+        ctx.save_for_backward(mu_r, source_location, receiver_location,
+                              x01,x02,xm1,xm2,
                               y01,y02,ym1,ym2,z01,z02,zm1,zm2,eps_r_pad,sigma_pad)
         dx, dy, dz = grid_spacing
         ctx.grid_spacing=grid_spacing
@@ -653,6 +662,8 @@ class DeepGPR(torch.autograd.Function):
         ctx.nrx=nrx
         ctx.nsr=nsr
         ctx.nstep=nstep
+        ctx.eps_r_requires_grad = bool(eps_r.requires_grad)
+        ctx.sigma_requires_grad = bool(sigma.requires_grad)
         ctx.source_requires_grad = bool(source_amplitudes.requires_grad)
         ctx.source_shape = tuple(source_amplitudes.shape)
         ctx.source_direction = source_direction
@@ -676,23 +687,41 @@ class DeepGPR(torch.autograd.Function):
             saved_shape = (nt_saved, nstep, nx, ny, nz)
 
         if ctx.use_async_offload:
-            E_saved = torch.zeros(saved_shape, device='cpu', dtype=wavefield_storage_dtype).pin_memory()
-            R_saved = torch.zeros(saved_shape, device='cpu', dtype=wavefield_storage_dtype).pin_memory()
+            E_saved = torch.empty(
+                saved_shape,
+                device="cpu",
+                dtype=wavefield_storage_dtype,
+                pin_memory=True,
+            )
+            R_saved = (
+                torch.empty(
+                    saved_shape,
+                    device="cpu",
+                    dtype=wavefield_storage_dtype,
+                    pin_memory=True,
+                )
+                if ctx.eps_r_requires_grad or ctx.sigma_requires_grad
+                else torch.empty(0, device='cpu', dtype=wavefield_storage_dtype)
+            )
         else:
-            E_saved = torch.zeros(saved_shape, device=device, dtype=wavefield_storage_dtype).contiguous()
-            R_saved = torch.zeros(saved_shape, device=device, dtype=wavefield_storage_dtype).contiguous()
+            E_saved = torch.empty(
+                saved_shape, device=device, dtype=wavefield_storage_dtype
+            )
+            R_saved = (
+                torch.empty(saved_shape, device=device, dtype=wavefield_storage_dtype)
+                if ctx.eps_r_requires_grad or ctx.sigma_requires_grad
+                else torch.empty(0, device=device, dtype=wavefield_storage_dtype)
+            )
 
-        ce_hist=torch.zeros((nx+1,ny+1,nz+1), device=device, dtype=dtype)
-        ce_curl=torch.zeros((nx+1,ny+1,nz+1), device=device, dtype=dtype)
-        ce_rhs=torch.zeros((nx+1,ny+1,nz+1), device=device, dtype=dtype)
-        ch_hist=torch.zeros((nx+1,ny+1,nz+1), device=device, dtype=dtype)
-        ch_curl=torch.zeros((nx+1,ny+1,nz+1), device=device, dtype=dtype)
-        ch_rhs=torch.zeros((nx+1,ny+1,nz+1), device=device, dtype=dtype)
+        update_coeffs = torch.zeros(
+            (6, nx + 1, ny + 1, nz + 1), device=device, dtype=dtype
+        )
+        ce_hist, ce_curl, ce_rhs, ch_hist, ch_curl, ch_rhs = update_coeffs.unbind(0)
 
-        receiver_amplitudes = torch.zeros((nstep, 6, nt, nrx),device=device, dtype=dtype).contiguous()
+        receiver_amplitudes = torch.empty((nstep, nt, nrx), device=device, dtype=dtype)
         pml = [int(pmlthick[i]) for i in range(6)]
 
-        _sync_cuda_device(device)
+        native_streams = _begin_native_call(device)
         c_lib.forward(
                 ctypes.cast(eps_r_pad.data_ptr(), ctypes.POINTER(ctypes.c_float)),
                 ctypes.cast(sigma_pad.data_ptr(), ctypes.POINTER(ctypes.c_float)),
@@ -735,13 +764,16 @@ class DeepGPR(torch.autograd.Function):
 
                 dt, nt, nstep, nrx, dx, dy, dz,
                 ctypes.cast(receiver_location.data_ptr(), ctypes.POINTER(ctypes.c_int)), ctypes.cast(receiver_amplitudes.data_ptr(), ctypes.POINTER(ctypes.c_float)),
+                receiver_component,
                 nx+1, ny+1, nz+1, nsr,
                 ctypes.cast(source_location.data_ptr(), ctypes.POINTER(ctypes.c_int)), ctypes.cast(source_amplitudes.data_ptr(), ctypes.POINTER(ctypes.c_float)),
                 source_direction,
                 model_gradient_sampling_interval,
                 mode,
-                ctx.wavefield_storage_type)
-        _sync_cuda_device(device)
+                ctx.wavefield_storage_type,
+                int(ctx.eps_r_requires_grad or ctx.sigma_requires_grad),
+                int(ctx.use_async_offload))
+        _end_native_call(native_streams)
 
         if ctx.debug:
             check_tensors_for_nan_inf(d="forward",
@@ -766,7 +798,7 @@ class DeepGPR(torch.autograd.Function):
         ctx.E_saved = E_saved
         ctx.R_saved = R_saved
         ctx.mark_non_differentiable(E_saved)
-        return (Ex,Ey,Ez,Hx,Hy,Hz,x0EPhi1,x0EPhi2,x0HPhi1,x0HPhi2,xmEPhi1,xmEPhi2,xmHPhi1,xmHPhi2,y0EPhi1,y0EPhi2,y0HPhi1,y0HPhi2,ymEPhi1,ymEPhi2,ymHPhi1,ymHPhi2,z0EPhi1,z0EPhi2,z0HPhi1,z0HPhi2,zmEPhi1,zmEPhi2,zmHPhi1,zmHPhi2,E_saved,receiver_amplitudes[:,receiver_component,:,:])
+        return (Ex,Ey,Ez,Hx,Hy,Hz,x0EPhi1,x0EPhi2,x0HPhi1,x0HPhi2,xmEPhi1,xmEPhi2,xmHPhi1,xmHPhi2,y0EPhi1,y0EPhi2,y0HPhi1,y0HPhi2,ymEPhi1,ymEPhi2,ymHPhi1,ymHPhi2,z0EPhi1,z0EPhi2,z0HPhi1,z0HPhi2,zmEPhi1,zmEPhi2,zmHPhi1,zmHPhi2,E_saved,receiver_amplitudes)
 
     @staticmethod
     def backward(ctx,lambda_ex,lambda_ey,lambda_ez,lambda_hx,lambda_hy,lambda_hz,lambda_x0_e_phi1,lambda_x0_e_phi2,lambda_x0_h_phi1,lambda_x0_h_phi2,lambda_xm_e_phi1,lambda_xm_e_phi2,lambda_xm_h_phi1,lambda_xm_h_phi2,lambda_y0_e_phi1,lambda_y0_e_phi2,lambda_y0_h_phi1,lambda_y0_h_phi2,lambda_ym_e_phi1,lambda_ym_e_phi2,lambda_ym_h_phi1,lambda_ym_h_phi2,lambda_z0_e_phi1,lambda_z0_e_phi2,lambda_z0_h_phi1,lambda_z0_h_phi2,lambda_zm_e_phi1,lambda_zm_e_phi2,lambda_zm_h_phi1,lambda_zm_h_phi2,_g_E_saved,data_grad):
@@ -787,33 +819,11 @@ class DeepGPR(torch.autograd.Function):
         """
         
         del _g_E_saved
-        eps_r, sigma, mu_r, source_location, receiver_location, x0,xm,y0,ym,z0,zm,x01,x02,xm1,xm2,y01,y02,ym1,ym2,z01,z02,zm1,zm2,eps_r_pad,sigma_pad=ctx.saved_tensors
-        
-        eps_r_pad=eps_r_pad.contiguous()
-        sigma_pad=sigma_pad.contiguous()
-        eps_r=eps_r.contiguous()
-        sigma=sigma.contiguous()
-        mu_r=mu_r.contiguous()
-        source_location=source_location.contiguous()
-        receiver_location=receiver_location.contiguous()
-        x0=x0.contiguous()
-        xm=xm.contiguous()
-        y0=y0.contiguous()
-        ym=ym.contiguous()
-        z0=z0.contiguous()
-        zm=zm.contiguous()
-        x01=x01.contiguous()
-        x02=x02.contiguous()
-        xm1=xm1.contiguous()
-        xm2=xm2.contiguous()
-        y01=y01.contiguous()
-        y02=y02.contiguous()
-        ym1=ym1.contiguous()
-        ym2=ym2.contiguous()
-        z01=z01.contiguous()
-        z02=z02.contiguous()
-        zm1=zm1.contiguous()
-        zm2=zm2.contiguous()
+        (
+            mu_r, source_location, receiver_location,
+            x01, x02, xm1, xm2, y01, y02, ym1, ym2,
+            z01, z02, zm1, zm2, eps_r_pad, sigma_pad,
+        ) = (tensor.contiguous() for tensor in ctx.saved_tensors)
 
         dx, dy, dz=ctx.grid_spacing
         nx=ctx.nx
@@ -867,25 +877,23 @@ class DeepGPR(torch.autograd.Function):
         lambda_zm_h_phi2=lambda_zm_h_phi2.contiguous()
         data_grad=data_grad.contiguous()
 
-        ce_hist=torch.zeros((nx+1,ny+1,nz+1), device=device, dtype=dtype)
-        ce_curl=torch.zeros((nx+1,ny+1,nz+1), device=device, dtype=dtype)
-        ce_rhs=torch.zeros((nx+1,ny+1,nz+1), device=device, dtype=dtype)
-        ch_hist=torch.zeros((nx+1,ny+1,nz+1), device=device, dtype=dtype)
-        ch_curl=torch.zeros((nx+1,ny+1,nz+1), device=device, dtype=dtype)
-        ch_rhs=torch.zeros((nx+1,ny+1,nz+1), device=device, dtype=dtype)
+        update_coeffs = torch.zeros(
+            (6, nx + 1, ny + 1, nz + 1), device=device, dtype=dtype
+        )
+        ce_hist, ce_curl, ce_rhs, ch_hist, ch_curl, ch_rhs = update_coeffs.unbind(0)
 
-        if eps_r.requires_grad:
+        if ctx.eps_r_requires_grad:
             grad_eps_r=torch.zeros((nx,ny,nz),device=device,dtype=dtype).contiguous()
             eps_r_requires_grad=1
         else:
-            grad_eps_r=torch.empty(0)
+            grad_eps_r=torch.empty(0, device=device, dtype=dtype)
             eps_r_requires_grad=0
 
-        if sigma.requires_grad:
+        if ctx.sigma_requires_grad:
             grad_sigma=torch.zeros((nx,ny,nz),device=device,dtype=dtype).contiguous()
             sigma_requires_grad=1
         else:
-            grad_sigma=torch.empty(0)
+            grad_sigma=torch.empty(0, device=device, dtype=dtype)
             sigma_requires_grad=0
 
         if ctx.source_requires_grad:
@@ -897,7 +905,7 @@ class DeepGPR(torch.autograd.Function):
 
         pml = [int(pmlthick[i]) for i in range(6)]
 
-        _sync_cuda_device(device)
+        native_streams = _begin_native_call(device)
         c_lib.backward(
                 ctypes.cast(eps_r_pad.data_ptr(), ctypes.POINTER(ctypes.c_float)),
                 ctypes.cast(sigma_pad.data_ptr(), ctypes.POINTER(ctypes.c_float)),
@@ -950,8 +958,9 @@ class DeepGPR(torch.autograd.Function):
                 ctypes.cast(grad_eps_r.data_ptr(), ctypes.POINTER(ctypes.c_float)), ctypes.cast(grad_sigma.data_ptr(), ctypes.POINTER(ctypes.c_float)),eps_r_requires_grad,sigma_requires_grad,
                 model_gradient_sampling_interval,
                 ctx.mode,
-                ctx.wavefield_storage_type)
-        _sync_cuda_device(device)
+                ctx.wavefield_storage_type,
+                int(ctx.use_async_offload))
+        _end_native_call(native_streams)
         
         state_gradient_names = (
             "lambda_ex", "lambda_ey", "lambda_ez",
@@ -1005,7 +1014,7 @@ class DeepGPR(torch.autograd.Function):
 
         ctx.E_saved = None
         ctx.R_saved = None
-        del E_saved,R_saved,eps_r,sigma,mu_r,source_location,receiver_location,x0,xm,y0,ym,z0,zm,x01,x02,xm1,xm2,y01,y02,ym1,ym2,z01,z02,zm1,zm2,eps_r_pad,sigma_pad,ce_hist,ce_curl,ce_rhs,ch_hist,ch_curl,ch_rhs
+        del E_saved,R_saved,mu_r,source_location,receiver_location,x01,x02,xm1,xm2,y01,y02,ym1,ym2,z01,z02,zm1,zm2,eps_r_pad,sigma_pad,ce_hist,ce_curl,ce_rhs,ch_hist,ch_curl,ch_rhs
 
         gradients = [None] * 76
         gradients[0] = grad_eps_r if eps_r_requires_grad else None

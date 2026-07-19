@@ -158,9 +158,9 @@ def _configure_deepgpr_library(lib: ctypes.CDLL) -> None:
     lib.deepgpr_abi_version.argtypes = []
     lib.deepgpr_abi_version.restype = ctypes.c_int
     abi_version = int(lib.deepgpr_abi_version())
-    if abi_version != 5:
+    if abi_version != 6:
         raise RuntimeError(
-            f"Incompatible DeepGPR native ABI {abi_version}; expected ABI 5. "
+            f"Incompatible DeepGPR native ABI {abi_version}; expected ABI 6. "
             "Rebuild the CPU/CUDA shared libraries from the current sources."
         )
 
@@ -187,10 +187,11 @@ def _configure_deepgpr_library(lib: ctypes.CDLL) -> None:
 
         ctypes.c_float, ctypes.c_int, ctypes.c_int, ctypes.c_int,
         ctypes.c_float, ctypes.c_float, ctypes.c_float,
-        _INT_P, _FLOAT_P,
+        _INT_P, _FLOAT_P, ctypes.c_int,
         ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
         _INT_P, _FLOAT_P,
-        ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+        ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+        ctypes.c_int,
     ]
     lib.forward.restype = None
 
@@ -223,6 +224,7 @@ def _configure_deepgpr_library(lib: ctypes.CDLL) -> None:
         ctypes.c_int, _INT_P, ctypes.c_int, _FLOAT_P, ctypes.c_int,
         _FLOAT_P, _FLOAT_P,
         ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+        ctypes.c_int,
     ]
     lib.backward.restype = None
 
