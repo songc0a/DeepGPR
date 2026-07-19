@@ -1,6 +1,8 @@
 import contextlib
 import io
 import math
+import re
+import tempfile
 import unittest
 
 import torch
@@ -152,6 +154,7 @@ class NumericsValidationTests(unittest.TestCase):
         self.assertIn("FDTD order / gradient mode: 4 / 2", preview)
         self.assertIn("saved E_saved and R_saved wavefields", preview)
         self.assertIn("adjoint fields and CPML", preview)
+        self.assertIn("forward wavefield save directory: disabled", preview)
         self.assertIn("estimated peak CPU memory", preview)
         self.assertIn("recommended CPU capacity with 20% margin", preview)
         self.assertIn("=== End DeepGPR compute preview ===", preview)
@@ -159,6 +162,45 @@ class NumericsValidationTests(unittest.TestCase):
     def test_compute_parameter_preview_requires_bool(self):
         with self.assertRaisesRegex(TypeError, "print_parameters"):
             DeepGPR.compute(device="cpu", print_parameters=1)
+
+    def test_compute_saves_forward_wavefield_to_requested_directory(self):
+        nx, ny, nt = 10, 12, 40
+        er = torch.full((nx, ny), 4.0, requires_grad=True)
+        se = torch.zeros((nx, ny), requires_grad=True)
+        source = torch.zeros((1, nt, 1))
+        source[0, 5, 0] = 1.0
+        source_location = torch.tensor([[[3, 3, 0]]], dtype=torch.int32)
+        receiver_location = torch.tensor([[[3, 6, 0]]], dtype=torch.int32)
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            result = DeepGPR.compute(
+                device="cpu",
+                dx=0.02,
+                dt=3.0e-11,
+                source_amplitudes=source,
+                source_location=source_location,
+                receiver_location=receiver_location,
+                er=er,
+                se=se,
+                pmlthick=2,
+                save_forward_wavefield_path=temporary_directory,
+            )
+            saved_files = list(Path(temporary_directory).glob("*.pt"))
+            self.assertEqual(len(saved_files), 1)
+            self.assertIsNotNone(
+                re.fullmatch(r"forward_wavefield_\d{2}-\d{2}\.pt", saved_files[0].name)
+            )
+            saved_wavefield = torch.load(
+                saved_files[0], map_location="cpu", weights_only=True
+            )
+            self.assertTrue(torch.equal(saved_wavefield, result[0].detach().cpu()))
+            result[-1].square().mean().backward()
+            self.assertTrue(torch.isfinite(er.grad).all())
+            self.assertTrue(torch.isfinite(se.grad).all())
+
+    def test_compute_rejects_invalid_forward_wavefield_path(self):
+        with self.assertRaisesRegex(TypeError, "save_forward_wavefield_path"):
+            DeepGPR.compute(device="cpu", save_forward_wavefield_path=123)
 
     def test_cpml_memory_estimate_matches_allocated_tensors(self):
         nx, ny, nz, nstep = 10, 12, 14, 3

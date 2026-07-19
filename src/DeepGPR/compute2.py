@@ -1,6 +1,8 @@
 import torch
 import ctypes
 import warnings
+from datetime import datetime
+from pathlib import Path
 from . import get_deepgpr_lib, set_library_fdtd_order
 from .common import (
     _normalize_grid_spacing,
@@ -236,6 +238,7 @@ def _print_compute_preview(
     fdtd_order,
     mode,
     debug,
+    save_forward_wavefield_path,
     E,
     H,
     PML,
@@ -312,6 +315,10 @@ def _print_compute_preview(
     )
     print(f"  debug validation: {bool(debug)}")
     print("  print parameters: True")
+    print(
+        "  forward wavefield save directory: "
+        f"{save_forward_wavefield_path if save_forward_wavefield_path is not None else 'disabled'}"
+    )
     print(
         f"  initial E / H / PML supplied: {E is not None} / "
         f"{H is not None} / {PML is not None}"
@@ -405,6 +412,38 @@ def _normalize_wavefield_storage_dtype(value):
     return value
 
 
+def _normalize_forward_wavefield_directory(value):
+    """Validate an optional directory used to save the forward wavefield."""
+    if value is None:
+        return None
+    try:
+        directory = Path(value).expanduser()
+    except TypeError as exc:
+        raise TypeError(
+            "save_forward_wavefield_path must be a string, path-like object, or None."
+        ) from exc
+    if directory.exists() and not directory.is_dir():
+        raise NotADirectoryError(
+            f"save_forward_wavefield_path is not a directory: {directory}"
+        )
+    return directory
+
+
+def _save_forward_wavefield(wavefield, directory, run_time):
+    """Save a detached CPU copy of the forward wavefield and return its path."""
+    directory.mkdir(parents=True, exist_ok=True)
+    time_label = run_time.strftime("%H-%M")
+    output_path = directory / f"forward_wavefield_{time_label}.pt"
+    collision_index = 1
+    while output_path.exists():
+        output_path = directory / (
+            f"forward_wavefield_{time_label}_{collision_index:02d}.pt"
+        )
+        collision_index += 1
+    torch.save(wavefield.detach().to(device="cpu"), output_path)
+    return output_path.resolve()
+
+
 def _begin_native_call(device):
     """Order the native default stream after PyTorch's current CUDA stream."""
     if device.type != "cuda":
@@ -465,6 +504,7 @@ def compute(device, dx=None, dt=None,
             mode=2,
             debug=False,
             print_parameters=False,
+            save_forward_wavefield_path=None,
             *, eps_r=None, sigma=None, mu_r=None, receiver_component=None):
     """Run DeepGPR FDTD forward modeling with autograd support.
 
@@ -491,6 +531,8 @@ def compute(device, dx=None, dt=None,
         mode: FWI gradient mode; 2 uses Ez only, 3 uses Ex, Ey, and Ez.
         debug: Whether to run expensive tensor validation checks.
         print_parameters: Whether to print a preflight parameter and memory preview.
+        save_forward_wavefield_path: Directory used to save E_saved as
+            ``forward_wavefield_HH-MM.pt``. None disables file output.
         eps_r: Relative permittivity tensor with shape (nx, ny) or (nx, ny, nz).
         sigma: Electrical conductivity tensor with the same shape as eps_r.
         mu_r: Relative permeability tensor, or None to use ones.
@@ -514,6 +556,12 @@ def compute(device, dx=None, dt=None,
         raise ValueError("mode must be 2 or 3.")
     if not isinstance(print_parameters, bool):
         raise TypeError("print_parameters must be a bool.")
+    forward_wavefield_directory = _normalize_forward_wavefield_directory(
+        save_forward_wavefield_path
+    )
+    forward_wavefield_run_time = (
+        datetime.now() if forward_wavefield_directory is not None else None
+    )
     if not isinstance(model_gradient_sampling_interval, int) or model_gradient_sampling_interval < 1:
         raise ValueError("model_gradient_sampling_interval must be a positive integer.")
     wavefield_storage_dtype = _normalize_wavefield_storage_dtype(wavefield_storage_dtype)
@@ -569,6 +617,7 @@ def compute(device, dx=None, dt=None,
             fdtd_order=fdtd_order,
             mode=mode,
             debug=debug,
+            save_forward_wavefield_path=forward_wavefield_directory,
             E=E,
             H=H,
             PML=PML,
@@ -583,6 +632,12 @@ def compute(device, dx=None, dt=None,
 
     Ex,Ey,Ez,Hx,Hy,Hz,x0EPhi1,x0EPhi2,x0HPhi1,x0HPhi2,xmEPhi1,xmEPhi2,xmHPhi1,xmHPhi2,y0EPhi1,y0EPhi2,y0HPhi1,y0HPhi2,ymEPhi1,ymEPhi2,ymHPhi1,ymHPhi2,z0EPhi1,z0EPhi2,z0HPhi1,z0HPhi2,zmEPhi1,zmEPhi2,zmHPhi1,zmHPhi2,E_saved,receiver_amplitudes = DeepGPR.apply(
         eps_r, sigma,Ex,Ey,Ez,Hx,Hy,Hz,x0EPhi1,x0EPhi2,x0HPhi1,x0HPhi2,xmEPhi1,xmEPhi2,xmHPhi1,xmHPhi2,y0EPhi1,y0EPhi2,y0HPhi1,y0HPhi2,ymEPhi1,ymEPhi2,ymHPhi1,ymHPhi2,z0EPhi1,z0EPhi2,z0HPhi1,z0HPhi2,zmEPhi1,zmEPhi2,zmHPhi1,zmHPhi2, mu_r,grid_spacing,nx,ny,nz,dt,nt,nstep,source_amplitudes,source_location,receiver_location,pmlthick,nsr,nrx,device,dtype,x0,xm,y0,ym,z0,zm,x01,x02,xm1,xm2,y01,y02,ym1,ym2,z01,z02,zm1,zm2,eps_r_pad,sigma_pad,source_direction, receiver_component, model_gradient_sampling_interval, wavefield_storage_dtype, use_async_offload, fdtd_order, mode, debug)
+
+    if forward_wavefield_directory is not None:
+        saved_path = _save_forward_wavefield(
+            E_saved, forward_wavefield_directory, forward_wavefield_run_time
+        )
+        print(f"Forward wavefield saved to {saved_path}")
 
     return E_saved,(Ex,Ey,Ez),(Hx,Hy,Hz),(x0EPhi1,x0EPhi2,x0HPhi1,x0HPhi2,xmEPhi1,xmEPhi2,xmHPhi1,xmHPhi2,y0EPhi1,y0EPhi2,y0HPhi1,y0HPhi2,ymEPhi1,ymEPhi2,ymHPhi1,ymHPhi2,z0EPhi1,z0EPhi2,z0HPhi1,z0HPhi2,zmEPhi1,zmEPhi2,zmHPhi1,zmHPhi2),receiver_amplitudes
 

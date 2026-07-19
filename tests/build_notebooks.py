@@ -106,7 +106,7 @@ NOTEBOOKS["00_local_backend_and_contracts.ipynb"] = notebook(
             vu.record_check(
                 CHECKS,
                 "native ABI and required exports",
-                METADATA["native_abi"] == 5 and not missing_symbols,
+                METADATA["native_abi"] == 6 and not missing_symbols,
                 abi=METADATA["native_abi"],
                 missing_symbols=missing_symbols,
                 library=METADATA["native_library"],

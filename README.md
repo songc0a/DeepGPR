@@ -154,7 +154,8 @@ def compute(device, dx=None, dt=None,
             fdtd_order=2,
             mode=2,
             debug=False,
-            print_parameters=False):
+            print_parameters=False,
+            save_forward_wavefield_path=None):
 ```
 
 Set `print_parameters=True` on an ordinary call to print the normalized
@@ -180,6 +181,7 @@ result = DeepGPR.compute(
 | **`mode`** | `int` | FWI gradient mode. `2` keeps the previous Ez-only model-gradient calculation. `3` uses Ex, Ey, and Ez electric-field contributions for relative permittivity and conductivity gradients. |
 | **`debug`** | `bool` | Runs expensive NaN/Inf and zero-field validation checks when `True`. Backward validation covers material, source, and initial-state gradients actually requested by autograd. The default `False` keeps these checks disabled for faster production runs. |
 | **`print_parameters`** | `bool` | Prints a preflight summary before native FDTD execution. The summary includes all simulation options and a tensor-payload memory estimate for model/state tensors, CPML, saved `E_saved`/`R_saved` wavefields, receiver buffers, gradients, low-precision snapshots, and CUDA offload buffers. CPU and CUDA estimates are reported separately with a 20% capacity margin. |
+| **`save_forward_wavefield_path`** | `str` / path-like / `None` | Directory used to save `E_saved` after a successful forward run. The default `None` performs no file I/O. Files use the local 24-hour start time, for example `forward_wavefield_14-35.pt`; a numeric suffix prevents overwriting when multiple runs start in the same minute. |
 ### 2. Medium Model Parameters
 
 This section defines the electromagnetic properties of the simulation space. For 2D simulations, set `nz=1`.
@@ -288,6 +290,7 @@ return E_saved, (Ex, Ey, Ez), (Hx, Hy, Hz), (x0EPhi1...zmHPhi2), receiver_amplit
     *   **Shape when `mode=3`**: `(3, nt_saved, nstep, nx, ny, nz)`, storing components in `[Ex, Ey, Ez]` order.
     *   `nt_saved` depends on `nt` and `model_gradient_sampling_interval`.
     *   Dtype is selected by `wavefield_storage_dtype`.
+    *   Set `save_forward_wavefield_path="/path/to/output"` to save this tensor as a CPU-loadable `.pt` file. Load it with `torch.load(path, map_location="cpu")`.
 2.  **`(Ex, Ey, Ez)`**: The 3D electric field state at the final time step. 
 3.  **`(Hx, Hy, Hz)`**: The 3D magnetic field state at the final time step.
 4.  **`(PML_Tuple)`**: A tuple of 24 Tensors recording the final time step state of the PML auxiliary $\Phi$ variables.

@@ -117,7 +117,7 @@ def runtime_metadata(deepgpr: Any, device: torch.device | str) -> dict[str, Any]
         ) from exc
     library = deepgpr.get_deepgpr_lib(device)
     abi = int(library.deepgpr_abi_version())
-    if abi != 5:
+    if abi != 6:
         raise RuntimeError(f"Expected native ABI 6, received ABI {abi}.")
 
     metadata: dict[str, Any] = {
