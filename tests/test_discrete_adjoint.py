@@ -348,8 +348,16 @@ class DiscreteAdjointTests(unittest.TestCase):
             eps_r = torch.full((14, 17), 4.0, device=device, requires_grad=True)
             sigma = torch.full((14, 17), 2.0e-4, device=device, requires_grad=True)
             source = DeepGPR.wavelet.ricker(3.5e8, 100, 2.5e-11, 2.0e-9).reshape(1, 100, 1).to(device)
-            source_location = torch.tensor([[[6, 6, 0]]], dtype=torch.int32, device=device)
-            receiver_location = torch.tensor([[[6, 10, 0]]], dtype=torch.int32, device=device)
+            source_location = torch.tensor(
+                [[[5, 6, 0]], [[7, 6, 0]], [[9, 6, 0]]],
+                dtype=torch.int32,
+                device=device,
+            )
+            receiver_location = torch.tensor(
+                [[[5, 10, 0]], [[7, 10, 0]], [[9, 10, 0]]],
+                dtype=torch.int32,
+                device=device,
+            )
             receiver = DeepGPR.compute(
                 device=device, dx=(0.020, 0.016, 0.012), dt=2.5e-11,
                 source_amplitudes=source,

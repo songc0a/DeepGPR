@@ -65,3 +65,18 @@ export DEEPGPR_REQUIRE_CUDA=1
 The native libraries in `src/DeepGPR/lib` must have been rebuilt from the same
 source revision before the suite is used as release evidence. A source change
 followed by tests against stale shared libraries is not a valid verification.
+
+## CUDA performance benchmark
+
+`benchmark_cuda.py` reports separate median forward and backward times using the
+repository-local package. Its optional power sampler records board power, GPU
+utilization, and SM clock through `nvidia-smi`:
+
+```bash
+python tests/benchmark_cuda.py --device cuda:0 --sample-power
+```
+
+Use identical arguments, power limit, application clocks, PyTorch version, and
+native build when comparing revisions. Board power is diagnostic metadata, not
+an optimization objective; memory-bound FDTD kernels may reach their best
+runtime below the GPU's maximum power limit.
