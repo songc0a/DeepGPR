@@ -175,6 +175,112 @@ __device__ __forceinline__ float load_wavefield_value_device(
     } \
 } while (0)
 
+struct CpmlRegion {
+    int i0, ni;
+    int j0, nj;
+    int k0, nk;
+    long long offset;
+    long long size;
+};
+
+struct CpmlRegionLayout {
+    CpmlRegion regions[6];
+    long long cells_per_shot;
+};
+
+static int clamp_cpml_index(int value, int extent)
+{
+    if (value < 0) return 0;
+    if (value > extent) return extent;
+    return value;
+}
+
+static void set_cpml_region(
+    CpmlRegionLayout* layout, int region_index,
+    int i0, int i1, int j0, int j1, int k0, int k1)
+{
+    CpmlRegion* region = &layout->regions[region_index];
+    region->i0 = i0;
+    region->ni = i1 > i0 ? i1 - i0 : 0;
+    region->j0 = j0;
+    region->nj = j1 > j0 ? j1 - j0 : 0;
+    region->k0 = k0;
+    region->nk = k1 > k0 ? k1 - k0 : 0;
+    region->offset = layout->cells_per_shot;
+    region->size = (long long)region->ni * region->nj * region->nk;
+    layout->cells_per_shot += region->size;
+}
+
+/*
+ * Partition the CPML shell into six disjoint boxes. The x boxes own edges and
+ * corners, the y boxes exclude the x boxes, and the z boxes exclude both.
+ * A thread still evaluates all face predicates for its cell, preserving the
+ * original x/y/z correction order where CPML faces overlap.
+ */
+static CpmlRegionLayout build_cpml_region_layout(
+    int NX, int NY, int NZ,
+    int pml0, int pml1, int pml2, int pml3, int pml4, int pml5,
+    int electric)
+{
+    CpmlRegionLayout layout = {};
+    int x_low_end = pml0 > 0
+        ? clamp_cpml_index(pml0 + (electric ? 1 : 0), NX) : 0;
+    int y_low_end = pml2 > 0
+        ? clamp_cpml_index(pml2 + (electric ? 1 : 0), NY) : 0;
+    int z_low_end = pml4 > 0
+        ? clamp_cpml_index(pml4 + (electric ? 1 : 0), NZ) : 0;
+    int x_high_begin = pml1 > 0
+        ? clamp_cpml_index(NX - 1 - pml1, NX) : NX;
+    int y_high_begin = pml3 > 0
+        ? clamp_cpml_index(NY - 1 - pml3, NY) : NY;
+    int z_high_begin = pml5 > 0
+        ? clamp_cpml_index(NZ - 1 - pml5, NZ) : NZ;
+
+    int x_mid_end = x_high_begin > x_low_end ? x_high_begin : x_low_end;
+    int y_mid_end = y_high_begin > y_low_end ? y_high_begin : y_low_end;
+
+    set_cpml_region(&layout, 0, 0, x_low_end, 0, NY, 0, NZ);
+    set_cpml_region(&layout, 1, x_mid_end, pml1 > 0 ? NX : x_mid_end, 0, NY, 0, NZ);
+    set_cpml_region(&layout, 2, x_low_end, x_mid_end, 0, y_low_end, 0, NZ);
+    set_cpml_region(&layout, 3, x_low_end, x_mid_end, y_mid_end, pml3 > 0 ? NY : y_mid_end, 0, NZ);
+    set_cpml_region(&layout, 4, x_low_end, x_mid_end, y_low_end, y_mid_end, 0, z_low_end);
+    set_cpml_region(&layout, 5, x_low_end, x_mid_end, y_low_end, y_mid_end,
+        z_high_begin > z_low_end ? z_high_begin : z_low_end,
+        pml5 > 0 ? NZ : (z_high_begin > z_low_end ? z_high_begin : z_low_end));
+    return layout;
+}
+
+__device__ __forceinline__ bool map_cpml_work(
+    long long compact_work, int step, const CpmlRegionLayout& layout,
+    int* shot, long long* i, long long* j, long long* k)
+{
+    if (layout.cells_per_shot == 0 ||
+        compact_work >= (long long)step * layout.cells_per_shot) {
+        return false;
+    }
+
+    *shot = (int)(compact_work / layout.cells_per_shot);
+    long long local = compact_work % layout.cells_per_shot;
+    int region_index = 0;
+#pragma unroll
+    for (int r = 0; r < 6; ++r) {
+        const CpmlRegion& candidate = layout.regions[r];
+        if (local >= candidate.offset && local < candidate.offset + candidate.size) {
+            region_index = r;
+            break;
+        }
+    }
+
+    const CpmlRegion& region = layout.regions[region_index];
+    long long region_local = local - region.offset;
+    long long jk = (long long)region.nj * region.nk;
+    *i = region.i0 + region_local / jk;
+    long long remainder = region_local % jk;
+    *j = region.j0 + remainder / region.nk;
+    *k = region.k0 + remainder % region.nk;
+    return true;
+}
+
 static int g_fdtd_order = 2;
 
 DEEPGPR_API int deepgpr_abi_version(void)
@@ -663,20 +769,17 @@ __global__ void cpml_e_gpu(
     float* __restrict__ y0EPhi1, float* __restrict__ y0EPhi2,
     float* __restrict__ ymEPhi1, float* __restrict__ ymEPhi2,
     float* __restrict__ z0EPhi1, float* __restrict__ z0EPhi2,
-    float* __restrict__ zmEPhi1, float* __restrict__ zmEPhi2)
+    float* __restrict__ zmEPhi1, float* __restrict__ zmEPhi2,
+    CpmlRegionLayout region_layout)
 {
     long long ny_nz = (long long)NY_FIELDS * NZ_FIELDS;
     long long field_stride = (long long)NX_FIELDS * ny_nz;
-    long long work = blockIdx.x * blockDim.x + threadIdx.x;
-    if (work >= (long long)step * field_stride) return;
-
-    int s = (int)(work / field_stride);
-    long long idx = work % field_stride;
-
-    long long i = idx / ny_nz;
-    long long rem = idx % ny_nz;
-    long long j = rem / NZ_FIELDS;
-    long long k = rem % NZ_FIELDS;
+    long long compact_work = blockIdx.x * blockDim.x + threadIdx.x;
+    int s;
+    long long i, j, k;
+    if (!map_cpml_work(compact_work, step, region_layout, &s, &i, &j, &k)) return;
+    long long idx = i * ny_nz + j * NZ_FIELDS + k;
+    long long work = (long long)s * field_stride + idx;
 
     bool in_x0 = (pml0 > 0 && i > 0 && i <= pml0 && j < NY_FIELDS && k < NZ_FIELDS);
     bool in_xm = (pml1 > 0 && i >= NX_FIELDS - 1 - pml1 && i < NX_FIELDS - 1 && j < NY_FIELDS && k < NZ_FIELDS);
@@ -957,20 +1060,17 @@ __global__ void cpml_h_gpu(
     float* __restrict__ y0HPhi1, float* __restrict__ y0HPhi2,
     float* __restrict__ ymHPhi1, float* __restrict__ ymHPhi2,
     float* __restrict__ z0HPhi1, float* __restrict__ z0HPhi2,
-    float* __restrict__ zmHPhi1, float* __restrict__ zmHPhi2)
+    float* __restrict__ zmHPhi1, float* __restrict__ zmHPhi2,
+    CpmlRegionLayout region_layout)
 {
     long long ny_nz = (long long)NY_FIELDS * NZ_FIELDS;
     long long field_stride = (long long)NX_FIELDS * ny_nz;
-    long long work = blockIdx.x * blockDim.x + threadIdx.x;
-    if (work >= (long long)step * field_stride) return;
-
-    int s = (int)(work / field_stride);
-    long long idx = work % field_stride;
-
-    long long i = idx / ny_nz;
-    long long rem = idx % ny_nz;
-    long long j = rem / NZ_FIELDS;
-    long long k = rem % NZ_FIELDS;
+    long long compact_work = blockIdx.x * blockDim.x + threadIdx.x;
+    int s;
+    long long i, j, k;
+    if (!map_cpml_work(compact_work, step, region_layout, &s, &i, &j, &k)) return;
+    long long idx = i * ny_nz + j * NZ_FIELDS + k;
+    long long work = (long long)s * field_stride + idx;
 
     bool in_x0 = (pml0 > 0 && i < pml0 && j < NY_FIELDS && k < NZ_FIELDS);
     bool in_xm = (pml1 > 0 && i >= NX_FIELDS - 1 - pml1 && i < NX_FIELDS - 1 && j < NY_FIELDS && k < NZ_FIELDS);
@@ -1111,18 +1211,17 @@ __global__ void adjoint_cpml_e_gpu(
     const float* z0R, const float* zmR, const float* update,
     float* x0P1, float* x0P2, float* xmP1, float* xmP2,
     float* y0P1, float* y0P2, float* ymP1, float* ymP2,
-    float* z0P1, float* z0P2, float* zmP1, float* zmP2)
+    float* z0P1, float* z0P2, float* zmP1, float* zmP2,
+    CpmlRegionLayout region_layout)
 {
     long long ny_nz = (long long)NY * NZ;
     long long field_stride = (long long)NX * ny_nz;
-    long long work = blockIdx.x * blockDim.x + threadIdx.x;
-    if (work >= (long long)step * field_stride) return;
-    int s = (int)(work / field_stride);
-    long long idx = work % field_stride;
-    long long i = idx / ny_nz;
-    long long rem = idx % ny_nz;
-    long long j = rem / NZ;
-    long long k = rem % NZ;
+    long long compact_work = blockIdx.x * blockDim.x + threadIdx.x;
+    int s;
+    long long i, j, k;
+    if (!map_cpml_work(compact_work, step, region_layout, &s, &i, &j, &k)) return;
+    long long idx = i * ny_nz + j * NZ + k;
+    long long work = (long long)s * field_stride + idx;
     float upd = update[idx];
 
 #define APPLY_E_PML_GPU(R, P, p, q, stride, coord, n, spacing, field, source, sign) \
@@ -1211,18 +1310,17 @@ __global__ void adjoint_cpml_h_gpu(
     const float* z0R, const float* zmR, const float* update,
     float* x0P1, float* x0P2, float* xmP1, float* xmP2,
     float* y0P1, float* y0P2, float* ymP1, float* ymP2,
-    float* z0P1, float* z0P2, float* zmP1, float* zmP2)
+    float* z0P1, float* z0P2, float* zmP1, float* zmP2,
+    CpmlRegionLayout region_layout)
 {
     long long ny_nz = (long long)NY * NZ;
     long long field_stride = (long long)NX * ny_nz;
-    long long work = blockIdx.x * blockDim.x + threadIdx.x;
-    if (work >= (long long)step * field_stride) return;
-    int s = (int)(work / field_stride);
-    long long idx = work % field_stride;
-    long long i = idx / ny_nz;
-    long long rem = idx % ny_nz;
-    long long j = rem / NZ;
-    long long k = rem % NZ;
+    long long compact_work = blockIdx.x * blockDim.x + threadIdx.x;
+    int s;
+    long long i, j, k;
+    if (!map_cpml_work(compact_work, step, region_layout, &s, &i, &j, &k)) return;
+    long long idx = i * ny_nz + j * NZ + k;
+    long long work = (long long)s * field_stride + idx;
     float upd = update[idx];
 
 #define APPLY_H_PML_GPU(R, P, p, q, stride, coord, n, spacing, field, source, sign) \
@@ -1666,6 +1764,16 @@ DEEPGPR_API void forward(const float* __restrict__ eps_r_pad, const float* __res
     long long total_fields = (long long)NX_FIELDS * NY_FIELDS * NZ_FIELDS;
     dim3 grid_material(CEIL_DIV(total_fields, blockSize));
     dim3 grid_fields(CEIL_DIV((long long)step * total_fields, blockSize));
+    CpmlRegionLayout cpml_e_layout = build_cpml_region_layout(
+        NX_FIELDS, NY_FIELDS, NZ_FIELDS,
+        pml0, pml1, pml2, pml3, pml4, pml5, 1);
+    CpmlRegionLayout cpml_h_layout = build_cpml_region_layout(
+        NX_FIELDS, NY_FIELDS, NZ_FIELDS,
+        pml0, pml1, pml2, pml3, pml4, pml5, 0);
+    int has_cpml_e = has_cpml && cpml_e_layout.cells_per_shot > 0;
+    int has_cpml_h = has_cpml && cpml_h_layout.cells_per_shot > 0;
+    dim3 grid_cpml_e(CEIL_DIV((long long)step * cpml_e_layout.cells_per_shot, blockSize));
+    dim3 grid_cpml_h(CEIL_DIV((long long)step * cpml_h_layout.cells_per_shot, blockSize));
 
     build_update_coeffs_gpu<<<grid_material, blockSize, 0, stream_comp>>>(eps_r_pad, sigma_pad, mu_r_pad, ce_hist, ce_curl, ce_rhs, ch_hist, ch_curl, ch_rhs, NX_FIELDS, NY_FIELDS, NZ_FIELDS, dt, dx);
     CUDA_CHECK_LAST();
@@ -1717,58 +1825,64 @@ DEEPGPR_API void forward(const float* __restrict__ eps_r_pad, const float* __res
         if (fdtd_order == 8) {
             update_h_gpu<8><<<grid_fields, blockSize, 0, stream_comp>>>(ch_hist, ch_curl, Ex, Ey, Ez, Hx, Hy, Hz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, dx, dy, dz);
             CUDA_CHECK_LAST();
-            if (has_cpml) {
-                cpml_h_gpu<8><<<grid_fields, blockSize, 0, stream_comp>>>(
+            if (has_cpml_h) {
+                cpml_h_gpu<8><<<grid_cpml_h, blockSize, 0, stream_comp>>>(
                     Ex, Ey, Ez, Hx, Hy, Hz, dx, dy, dz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
                     pml0, pml1, pml2, pml3, pml4, pml5, x0HR, xmHR, y0HR, ymHR, z0HR, zmHR, ch_rhs,
-                    x0HPhi1, x0HPhi2, xmHPhi1, xmHPhi2, y0HPhi1, y0HPhi2, ymHPhi1, ymHPhi2, z0HPhi1, z0HPhi2, zmHPhi1, zmHPhi2);
+                    x0HPhi1, x0HPhi2, xmHPhi1, xmHPhi2, y0HPhi1, y0HPhi2, ymHPhi1, ymHPhi2, z0HPhi1, z0HPhi2, zmHPhi1, zmHPhi2,
+                    cpml_h_layout);
                 CUDA_CHECK_LAST();
             }
             update_e_gpu<8><<<grid_fields, blockSize, 0, stream_comp>>>(ce_hist, ce_curl, Ex, Ey, Ez, Hx, Hy, Hz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, dx, dy, dz);
             CUDA_CHECK_LAST();
-            if (has_cpml) {
-                cpml_e_gpu<8><<<grid_fields, blockSize, 0, stream_comp>>>(
+            if (has_cpml_e) {
+                cpml_e_gpu<8><<<grid_cpml_e, blockSize, 0, stream_comp>>>(
                     Ex, Ey, Ez, Hx, Hy, Hz, dx, dy, dz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
                     pml0, pml1, pml2, pml3, pml4, pml5, x0ER, xmER, y0ER, ymER, z0ER, zmER, ce_rhs,
-                    x0EPhi1, x0EPhi2, xmEPhi1, xmEPhi2, y0EPhi1, y0EPhi2, ymEPhi1, ymEPhi2, z0EPhi1, z0EPhi2, zmEPhi1, zmEPhi2);
+                    x0EPhi1, x0EPhi2, xmEPhi1, xmEPhi2, y0EPhi1, y0EPhi2, ymEPhi1, ymEPhi2, z0EPhi1, z0EPhi2, zmEPhi1, zmEPhi2,
+                    cpml_e_layout);
                 CUDA_CHECK_LAST();
             }
         } else if (fdtd_order == 4) {
             update_h_gpu<4><<<grid_fields, blockSize, 0, stream_comp>>>(ch_hist, ch_curl, Ex, Ey, Ez, Hx, Hy, Hz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, dx, dy, dz);
             CUDA_CHECK_LAST();
-            if (has_cpml) {
-                cpml_h_gpu<4><<<grid_fields, blockSize, 0, stream_comp>>>(
+            if (has_cpml_h) {
+                cpml_h_gpu<4><<<grid_cpml_h, blockSize, 0, stream_comp>>>(
                     Ex, Ey, Ez, Hx, Hy, Hz, dx, dy, dz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
                     pml0, pml1, pml2, pml3, pml4, pml5, x0HR, xmHR, y0HR, ymHR, z0HR, zmHR, ch_rhs,
-                    x0HPhi1, x0HPhi2, xmHPhi1, xmHPhi2, y0HPhi1, y0HPhi2, ymHPhi1, ymHPhi2, z0HPhi1, z0HPhi2, zmHPhi1, zmHPhi2);
+                    x0HPhi1, x0HPhi2, xmHPhi1, xmHPhi2, y0HPhi1, y0HPhi2, ymHPhi1, ymHPhi2, z0HPhi1, z0HPhi2, zmHPhi1, zmHPhi2,
+                    cpml_h_layout);
                 CUDA_CHECK_LAST();
             }
             update_e_gpu<4><<<grid_fields, blockSize, 0, stream_comp>>>(ce_hist, ce_curl, Ex, Ey, Ez, Hx, Hy, Hz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, dx, dy, dz);
             CUDA_CHECK_LAST();
-            if (has_cpml) {
-                cpml_e_gpu<4><<<grid_fields, blockSize, 0, stream_comp>>>(
+            if (has_cpml_e) {
+                cpml_e_gpu<4><<<grid_cpml_e, blockSize, 0, stream_comp>>>(
                     Ex, Ey, Ez, Hx, Hy, Hz, dx, dy, dz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
                     pml0, pml1, pml2, pml3, pml4, pml5, x0ER, xmER, y0ER, ymER, z0ER, zmER, ce_rhs,
-                    x0EPhi1, x0EPhi2, xmEPhi1, xmEPhi2, y0EPhi1, y0EPhi2, ymEPhi1, ymEPhi2, z0EPhi1, z0EPhi2, zmEPhi1, zmEPhi2);
+                    x0EPhi1, x0EPhi2, xmEPhi1, xmEPhi2, y0EPhi1, y0EPhi2, ymEPhi1, ymEPhi2, z0EPhi1, z0EPhi2, zmEPhi1, zmEPhi2,
+                    cpml_e_layout);
                 CUDA_CHECK_LAST();
             }
         } else {
             update_h_gpu<2><<<grid_fields, blockSize, 0, stream_comp>>>(ch_hist, ch_curl, Ex, Ey, Ez, Hx, Hy, Hz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, dx, dy, dz);
             CUDA_CHECK_LAST();
-            if (has_cpml) {
-                cpml_h_gpu<2><<<grid_fields, blockSize, 0, stream_comp>>>(
+            if (has_cpml_h) {
+                cpml_h_gpu<2><<<grid_cpml_h, blockSize, 0, stream_comp>>>(
                     Ex, Ey, Ez, Hx, Hy, Hz, dx, dy, dz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
                     pml0, pml1, pml2, pml3, pml4, pml5, x0HR, xmHR, y0HR, ymHR, z0HR, zmHR, ch_rhs,
-                    x0HPhi1, x0HPhi2, xmHPhi1, xmHPhi2, y0HPhi1, y0HPhi2, ymHPhi1, ymHPhi2, z0HPhi1, z0HPhi2, zmHPhi1, zmHPhi2);
+                    x0HPhi1, x0HPhi2, xmHPhi1, xmHPhi2, y0HPhi1, y0HPhi2, ymHPhi1, ymHPhi2, z0HPhi1, z0HPhi2, zmHPhi1, zmHPhi2,
+                    cpml_h_layout);
                 CUDA_CHECK_LAST();
             }
             update_e_gpu<2><<<grid_fields, blockSize, 0, stream_comp>>>(ce_hist, ce_curl, Ex, Ey, Ez, Hx, Hy, Hz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, dx, dy, dz);
             CUDA_CHECK_LAST();
-            if (has_cpml) {
-                cpml_e_gpu<2><<<grid_fields, blockSize, 0, stream_comp>>>(
+            if (has_cpml_e) {
+                cpml_e_gpu<2><<<grid_cpml_e, blockSize, 0, stream_comp>>>(
                     Ex, Ey, Ez, Hx, Hy, Hz, dx, dy, dz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
                     pml0, pml1, pml2, pml3, pml4, pml5, x0ER, xmER, y0ER, ymER, z0ER, zmER, ce_rhs,
-                    x0EPhi1, x0EPhi2, xmEPhi1, xmEPhi2, y0EPhi1, y0EPhi2, ymEPhi1, ymEPhi2, z0EPhi1, z0EPhi2, zmEPhi1, zmEPhi2);
+                    x0EPhi1, x0EPhi2, xmEPhi1, xmEPhi2, y0EPhi1, y0EPhi2, ymEPhi1, ymEPhi2, z0EPhi1, z0EPhi2, zmEPhi1, zmEPhi2,
+                    cpml_e_layout);
                 CUDA_CHECK_LAST();
             }
         }
@@ -1964,6 +2078,16 @@ DEEPGPR_API void backward(const float* __restrict__ eps_r_pad, const float* __re
     long long total_fields = (long long)NX_FIELDS * NY_FIELDS * NZ_FIELDS;
     dim3 grid_material(CEIL_DIV(total_fields, blockSize));
     dim3 grid_fields(CEIL_DIV((long long)step * total_fields, blockSize));
+    CpmlRegionLayout cpml_e_layout = build_cpml_region_layout(
+        NX_FIELDS, NY_FIELDS, NZ_FIELDS,
+        pml0, pml1, pml2, pml3, pml4, pml5, 1);
+    CpmlRegionLayout cpml_h_layout = build_cpml_region_layout(
+        NX_FIELDS, NY_FIELDS, NZ_FIELDS,
+        pml0, pml1, pml2, pml3, pml4, pml5, 0);
+    int has_cpml_e = has_cpml && cpml_e_layout.cells_per_shot > 0;
+    int has_cpml_h = has_cpml && cpml_h_layout.cells_per_shot > 0;
+    dim3 grid_cpml_e(CEIL_DIV((long long)step * cpml_e_layout.cells_per_shot, blockSize));
+    dim3 grid_cpml_h(CEIL_DIV((long long)step * cpml_h_layout.cells_per_shot, blockSize));
 
     build_update_coeffs_gpu<<<grid_material, blockSize, 0, stream_comp>>>(eps_r_pad, sigma_pad, mu_r_pad, ce_hist, ce_curl, ce_rhs, ch_hist, ch_curl, ch_rhs, NX_FIELDS, NY_FIELDS, NZ_FIELDS, dt, dx);
     CUDA_CHECK_LAST();
@@ -2032,24 +2156,24 @@ DEEPGPR_API void backward(const float* __restrict__ eps_r_pad, const float* __re
         }
 
         /* E CPML^T -> E update^T -> H CPML^T -> H update^T. */
-        if (has_cpml) {
-            LAUNCH_ORDER_KERNEL(adjoint_cpml_e_gpu, grid_fields, blockSize, stream_comp, fdtd_order,
+        if (has_cpml_e) {
+            LAUNCH_ORDER_KERNEL(adjoint_cpml_e_gpu, grid_cpml_e, blockSize, stream_comp, fdtd_order,
                 lambda_ex, lambda_ey, lambda_ez, lambda_hx, lambda_hy, lambda_hz, dx, dy, dz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
                 pml0, pml1, pml2, pml3, pml4, pml5, x0ER, xmER, y0ER, ymER, z0ER, zmER, ce_rhs,
                 x0EPhi1, x0EPhi2, xmEPhi1, xmEPhi2, y0EPhi1, y0EPhi2, ymEPhi1, ymEPhi2,
-                z0EPhi1, z0EPhi2, zmEPhi1, zmEPhi2);
+                z0EPhi1, z0EPhi2, zmEPhi1, zmEPhi2, cpml_e_layout);
             CUDA_CHECK_LAST();
         }
         LAUNCH_ORDER_KERNEL(adjoint_e_gpu, grid_fields, blockSize, stream_comp, fdtd_order,
             ce_hist, ce_curl, lambda_ex, lambda_ey, lambda_ez, lambda_hx, lambda_hy, lambda_hz,
             step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, dx, dy, dz);
         CUDA_CHECK_LAST();
-        if (has_cpml) {
-            LAUNCH_ORDER_KERNEL(adjoint_cpml_h_gpu, grid_fields, blockSize, stream_comp, fdtd_order,
+        if (has_cpml_h) {
+            LAUNCH_ORDER_KERNEL(adjoint_cpml_h_gpu, grid_cpml_h, blockSize, stream_comp, fdtd_order,
                 lambda_ex, lambda_ey, lambda_ez, lambda_hx, lambda_hy, lambda_hz, dx, dy, dz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
                 pml0, pml1, pml2, pml3, pml4, pml5, x0HR, xmHR, y0HR, ymHR, z0HR, zmHR, ch_rhs,
                 x0HPhi1, x0HPhi2, xmHPhi1, xmHPhi2, y0HPhi1, y0HPhi2, ymHPhi1, ymHPhi2,
-                z0HPhi1, z0HPhi2, zmHPhi1, zmHPhi2);
+                z0HPhi1, z0HPhi2, zmHPhi1, zmHPhi2, cpml_h_layout);
             CUDA_CHECK_LAST();
         }
         LAUNCH_ORDER_KERNEL(adjoint_h_gpu, grid_fields, blockSize, stream_comp, fdtd_order,

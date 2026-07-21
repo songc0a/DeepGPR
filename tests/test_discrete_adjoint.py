@@ -67,23 +67,24 @@ def _locations(shape):
     return torch.tensor([[center]], dtype=torch.int32)
 
 
-def _state_problem(order, pml):
+def _state_problem(order, pml, device="cpu"):
     torch.manual_seed(1100 + order + pml)
+    device = torch.device(device)
     shape = (9, 10, 8)
     nx, ny, nz = shape
-    x = torch.linspace(0.0, 1.0, nx)[:, None, None]
-    y = torch.linspace(0.0, 1.0, ny)[None, :, None]
-    z = torch.linspace(0.0, 1.0, nz)[None, None, :]
+    x = torch.linspace(0.0, 1.0, nx, device=device)[:, None, None]
+    y = torch.linspace(0.0, 1.0, ny, device=device)[None, :, None]
+    z = torch.linspace(0.0, 1.0, nz, device=device)[None, None, :]
     eps_r = 3.5 + 0.7 * x + 0.2 * y + 0.1 * z
     sigma = 1.0e-4 + 1.0e-4 * (x + y + z) / 3.0
     mu_r = 1.0 + 0.15 * x + 0.0 * y + 0.05 * z
-    location = _locations(shape)
-    source = torch.zeros((1, 1, 1), dtype=torch.float32)
+    location = _locations(shape).to(device)
+    source = torch.zeros((1, 1, 1), dtype=torch.float32, device=device)
     spacing = (0.020, 0.017, 0.013)
     dt = 1.0e-11
 
     initial_e, initial_h, initial_cpml = DeepGPR.checkpoint_initial_field(
-        device="cpu",
+        device=device,
         dx=spacing,
         dt=dt,
         source_amplitudes=source,
@@ -102,7 +103,7 @@ def _state_problem(order, pml):
     ]
     state = [tensor.clone().requires_grad_(True) for tensor in base_state]
     result = DeepGPR.compute(
-        device="cpu",
+        device=device,
         dx=spacing,
         dt=dt,
         source_amplitudes=source,
@@ -268,6 +269,15 @@ class DiscreteAdjointTests(unittest.TestCase):
 
     def test_native_cpml_single_step_dot_product_all_faces(self):
         self.assertLess(_state_problem(order=4, pml=2), 3.0e-5)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is not available")
+    def test_cuda_cpml_single_step_dot_products_orders_2_4_8(self):
+        for order in (2, 4, 8):
+            with self.subTest(order=order):
+                self.assertLess(
+                    _state_problem(order=order, pml=2, device="cuda"),
+                    2.0e-4,
+                )
 
     def test_source_waveform_gradient_matches_finite_difference(self):
         nx, ny, nt = 12, 14, 60
