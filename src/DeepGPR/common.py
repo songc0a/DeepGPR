@@ -80,6 +80,7 @@ def initialization(device, er,se,mr,source_amplitudes,source_location,receiver_l
         pmlthick: PML thickness as an int, list, or tensor.
         fdtd_order: Spatial finite-difference order used for the CFL check.
     """
+    device = torch.device("cpu" if device is None else device)
     dtype=torch.float32
     spacing = _normalize_grid_spacing(dx)
     try:
@@ -100,6 +101,8 @@ def initialization(device, er,se,mr,source_amplitudes,source_location,receiver_l
     elif len(se.shape) != 3:
         raise ValueError('The shape of sigma should be 2-d or 3-d.')
 
+    if mr is not None and not torch.is_tensor(mr):
+        raise TypeError("mr must be a PyTorch tensor or None.")
     if mr is not None:
         if len(mr.shape) == 2:
             mr = mr.reshape(*mr.shape, 1)
@@ -108,6 +111,8 @@ def initialization(device, er,se,mr,source_amplitudes,source_location,receiver_l
 
     if er.shape != se.shape:
         raise ValueError('The shape of epsilon and sigma should be the same.')
+    if any(size < 1 for size in er.shape):
+        raise ValueError("The material model dimensions must all be non-empty.")
     nx, ny, nz = er.shape
     mode = 2 if nz == 1 else 3
     er=er.to(device=device, dtype=dtype)
@@ -119,17 +124,36 @@ def initialization(device, er,se,mr,source_amplitudes,source_location,receiver_l
     else:
         raise ValueError('The shape of mr should be the same as epsilon and sigma.')
 
-    if source_location.shape[0] != receiver_location.shape[0]:
-        raise ValueError('The first dimension (nstep) of source_location and receiver_location should be the same.')
+    if not torch.is_tensor(source_location) or not torch.is_tensor(receiver_location):
+        raise TypeError("source_location and receiver_location must be PyTorch tensors.")
     if source_location.ndim != 3 or receiver_location.ndim != 3:
         raise ValueError("source_location and receiver_location must have shape (nstep, count, 3).")
     if source_location.shape[2] != 3 or receiver_location.shape[2] != 3:
         raise ValueError("The last dimension of source_location and receiver_location must be 3.")
+    if source_location.shape[0] != receiver_location.shape[0]:
+        raise ValueError('The first dimension (nstep) of source_location and receiver_location should be the same.')
     nstep=source_location.shape[0]
     nsr=source_location.shape[1]
     nrx=receiver_location.shape[1]
-    source_location=source_location.to(device=device, dtype=torch.int32).contiguous()
-    receiver_location=receiver_location.to(device=device, dtype=torch.int32).contiguous()
+    if nstep < 1:
+        raise ValueError("At least one shot is required.")
+    if nsr < 1:
+        raise ValueError("At least one source per shot is required.")
+    if nrx < 1:
+        raise ValueError("At least one receiver per shot is required.")
+    if device.type == "cuda" and nstep > 65535:
+        raise ValueError(
+            "CUDA supports at most 65535 shots in one DeepGPR compute call. "
+            "Split a larger acquisition batch into smaller calls."
+        )
+    for name, locations in (
+        ("source_location", source_location),
+        ("receiver_location", receiver_location),
+    ):
+        if locations.dtype == torch.bool or locations.is_complex():
+            raise TypeError(f"{name} must contain real integer-valued coordinates.")
+    source_location=source_location.to(device=device).contiguous()
+    receiver_location=receiver_location.to(device=device).contiguous()
 
     if not torch.is_tensor(source_amplitudes):
         raise TypeError("source_amplitudes must be a PyTorch tensor.")
@@ -165,6 +189,16 @@ def initialization(device, er,se,mr,source_amplitudes,source_location,receiver_l
             )
 
     shape_tensor = torch.tensor((nx, ny, nz), dtype=torch.int32, device=device)
+    source_integral = (
+        (torch.isfinite(source_location) & (source_location == source_location.trunc())).all()
+        if source_location.is_floating_point()
+        else torch.ones((), dtype=torch.bool, device=device)
+    )
+    receiver_integral = (
+        (torch.isfinite(receiver_location) & (receiver_location == receiver_location.trunc())).all()
+        if receiver_location.is_floating_point()
+        else torch.ones((), dtype=torch.bool, device=device)
+    )
     source_valid = ((source_location >= 0) & (source_location < shape_tensor)).all()
     receiver_valid = ((receiver_location >= 0) & (receiver_location < shape_tensor)).all()
     source_in_pml = _locations_in_pml(source_location, (nx, ny, nz), pml_values)
@@ -181,6 +215,8 @@ def initialization(device, er,se,mr,source_amplitudes,source_location,receiver_l
             (er.detach() * mr.detach()).amin(),
             source_valid.to(dtype),
             receiver_valid.to(dtype),
+            source_integral.to(dtype),
+            receiver_integral.to(dtype),
             source_in_pml.sum().to(dtype),
             receiver_in_pml.sum().to(dtype),
         )
@@ -188,7 +224,8 @@ def initialization(device, er,se,mr,source_amplitudes,source_location,receiver_l
     er_finite, se_finite, mr_finite, source_finite = (bool(value) for value in stats[:4])
     er_min, se_min, mr_min, min_er_mr = stats[4:8]
     source_valid, receiver_valid = (bool(value) for value in stats[8:10])
-    source_pml_count, receiver_pml_count = (int(value) for value in stats[10:12])
+    source_integral, receiver_integral = (bool(value) for value in stats[10:12])
+    source_pml_count, receiver_pml_count = (int(value) for value in stats[12:14])
 
     for name, finite in (
         ("er", er_finite), ("se", se_finite), ("mr", mr_finite),
@@ -202,6 +239,10 @@ def initialization(device, er,se,mr,source_amplitudes,source_location,receiver_l
         raise ValueError('The values of sigma is incorrect.(should be non-negative)')
     if mr_min <= 0:
         raise ValueError('The values of mr are incorrect (must be positive).')
+    if not source_integral:
+        raise ValueError("source_location must contain finite integer-valued coordinates.")
+    if not receiver_integral:
+        raise ValueError("receiver_location must contain finite integer-valued coordinates.")
     if not source_valid:
         raise ValueError(
             "Error: Source coordinates out of range! "
@@ -292,24 +333,46 @@ def pmlthick_revert(p, er):
         p: PML thickness as an int, list, or tensor.
         er: Relative permittivity tensor used to detect 2D or 3D mode.
     """
-    if isinstance(p, int):  
-        if er.shape[2] == 1:
-            return torch.tensor([p, p, p, p, 0, 0], dtype=torch.int32)
-        return torch.tensor([p]*6, dtype=torch.int32)
-    
-    elif isinstance(p, list):
-        if len(p) == 6:
-            return torch.tensor(p, dtype=torch.int32)
-        elif len(p) == 4:
-            return torch.tensor(p + [0, 0], dtype=torch.int32)
+    if isinstance(p, bool):
+        raise TypeError("PML thickness must contain integer values, not bool.")
+    if isinstance(p, int):
+        values = [p, p, p, p, 0, 0] if er.shape[2] == 1 else [p] * 6
+    elif isinstance(p, (list, tuple)):
+        if len(p) == 4:
+            values = [*p, 0, 0]
+        elif len(p) == 6:
+            values = list(p)
         else:
-            raise ValueError(f"Unsupported list length: {len(p)}. Must be 4 or 6.")
-    
+            raise ValueError(f"Unsupported PML length: {len(p)}. Must be 4 or 6.")
     elif isinstance(p, torch.Tensor):
-        return p.detach().to(device="cpu", dtype=torch.int32)
-    
+        if p.ndim != 1:
+            raise ValueError("PML thickness tensor must be one-dimensional.")
+        if p.numel() == 4:
+            values = [*p.detach().cpu().tolist(), 0, 0]
+        elif p.numel() == 6:
+            values = p.detach().cpu().tolist()
+        else:
+            raise ValueError(
+                f"Unsupported PML length: {p.numel()}. Must be 4 or 6."
+            )
     else:
-        raise TypeError(f"Unsupported type: {type(p)}")
+        raise TypeError(f"Unsupported PML thickness type: {type(p)}")
+
+    normalized = []
+    for value in values:
+        if isinstance(value, bool):
+            raise TypeError("PML thickness must contain integer values, not bool.")
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise TypeError("PML thickness must contain finite integer values.") from exc
+        if not math.isfinite(numeric) or not numeric.is_integer():
+            raise ValueError("PML thickness must contain finite integer values.")
+        integer = int(numeric)
+        if integer < 0 or integer > torch.iinfo(torch.int32).max:
+            raise ValueError("PML thickness values must fit in non-negative int32.")
+        normalized.append(integer)
+    return torch.tensor(normalized, dtype=torch.int32)
 
 
 class TVRegularization(nn.Module):
@@ -734,8 +797,29 @@ def build_pml_phi(x0,xm,y0,ym,z0,zm,nstep,PML,device):
     z0EPhi1, z0EPhi2, z0HPhi1, z0HPhi2,
     zmEPhi1, zmEPhi2, zmHPhi1, zmHPhi2) = [torch.empty(0) for _ in range(24)]
 
-    if PML==None:
-        PML=(None,None,None,None,None,None,None,None,None,None,None,None,None,None,None,None,None,None,None,None,None,None,None,None)
+    descriptors = (x0, xm, y0, ym, z0, zm)
+    if PML is None:
+        PML = (None,) * 24
+    elif not isinstance(PML, (list, tuple)) or len(PML) != 24:
+        raise ValueError("PML must contain exactly 24 CPML auxiliary tensors.")
+
+    for face, descriptor in enumerate(descriptors):
+        group = PML[4 * face:4 * face + 4]
+        supplied = tuple(value is not None for value in group)
+        if any(supplied) and not all(supplied):
+            raise ValueError(
+                f"CPML face {face} must provide all four auxiliary tensors or none."
+            )
+        if all(supplied) and not all(torch.is_tensor(value) for value in group):
+            raise TypeError(f"CPML face {face} state must contain PyTorch tensors.")
+        if (
+            all(supplied)
+            and descriptor.numel() == 0
+            and any(value.numel() != 0 for value in group)
+        ):
+            raise ValueError(
+                f"CPML face {face} state must be empty for a zero-thickness boundary."
+            )
 
     if x0.numel()!=0 and PML[0]==None:
         x0EPhi1=torch.zeros((nstep, int(x0[2]-x0[1]+1), int(x0[4]-x0[3]), int(x0[6]-x0[5]+1)),dtype=torch.float, device=device)
@@ -811,6 +895,50 @@ def build_pml_phi(x0,xm,y0,ym,z0,zm,nstep,PML,device):
         z0EPhi1,z0EPhi2,z0HPhi1,z0HPhi2,
         zmEPhi1,zmEPhi2,zmHPhi1,zmHPhi2,
     )
+
+    def expected_shapes(axis, descriptor):
+        if descriptor.numel() == 0:
+            return (None,) * 4
+        a = int(descriptor[2] - descriptor[1])
+        b = int(descriptor[4] - descriptor[3])
+        c = int(descriptor[6] - descriptor[5])
+        if axis == 0:
+            return (
+                (nstep, a + 1, b, c + 1),
+                (nstep, a + 1, b + 1, c),
+                (nstep, a, b + 1, c),
+                (nstep, a, b, c + 1),
+            )
+        if axis == 1:
+            return (
+                (nstep, a, b + 1, c + 1),
+                (nstep, a + 1, b + 1, c),
+                (nstep, a + 1, b, c),
+                (nstep, a, b, c + 1),
+            )
+        return (
+            (nstep, a, b + 1, c + 1),
+            (nstep, a + 1, b, c + 1),
+            (nstep, a + 1, b, c),
+            (nstep, a, b + 1, c),
+        )
+
+    for face, descriptor in enumerate(descriptors):
+        group = tensors[4 * face:4 * face + 4]
+        for component, (tensor, expected) in enumerate(
+            zip(group, expected_shapes(face // 2, descriptor))
+        ):
+            if expected is None:
+                if tensor.numel() != 0:
+                    raise ValueError(
+                        f"CPML face {face} component {component} must be empty."
+                    )
+            elif tuple(tensor.shape) != expected:
+                raise ValueError(
+                    f"CPML face {face} component {component} has shape "
+                    f"{tuple(tensor.shape)}; expected {expected}."
+                )
+
     return tuple(
         tensor.to(device=device, dtype=torch.float32).contiguous()
         for tensor in tensors

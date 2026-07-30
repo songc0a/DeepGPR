@@ -113,6 +113,70 @@ class NumericsValidationTests(unittest.TestCase):
                 location, location, 0.02, 3.0e-11, 2, 2,
             )
 
+    def test_initialization_rejects_empty_native_launch_dimensions(self):
+        source = torch.zeros((1, 4, 1))
+        location = torch.tensor([[[1, 1, 0]]], dtype=torch.int32)
+
+        with self.assertRaisesRegex(ValueError, "model dimensions"):
+            initialization(
+                "cpu", torch.empty((0, 4)), torch.empty((0, 4)), None,
+                source, location, location, 0.02, 3.0e-11, 0, 2,
+            )
+
+        empty_cases = (
+            (
+                torch.empty((0, 1, 3), dtype=torch.int32),
+                torch.empty((0, 1, 3), dtype=torch.int32),
+                "shot",
+            ),
+            (
+                torch.empty((1, 0, 3), dtype=torch.int32),
+                location,
+                "source",
+            ),
+            (
+                location,
+                torch.empty((1, 0, 3), dtype=torch.int32),
+                "receiver",
+            ),
+        )
+        er = torch.full((4, 4), 4.0)
+        se = torch.zeros_like(er)
+        for source_location, receiver_location, message in empty_cases:
+            with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
+                initialization(
+                    "cpu", er, se, None, source,
+                    source_location, receiver_location, 0.02, 3.0e-11, 0, 2,
+                )
+
+    def test_initialization_validates_coordinates_before_int32_conversion(self):
+        er = torch.full((4, 4), 4.0)
+        se = torch.zeros_like(er)
+        source = torch.zeros((1, 4, 1))
+        location = torch.tensor([[[1, 1, 0]]], dtype=torch.int64)
+
+        fractional = location.to(torch.float64)
+        fractional[0, 0, 1] = 1.5
+        with self.assertRaisesRegex(ValueError, "integer-valued"):
+            initialization(
+                "cpu", er, se, None, source,
+                fractional, location, 0.02, 3.0e-11, 0, 2,
+            )
+
+        wrapped = location.clone()
+        wrapped[0, 0, 0] = 2**32 + 1
+        with self.assertRaisesRegex(ValueError, "out of range"):
+            initialization(
+                "cpu", er, se, None, source,
+                wrapped, location, 0.02, 3.0e-11, 0, 2,
+            )
+
+        with self.assertRaisesRegex(ValueError, "finite integer"):
+            initialization(
+                "cpu", er, se, None, source,
+                location, location, 0.02, 3.0e-11, [0, 0, 0.5, 0], 2,
+            )
+
     def test_wavefield_storage_aliases(self):
         self.assertIs(_normalize_wavefield_storage_dtype("fp32"), torch.float32)
         self.assertIs(_normalize_wavefield_storage_dtype("fp16"), torch.float16)
@@ -227,6 +291,41 @@ class NumericsValidationTests(unittest.TestCase):
             sum(tensor.numel() for tensor in tensors),
             _pml_phi_elements(nx, ny, nz, nstep, pml),
         )
+
+    def test_cpml_checkpoint_shapes_are_validated_before_native_call(self):
+        nx, ny, nt = 8, 10, 4
+        er = torch.full((nx, ny), 4.0)
+        se = torch.zeros_like(er)
+        source = torch.zeros((1, nt, 1))
+        location = torch.tensor([[[4, 5, 0]]], dtype=torch.int32)
+        _, _, pml_state = DeepGPR.checkpoint_initial_field(
+            device="cpu",
+            dx=0.02,
+            dt=3.0e-11,
+            source_amplitudes=source,
+            source_location=location,
+            receiver_location=location,
+            er=er,
+            se=se,
+            pmlthick=2,
+        )
+        bad_state = list(pml_state)
+        bad_state[0] = bad_state[0][..., :-1]
+
+        with self.assertRaisesRegex(ValueError, "CPML face 0 component 0"):
+            DeepGPR.compute(
+                device="cpu",
+                dx=0.02,
+                dt=3.0e-11,
+                source_amplitudes=source,
+                source_location=location,
+                receiver_location=location,
+                er=er,
+                se=se,
+                pmlthick=2,
+                PML=tuple(bad_state),
+                mode=2,
+            )
 
     def test_anisotropic_cpml_coefficients_use_axis_spacing(self):
         nx, ny, nz = 10, 12, 14

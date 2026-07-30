@@ -388,6 +388,143 @@ class DiscreteAdjointTests(unittest.TestCase):
         for reference, candidate in (*zip(cpu, cuda), *zip(cuda, cuda_offload)):
             torch.testing.assert_close(reference, candidate, rtol=5.0e-4, atol=1.0e-6)
 
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is not available")
+    def test_cuda_coincident_sources_and_receivers_accumulate(self):
+        device = torch.device("cuda")
+        nt = 48
+        eps_r = torch.full((12, 14), 4.0, device=device)
+        sigma = torch.zeros_like(eps_r)
+        first = torch.linspace(-0.5, 0.8, nt, device=device)
+        second = torch.linspace(0.2, -0.4, nt, device=device)
+        source_pair = torch.stack((first, second), dim=0).unsqueeze(-1)
+        source_sum = (first + second).reshape(1, nt, 1)
+        one_source = torch.tensor([[[5, 5, 0]]], dtype=torch.int32, device=device)
+        two_sources = one_source.repeat(1, 2, 1)
+        one_receiver = torch.tensor([[[5, 8, 0]]], dtype=torch.int32, device=device)
+
+        common = dict(
+            device=device, dx=0.02, dt=3.0e-11,
+            receiver_location=one_receiver,
+            er=eps_r, se=sigma, pmlthick=0,
+            fdtd_order=2, mode=2,
+        )
+        pair_data = DeepGPR.compute(
+            source_amplitudes=source_pair,
+            source_location=two_sources,
+            **common,
+        )[-1]
+        sum_data = DeepGPR.compute(
+            source_amplitudes=source_sum,
+            source_location=one_source,
+            **common,
+        )[-1]
+        torch.cuda.synchronize()
+        torch.testing.assert_close(pair_data, sum_data, rtol=2.0e-5, atol=1.0e-6)
+
+        def receiver_gradient(receiver_location):
+            model = eps_r.detach().clone().requires_grad_(True)
+            data = DeepGPR.compute(
+                device=device, dx=0.02, dt=3.0e-11,
+                source_amplitudes=source_sum,
+                source_location=one_source,
+                receiver_location=receiver_location,
+                er=model, se=sigma, pmlthick=0,
+                fdtd_order=2, mode=2,
+                model_gradient_sampling_interval=1,
+                wavefield_storage_dtype=torch.float32,
+            )[-1]
+            data.sum().backward()
+            return model.grad
+
+        single_gradient = receiver_gradient(one_receiver)
+        duplicate_gradient = receiver_gradient(one_receiver.repeat(1, 2, 1))
+        torch.cuda.synchronize()
+        torch.testing.assert_close(
+            duplicate_gradient, 2.0 * single_gradient, rtol=2.0e-4, atol=1.0e-6
+        )
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is not available")
+    def test_cuda_large_3d_all_face_cpml_async_bounds(self):
+        device = torch.device("cuda")
+        nx, ny, nz, nt = 120, 120, 100, 5
+        eps_r = torch.full(
+            (nx, ny, nz), 4.0, dtype=torch.float32, device=device,
+            requires_grad=True,
+        )
+        sigma = torch.full_like(eps_r, 1.0e-4)
+        source = torch.zeros((1, nt, 1), dtype=torch.float32, device=device)
+        source[0, 0, 0] = 1.0
+        source_location = torch.tensor(
+            [[[60, 60, 50]]], dtype=torch.int32
+        )
+        receiver_location = torch.tensor(
+            [[[60, 62, 50]]], dtype=torch.int32
+        )
+
+        result = DeepGPR.compute(
+            device=device,
+            dx=(0.020, 0.017, 0.014),
+            dt=1.0e-11,
+            source_amplitudes=source,
+            source_location=source_location,
+            receiver_location=receiver_location,
+            er=eps_r,
+            se=sigma,
+            pmlthick=10,
+            fdtd_order=2,
+            mode=3,
+            model_gradient_sampling_interval=3,
+            wavefield_storage_dtype=torch.float16,
+            use_async_offload=True,
+        )
+        final_fields = (*result[1], *result[2])
+        loss = result[-1].square().sum()
+        loss = loss + sum(field.square().mean() for field in final_fields)
+        loss.backward()
+        torch.cuda.synchronize()
+
+        self.assertTrue(torch.isfinite(result[-1]).all().item())
+        self.assertIsNotNone(eps_r.grad)
+        self.assertTrue(torch.isfinite(eps_r.grad).all().item())
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is not available")
+    def test_cuda_asymmetric_cpml_and_incomplete_sampling_block(self):
+        device = torch.device("cuda")
+        shape = (31, 29, 27)
+        nt = 11
+        eps_r = torch.full(shape, 4.0, device=device, requires_grad=True)
+        sigma = torch.full_like(eps_r, 2.0e-4, requires_grad=True)
+        source = torch.linspace(-0.3, 0.7, nt, device=device).reshape(1, nt, 1)
+        source_location = torch.tensor(
+            [[[15, 14, 13]]], dtype=torch.int32, device=device
+        )
+        receiver_location = torch.tensor(
+            [[[16, 15, 14]]], dtype=torch.int32, device=device
+        )
+
+        receiver = DeepGPR.compute(
+            device=device,
+            dx=(0.020, 0.016, 0.013),
+            dt=1.0e-11,
+            source_amplitudes=source,
+            source_location=source_location,
+            receiver_location=receiver_location,
+            er=eps_r,
+            se=sigma,
+            pmlthick=[3, 5, 4, 2, 6, 3],
+            fdtd_order=8,
+            mode=3,
+            model_gradient_sampling_interval=4,
+            wavefield_storage_dtype=torch.bfloat16,
+            use_async_offload=True,
+        )[-1]
+        receiver.square().sum().backward()
+        torch.cuda.synchronize()
+
+        self.assertTrue(torch.isfinite(receiver).all().item())
+        self.assertTrue(torch.isfinite(eps_r.grad).all().item())
+        self.assertTrue(torch.isfinite(sigma.grad).all().item())
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

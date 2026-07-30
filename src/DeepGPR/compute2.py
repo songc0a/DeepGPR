@@ -700,8 +700,12 @@ class DeepGPR(torch.autograd.Function):
         """
         
         source_amplitudes = source_amplitudes.contiguous()
-        source_location=source_location.to(torch.int32).contiguous()
-        receiver_location=receiver_location.to(torch.int32).contiguous()
+        source_location=source_location.to(
+            device=device, dtype=torch.int32
+        ).contiguous()
+        receiver_location=receiver_location.to(
+            device=device, dtype=torch.int32
+        ).contiguous()
         c_lib = get_deepgpr_lib(device)
         set_library_fdtd_order(c_lib, fdtd_order)
         ctx.save_for_backward(mu_r, source_location, receiver_location,
