@@ -445,23 +445,32 @@ def _save_forward_wavefield(wavefield, directory, run_time):
 
 
 def _begin_native_call(device):
-    """Order the native default stream after PyTorch's current CUDA stream."""
+    """Select the tensor device and order the native CUDA default stream."""
     if device.type != "cuda":
         return None
+
+    previous_device = torch.cuda.current_device()
+    target_device = previous_device if device.index is None else device.index
+    restore_device = None
+    if target_device != previous_device:
+        torch.cuda.set_device(target_device)
+        restore_device = previous_device
 
     current_stream = torch.cuda.current_stream(device)
     default_stream = torch.cuda.default_stream(device)
     if current_stream.cuda_stream != default_stream.cuda_stream:
         default_stream.wait_stream(current_stream)
-        return current_stream, default_stream
-    return None
+    return current_stream, default_stream, restore_device
 
 
-def _end_native_call(streams):
-    """Make PyTorch's current stream wait for an asynchronous native call."""
-    if streams is not None:
-        current_stream, default_stream = streams
-        current_stream.wait_stream(default_stream)
+def _end_native_call(native_state):
+    """Order native results before PyTorch and restore the caller's device."""
+    if native_state is not None:
+        current_stream, default_stream, restore_device = native_state
+        if current_stream.cuda_stream != default_stream.cuda_stream:
+            current_stream.wait_stream(default_stream)
+        if restore_device is not None:
+            torch.cuda.set_device(restore_device)
 
 
 def _check_nonzero_source_created_fields(c_lib, source_amplitudes, *fields):

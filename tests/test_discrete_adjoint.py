@@ -279,6 +279,51 @@ class DiscreteAdjointTests(unittest.TestCase):
                     2.0e-4,
                 )
 
+    @unittest.skipUnless(
+        torch.cuda.is_available() and torch.cuda.device_count() >= 2,
+        "At least two CUDA devices are required",
+    )
+    def test_cuda_explicit_device_selects_matching_native_runtime(self):
+        original_device = torch.cuda.current_device()
+        target_index = (original_device + 1) % torch.cuda.device_count()
+        target_device = torch.device(f"cuda:{target_index}")
+        torch.cuda.set_device(original_device)
+
+        try:
+            shape = (10, 11, 9)
+            nt = 8
+            eps_r = torch.full(shape, 4.0, device=target_device)
+            sigma = torch.zeros_like(eps_r)
+            source = torch.zeros((1, nt, 1), device=target_device)
+            source[0, 1, 0] = 1.0
+            source_location = torch.tensor(
+                [[[5, 5, 4]]], dtype=torch.int32, device=target_device
+            )
+            receiver_location = torch.tensor(
+                [[[5, 7, 4]]], dtype=torch.int32, device=target_device
+            )
+
+            receiver = DeepGPR.compute(
+                device=target_device,
+                dx=0.02,
+                dt=1.0e-11,
+                source_amplitudes=source,
+                source_location=source_location,
+                receiver_location=receiver_location,
+                eps_r=eps_r,
+                sigma=sigma,
+                pmlthick=2,
+                fdtd_order=2,
+                mode=3,
+            )[-1]
+            torch.cuda.synchronize(target_device)
+
+            self.assertEqual(receiver.device, target_device)
+            self.assertTrue(torch.isfinite(receiver).all().item())
+            self.assertEqual(torch.cuda.current_device(), original_device)
+        finally:
+            torch.cuda.set_device(original_device)
+
     def test_source_waveform_gradient_matches_finite_difference(self):
         nx, ny, nt = 12, 14, 60
         eps_r = torch.full((nx, ny), 4.0)
