@@ -232,6 +232,10 @@ def _configure_deepgpr_library(lib: ctypes.CDLL) -> None:
         lib.set_fdtd_order.argtypes = [ctypes.c_int]
         lib.set_fdtd_order.restype = None
 
+    if hasattr(lib, "deepgpr_supports_int8_wavefield"):
+        lib.deepgpr_supports_int8_wavefield.argtypes = []
+        lib.deepgpr_supports_int8_wavefield.restype = ctypes.c_int
+
     lib._deepgpr_argtypes_configured = True
 
 

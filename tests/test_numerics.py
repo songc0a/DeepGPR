@@ -32,12 +32,85 @@ from DeepGPR.common import (
 )
 from DeepGPR.compute2 import (
     _estimate_compute_memory,
+    _int8_history_layout,
+    _normalize_compression_block_size,
+    _normalize_wavefield_compression,
     _normalize_wavefield_storage_dtype,
     _pml_phi_elements,
+    decompress_wavefield_history,
 )
 
 
 class NumericsValidationTests(unittest.TestCase):
+    def test_int8_layout_handles_partial_boundary_blocks(self):
+        shape = (5, 2, 13, 18, 1)
+        layout = _int8_history_layout(shape, (8, 8, 1))
+        self.assertEqual(layout["blocks_xyz"], (2, 3, 1))
+        self.assertEqual(layout["q_count"], math.prod(shape))
+        self.assertEqual(layout["scale_count"], 5 * 2 * 2 * 3)
+        self.assertEqual(layout["q_bytes_aligned"] % 4, 0)
+
+    def test_int8_diagnostic_decoder_uses_per_block_scales(self):
+        shape = (1, 1, 3, 5, 1)
+        block_size = (2, 4, 1)
+        layout = _int8_history_layout(shape, block_size)
+        packed = torch.zeros(layout["packed_bytes"], dtype=torch.int8)
+        q = torch.arange(1, 16, dtype=torch.int8)
+        packed[: q.numel()] = q
+        scales = packed[layout["q_bytes_aligned"] :].view(torch.float32)
+        scales.copy_(torch.tensor([0.5, 1.0, 2.0, 4.0]))
+        decoded = decompress_wavefield_history(packed, shape, block_size)
+        expected_scales = torch.tensor(
+            [[0.5, 0.5, 0.5, 0.5, 1.0],
+             [0.5, 0.5, 0.5, 0.5, 1.0],
+             [2.0, 2.0, 2.0, 2.0, 4.0]]
+        ).reshape(shape)
+        torch.testing.assert_close(decoded, q.float().reshape(shape) * expected_scales)
+
+    def test_int8_configuration_validation(self):
+        self.assertEqual(_normalize_wavefield_compression("INT8"), "int8")
+        self.assertEqual(_normalize_compression_block_size(None, 2), (8, 8, 1))
+        self.assertEqual(_normalize_compression_block_size((4, 4, 4), 3), (4, 4, 4))
+        with self.assertRaisesRegex(ValueError, "power of two"):
+            _normalize_compression_block_size((3, 5), 2)
+        with self.assertRaisesRegex(ValueError, "must contain 3"):
+            _normalize_compression_block_size((8, 8), 3)
+        with self.assertRaisesRegex(ValueError, "CUDA-only"):
+            DeepGPR.compute(device="cpu", wavefield_compression="int8")
+        with self.assertRaisesRegex(NotImplementedError, "block-level CUDA decoder"):
+            DeepGPR.compute(device="cpu", wavefield_compression="zfp")
+
+    def test_int8_memory_estimate_includes_fp32_scales(self):
+        common = dict(
+            device=torch.device("cuda"),
+            nx=13,
+            ny=18,
+            nz=1,
+            nt=5,
+            nstep=2,
+            nsr=1,
+            nrx=3,
+            source_waveforms=1,
+            pml=[0] * 6,
+            mode=2,
+            sampling_interval=1,
+            storage_dtype=torch.float32,
+            use_async_offload=False,
+            er_requires_grad=True,
+            se_requires_grad=True,
+        )
+        fp32 = _estimate_compute_memory(**common)
+        int8 = _estimate_compute_memory(
+            **common,
+            wavefield_compression="int8",
+            compression_block_size=(8, 8, 1),
+        )
+        expected_one_history = _int8_history_layout(
+            (5, 2, 13, 18, 1), (8, 8, 1)
+        )["packed_bytes"]
+        self.assertEqual(int8["saved_gradient_wavefields"], 2 * expected_one_history)
+        self.assertLess(int8["saved_gradient_wavefields"], fp32["saved_gradient_wavefields"])
+
     def test_grid_spacing_accepts_scalar_sequence_and_tensor(self):
         self.assertEqual(_normalize_grid_spacing(0.02), (0.02, 0.02, 0.02))
         self.assertEqual(
@@ -386,6 +459,37 @@ class NumericsValidationTests(unittest.TestCase):
         self.assertLess(
             offloaded["estimated_device_peak"],
             resident["estimated_device_peak"],
+        )
+
+    def test_low_precision_exact_snapshot_is_only_allocated_for_model_gradients(self):
+        common = dict(
+            device=torch.device("cuda"),
+            nx=30,
+            ny=32,
+            nz=28,
+            nt=100,
+            nstep=1,
+            nsr=1,
+            nrx=4,
+            source_waveforms=1,
+            pml=[4, 4, 4, 4, 4, 4],
+            mode=3,
+            sampling_interval=10,
+            storage_dtype=torch.float16,
+            use_async_offload=True,
+            se_requires_grad=False,
+        )
+        forward_only = _estimate_compute_memory(
+            **common, er_requires_grad=False
+        )
+        with_gradient = _estimate_compute_memory(
+            **common, er_requires_grad=True
+        )
+
+        self.assertEqual(forward_only["low_precision_exact_snapshot"], 0)
+        self.assertEqual(
+            with_gradient["low_precision_exact_snapshot"],
+            3 * 30 * 32 * 28 * torch.tensor([], dtype=torch.float32).element_size(),
         )
 
     def test_scalar_and_equal_axis_spacing_produce_identical_results(self):

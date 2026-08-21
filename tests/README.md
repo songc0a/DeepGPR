@@ -81,6 +81,23 @@ native build when comparing revisions. Board power is diagnostic metadata, not
 an optimization objective; memory-bound FDTD kernels may reach their best
 runtime below the GPU's maximum power limit.
 
+`benchmark_wavefield_compression.py` runs FP32, FP16, and fused block-INT8 on
+the same acquisition. It reports saved-history bytes, peak allocated CUDA
+memory, forward/backward/iteration time, wavefield reconstruction errors,
+epsilon/conductivity gradient relative L2 errors and cosine similarities, plus
+history-read and logical decode throughput estimates:
+
+```bash
+python tests/benchmark_wavefield_compression.py --device cuda:0 \
+  --nx 384 --ny 256 --nt 800 --shots 4 --receivers 32
+python tests/benchmark_wavefield_compression.py --device cuda:0 \
+  --profile-kernels --warmup 1 --repeats 5
+```
+
+The profiler option is intrusive and is intended to split FDTD, compression,
+adjoint, and gradient CUDA kernel time. Use ordinary repeats for iteration
+runtime and Nsight for hardware counters.
+
 `benchmark_runtime.py` provides the same deterministic case on CPU or CUDA,
 reports peak memory, saves outputs and gradients, and can compare a run with a
 saved reference:
@@ -103,3 +120,29 @@ nsys profile -o deepgpr_nsys --force-overwrite=true \
 ncu --set full --target-processes all -o deepgpr_ncu \
   python tests/benchmark_runtime.py --device cuda:0 --warmup 0 --repeats 1
 ```
+
+For a focused before/after material-gradient comparison, profile each storage
+mode separately and filter both gradient kernel variants:
+
+```bash
+ncu --target-processes all --kernel-name-base demangled \
+  --kernel-name regex:accumulate_material_gradients.* \
+  --metrics \
+smsp__warp_issue_stalled_long_scoreboard_per_warp_active.pct,\
+smsp__warp_issue_stalled_short_scoreboard_per_warp_active.pct,\
+l1tex__t_sector_hit_rate.pct,lts__t_sector_hit_rate.pct,\
+dram__throughput.avg.pct_of_peak_sustained_elapsed,\
+l1tex__throughput.avg.pct_of_peak_sustained_active,\
+sm__throughput.avg.pct_of_peak_sustained_elapsed,\
+sm__warps_active.avg.pct_of_peak_sustained_active,\
+launch__registers_per_thread,launch__occupancy_limit_registers,\
+smsp__sass_inst_executed_op_local_ld.sum,smsp__sass_inst_executed_op_local_st.sum \
+  -o deepgpr_int8_gradient \
+  python tests/benchmark_wavefield_compression.py --device cuda:0 \
+    --warmup 0 --repeats 1
+```
+
+Run `ncu --query-metrics` first when moving between Nsight Compute versions;
+metric spellings occasionally change. Do not call the optimization successful
+from compression ratio alone: compare iteration time, DRAM bytes/throughput,
+long-scoreboard stalls, occupancy, register count, spills, and gradient cosine.

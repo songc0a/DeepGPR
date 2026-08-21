@@ -219,6 +219,9 @@ This section defines the geometric observation system (coordinates) and the exci
 | **`pmlthick`** | `int` / `list` / `Tensor`| Scalar or list of 6 | Thickness (in grid layers) of the PML (Perfectly Matched Layer) absorbing boundaries.<br>- Integer `p`: All six boundaries have thickness `p` (Z-boundaries are ignored in 2D).<br>- List `[x0, xm, y0, ym, z0, zm]`: Specific thicknesses for the 6 boundaries. |
 | **`model_gradient_sampling_interval`**| `int` | Scalar | Wavefield sampling interval during forward propagation (Default: 1).<br>A larger integer reduces VRAM use for `E_saved` and `R_saved`, but uses an explicitly approximate model gradient. The last incomplete sampling block is weighted by its actual length. |
 | **`wavefield_storage_dtype`** | `torch.dtype` / `str` | `float32`, `float16`, or `bfloat16` | Storage format for saved `E_saved` and `R_saved` model-gradient wavefields. FDTD propagation remains float32. `float16` and `bfloat16` halve saved-wavefield memory at the cost of gradient accuracy; `bfloat16` has the safer dynamic range. String aliases such as `"fp16"` and `"bf16"` are accepted. |
+| **`wavefield_compression`** | `str` | `"none"`, `"int8"`, or `"zfp"` | `"int8"` enables CUDA-native per-block symmetric INT8 histories with FP32 scales and inline decode in the fused material-gradient kernel. `"none"` is the unchanged default. `"zfp"` is reserved for an optional fused CUDA decoder and is rejected by the current dependency-free build instead of silently materializing a decoded global-memory history. |
+| **`wavefield_compression_block_size`** | sequence / `None` | 2D or 3D spatial block | INT8 block shape; defaults to `(8, 8)` in 2D and `(4, 4, 4)` in 3D. The block volume must be a power of two no larger than 256. Partial boundary blocks are supported. |
+| **`wavefield_compression_rate`** | scalar / `None` | Optional ZFP setting | Reserved for an optional ZFP backend. It is rejected unless that backend is selected and available. |
 | **`use_async_offload`** | `bool` | Scalar | CUDA-only VRAM optimization flag (Default: `False`).<br>If `True`, `E_saved` and `R_saved` are asynchronously offloaded to page-locked host memory (`pin_memory` CPU RAM). This reduces GPU VRAM consumption at the cost of PCIe transfers. On CPU this option is ignored. |
 
 ### 4.1 FWI Gradient Mode
@@ -237,6 +240,42 @@ The backward solver applies the exact reverse-mode transpose of each executed op
 CPML is treated as a fixed numerical boundary. Its boundary material averages are explicitly detached, and CPML cells are excluded from the returned material gradients. This separation must be retained when optimizing a model.
 
 Use `model_gradient_sampling_interval=1` and `wavefield_storage_dtype=torch.float32` for a directional derivative check in the physical model region. Temporal subsampling and lower-precision storage deliberately approximate the gradient. Run [the gradient-check notebook](examples/4.GradientCheck.ipynb) after rebuilding the native ABI 6 libraries.
+
+### 4.3 GPU-native block INT8 history
+
+Only the sampled forward state used by the material adjoint is compressed. The
+live Ex/Ey/Ez/Hx/Hy/Hz and CPML states remain float32. The executed discrete
+update requires `E^n` and `R^n`, where `E^(n+1) = ca E^n + cb R^n`; consequently
+`mode=2` stores compressed Ez/Rz and `mode=3` stores compressed Ex/Ey/Ez and all
+three corresponding RHS components. Magnetic histories are not stored.
+
+The packed tensor contains a contiguous signed-INT8 payload followed by a
+four-byte-aligned contiguous FP32 scale array. Backward maps one CUDA block to
+one compression tile, loads each E/R scale once into shared memory, decodes each
+value in a register, and immediately accumulates the epsilon/conductivity
+gradient. It does not allocate or write a reconstructed global-memory history.
+`use_async_offload=True`, CPU execution, and a non-float32
+`wavefield_storage_dtype` are explicitly incompatible with `"int8"`.
+
+`E_saved` is an opaque one-dimensional `torch.int8` packed tensor in this mode.
+For diagnostics only, reconstruct it with
+`DeepGPR.decompress_wavefield_history(E_saved, original_shape, block_size)`.
+This helper materializes FP32 and is never called by autograd backward.
+
+## CUDA Backend Build
+
+Build the CUDA shared library from the repository root on Linux. `-lineinfo`
+preserves source correlation for Nsight; `-Xptxas=-v` prints registers and spill
+stores/loads for each kernel.
+
+```bash
+nvcc -std=c++14 -O3 -lineinfo -Xptxas=-v --shared -Xcompiler -fPIC \
+  -o src/DeepGPR/lib/deepgpr.so src/DeepGPR/lib/deepgpr.cu
+```
+
+The new INT8 path deliberately keeps native ABI 6 because the forward/backward
+C signatures are unchanged. A capability symbol prevents an older ABI-6 CUDA
+library from accepting the packed storage code and corrupting memory.
 
 ## CPU Backend Build
 
@@ -289,8 +328,8 @@ return E_saved, (Ex, Ey, Ez), (Hx, Hy, Hz), (x0EPhi1...zmHPhi2), receiver_amplit
     *   **Shape when `mode=2`**: `(nt_saved, nstep, nx, ny, nz)`, storing Ez only.
     *   **Shape when `mode=3`**: `(3, nt_saved, nstep, nx, ny, nz)`, storing components in `[Ex, Ey, Ez]` order.
     *   `nt_saved` depends on `nt` and `model_gradient_sampling_interval`.
-    *   Dtype is selected by `wavefield_storage_dtype`.
-    *   Set `save_forward_wavefield_path="/path/to/output"` to save this tensor as a CPU-loadable `.pt` file. Load it with `torch.load(path, map_location="cpu")`.
+    *   Dtype is selected by `wavefield_storage_dtype` when compression is disabled. With `wavefield_compression="int8"`, this is an opaque packed one-dimensional `torch.int8` tensor containing values and FP32 scales.
+    *   Set `save_forward_wavefield_path="/path/to/output"` to save a CPU-loadable `.pt` file. Uncompressed modes save the tensor directly. INT8 mode saves a dictionary containing `wavefield`, `compression`, `block_size`, and `uncompressed_shape` so diagnostics can reconstruct it safely.
 2.  **`(Ex, Ey, Ez)`**: The 3D electric field state at the final time step. 
 3.  **`(Hx, Hy, Hz)`**: The 3D magnetic field state at the final time step.
 4.  **`(PML_Tuple)`**: A tuple of 24 Tensors recording the final time step state of the PML auxiliary $\Phi$ variables.

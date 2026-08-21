@@ -1,5 +1,6 @@
 import torch
 import ctypes
+import math
 import warnings
 from datetime import datetime
 from pathlib import Path
@@ -19,6 +20,144 @@ _WAVEFIELD_STORAGE_TYPES = {
     torch.float16: 1,
     torch.bfloat16: 2,
 }
+
+_WAVEFIELD_INT8 = 3
+_INT8_BLOCK_X_SHIFT = 8
+_INT8_BLOCK_Y_SHIFT = 14
+_INT8_BLOCK_Z_SHIFT = 20
+_INT8_BLOCK_DIM_MASK = 0x3F
+
+
+def _normalize_wavefield_compression(value):
+    """Normalize the saved-wavefield compression mode."""
+    if value is None:
+        return "none"
+    if not isinstance(value, str):
+        raise TypeError("wavefield_compression must be 'none', 'int8', or 'zfp'.")
+    value = value.lower()
+    if value not in ("none", "int8", "zfp"):
+        raise ValueError("wavefield_compression must be 'none', 'int8', or 'zfp'.")
+    return value
+
+
+def _normalize_compression_block_size(value, spatial_mode):
+    """Return a validated ``(x, y, z)`` block shape for block INT8."""
+    if value is None:
+        return (8, 8, 1) if spatial_mode == 2 else (4, 4, 4)
+    if isinstance(value, int):
+        raise TypeError(
+            "wavefield_compression_block_size must be a 2D or 3D sequence, "
+            "not a scalar."
+        )
+    try:
+        block_size = tuple(int(item) for item in value)
+    except (TypeError, ValueError) as exc:
+        raise TypeError(
+            "wavefield_compression_block_size must be a sequence of integers."
+        ) from exc
+    expected_dimensions = 2 if spatial_mode == 2 else 3
+    if len(block_size) != expected_dimensions:
+        raise ValueError(
+            f"wavefield_compression_block_size must contain {expected_dimensions} "
+            f"values for a {spatial_mode}D model."
+        )
+    if spatial_mode == 2:
+        block_size = (*block_size, 1)
+    if any(size < 1 or size > _INT8_BLOCK_DIM_MASK for size in block_size):
+        raise ValueError("Each INT8 compression block dimension must be in [1, 63].")
+    block_volume = math.prod(block_size)
+    if block_volume > 256 or block_volume & (block_volume - 1):
+        raise ValueError(
+            "The INT8 compression block volume must be a power of two no larger "
+            "than 256."
+        )
+    return block_size
+
+
+def _encode_int8_storage_type(block_size):
+    """Pack the block shape into the existing native storage-type argument."""
+    bx, by, bz = block_size
+    return (
+        _WAVEFIELD_INT8
+        | (bx << _INT8_BLOCK_X_SHIFT)
+        | (by << _INT8_BLOCK_Y_SHIFT)
+        | (bz << _INT8_BLOCK_Z_SHIFT)
+    )
+
+
+def _int8_history_layout(shape, block_size):
+    """Return packed block-INT8 layout sizes for an uncompressed history shape."""
+    if len(shape) == 5:
+        components = 1
+        nt_saved, shots, nx, ny, nz = shape
+    elif len(shape) == 6:
+        components, nt_saved, shots, nx, ny, nz = shape
+    else:
+        raise ValueError("Wavefield history shape must have five or six dimensions.")
+    bx, by, bz = block_size
+    blocks_xyz = (
+        (nx + bx - 1) // bx,
+        (ny + by - 1) // by,
+        (nz + bz - 1) // bz,
+    )
+    blocks_per_shot = math.prod(blocks_xyz)
+    q_count = components * nt_saved * shots * nx * ny * nz
+    q_bytes_aligned = (q_count + 3) & ~3
+    scale_count = components * nt_saved * shots * blocks_per_shot
+    return {
+        "components": components,
+        "nt_saved": nt_saved,
+        "shots": shots,
+        "spatial_shape": (nx, ny, nz),
+        "blocks_xyz": blocks_xyz,
+        "blocks_per_shot": blocks_per_shot,
+        "q_count": q_count,
+        "q_bytes_aligned": q_bytes_aligned,
+        "scale_count": scale_count,
+        "packed_bytes": q_bytes_aligned + scale_count * 4,
+    }
+
+
+def decompress_wavefield_history(packed, shape, block_size):
+    """Reconstruct a packed INT8 history for diagnostics, never for backward.
+
+    The performance path decodes values inline in the CUDA material-gradient
+    kernel.  This helper intentionally materializes a tensor only for numerical
+    validation, plotting, or exporting a diagnostic wavefield.
+    """
+    block_size = tuple(block_size)
+    if len(block_size) == 2:
+        block_size = (*block_size, 1)
+    if len(block_size) != 3:
+        raise ValueError("block_size must contain two or three values.")
+    layout = _int8_history_layout(tuple(shape), block_size)
+    if packed.dtype != torch.int8 or packed.ndim != 1 or not packed.is_contiguous():
+        raise TypeError("packed must be a contiguous one-dimensional torch.int8 tensor.")
+    if packed.numel() != layout["packed_bytes"]:
+        raise ValueError(
+            f"packed contains {packed.numel()} bytes; expected {layout['packed_bytes']}."
+        )
+
+    components = layout["components"]
+    nt_saved = layout["nt_saved"]
+    shots = layout["shots"]
+    nx, ny, nz = layout["spatial_shape"]
+    nbx, nby, nbz = layout["blocks_xyz"]
+    q = packed[: layout["q_count"]].reshape(
+        components, nt_saved, shots, nx, ny, nz
+    )
+    scale_bytes = packed[
+        layout["q_bytes_aligned"] : layout["packed_bytes"]
+    ]
+    scales = scale_bytes.view(torch.float32).reshape(
+        components, nt_saved, shots, nbx, nby, nbz
+    )
+    expanded_scales = scales.repeat_interleave(block_size[0], dim=-3)
+    expanded_scales = expanded_scales.repeat_interleave(block_size[1], dim=-2)
+    expanded_scales = expanded_scales.repeat_interleave(block_size[2], dim=-1)
+    expanded_scales = expanded_scales[..., :nx, :ny, :nz]
+    reconstructed = q.to(torch.float32) * expanded_scales
+    return reconstructed.squeeze(0) if len(shape) == 5 else reconstructed
 
 
 def _format_memory_size(num_bytes):
@@ -79,6 +218,8 @@ def _estimate_compute_memory(
     use_async_offload,
     er_requires_grad,
     se_requires_grad,
+    wavefield_compression="none",
+    compression_block_size=None,
 ):
     """Estimate tensor payload memory for one compute call."""
     float_bytes = torch.tensor([], dtype=torch.float32).element_size()
@@ -111,10 +252,23 @@ def _estimate_compute_memory(
     )
 
     needs_backward = er_requires_grad or se_requires_grad
-    saved_wavefield_bytes = (
-        (1 + int(needs_backward))
-        * components * nt_saved * snapshot_cells * storage_bytes
-    )
+    if wavefield_compression == "int8":
+        block_size = compression_block_size or ((8, 8, 1) if nz == 1 else (4, 4, 4))
+        history_shape = (
+            (components, nt_saved, nstep, nx, ny, nz)
+            if components == 3
+            else (nt_saved, nstep, nx, ny, nz)
+        )
+        packed_history_bytes = _int8_history_layout(
+            history_shape, block_size
+        )["packed_bytes"]
+        saved_wavefield_bytes = (1 + int(needs_backward)) * packed_history_bytes
+    else:
+        packed_history_bytes = 0
+        saved_wavefield_bytes = (
+            (1 + int(needs_backward))
+            * components * nt_saved * snapshot_cells * storage_bytes
+        )
     update_coefficient_bytes = 6 * field_cells * float_bytes
     receiver_bytes = nstep * nt * nrx * float_bytes
     gradient_bytes = (
@@ -128,7 +282,8 @@ def _estimate_compute_memory(
     )
     exact_old_bytes = (
         components * snapshot_cells * float_bytes
-        if storage_dtype != torch.float32
+        if needs_backward
+        and (storage_dtype != torch.float32 or wavefield_compression == "int8")
         else 0
     )
     effective_async = bool(use_async_offload and device.type == "cuda")
@@ -193,6 +348,7 @@ def _estimate_compute_memory(
         "cpml_coefficients": pml_coefficient_bytes,
         "source_and_locations": acquisition_bytes,
         "saved_gradient_wavefields": saved_wavefield_bytes,
+        "packed_history_per_quantity": packed_history_bytes,
         "fdtd_update_coefficients": update_coefficient_bytes,
         "receiver_data": receiver_bytes,
         "material_gradients": gradient_bytes,
@@ -234,6 +390,8 @@ def _print_compute_preview(
     receiver_component,
     model_gradient_sampling_interval,
     wavefield_storage_dtype,
+    wavefield_compression,
+    wavefield_compression_block_size,
     use_async_offload,
     fdtd_order,
     mode,
@@ -259,6 +417,8 @@ def _print_compute_preview(
         mode=mode,
         sampling_interval=model_gradient_sampling_interval,
         storage_dtype=wavefield_storage_dtype,
+        wavefield_compression=wavefield_compression,
+        compression_block_size=wavefield_compression_block_size,
         use_async_offload=use_async_offload,
         er_requires_grad=er.requires_grad,
         se_requires_grad=se.requires_grad,
@@ -305,10 +465,15 @@ def _print_compute_preview(
         "  gradient sampling interval / saved time steps: "
         f"{model_gradient_sampling_interval} / {estimate['nt_saved']}"
     )
-    print(
-        f"  saved components / storage dtype: {estimate['components_saved']} / "
-        f"{wavefield_storage_dtype}"
-    )
+    print(f"  saved components / compression: {estimate['components_saved']} / {wavefield_compression}")
+    if wavefield_compression == "int8":
+        print(
+            "  INT8 block / packed bytes per E or R history: "
+            f"{wavefield_compression_block_size} / "
+            f"{_format_memory_size(estimate['packed_history_per_quantity'])}"
+        )
+    else:
+        print(f"  saved wavefield storage dtype: {wavefield_storage_dtype}")
     print(
         f"  async offload requested / effective: {bool(use_async_offload)} / "
         f"{estimate['effective_async_offload']}"
@@ -429,7 +594,7 @@ def _normalize_forward_wavefield_directory(value):
     return directory
 
 
-def _save_forward_wavefield(wavefield, directory, run_time):
+def _save_forward_wavefield(wavefield, directory, run_time, metadata=None):
     """Save a detached CPU copy of the forward wavefield and return its path."""
     directory.mkdir(parents=True, exist_ok=True)
     time_label = run_time.strftime("%H-%M")
@@ -440,7 +605,13 @@ def _save_forward_wavefield(wavefield, directory, run_time):
             f"forward_wavefield_{time_label}_{collision_index:02d}.pt"
         )
         collision_index += 1
-    torch.save(wavefield.detach().to(device="cpu"), output_path)
+    cpu_wavefield = wavefield.detach().to(device="cpu")
+    torch.save(
+        {"wavefield": cpu_wavefield, **metadata}
+        if metadata is not None
+        else cpu_wavefield,
+        output_path,
+    )
     return output_path.resolve()
 
 
@@ -514,7 +685,10 @@ def compute(device, dx=None, dt=None,
             debug=False,
             print_parameters=False,
             save_forward_wavefield_path=None,
-            *, eps_r=None, sigma=None, mu_r=None, receiver_component=None):
+            *, eps_r=None, sigma=None, mu_r=None, receiver_component=None,
+            wavefield_compression="none",
+            wavefield_compression_block_size=None,
+            wavefield_compression_rate=None):
     """Run DeepGPR FDTD forward modeling with autograd support.
 
     Args:
@@ -535,6 +709,12 @@ def compute(device, dx=None, dt=None,
         reciever_direction: Deprecated alias for receiver_component.
         model_gradient_sampling_interval: Forward wavefield sampling interval for FWI gradients.
         wavefield_storage_dtype: Saved E/R wavefield dtype: float32, float16, or bfloat16.
+        wavefield_compression: ``"none"`` or GPU-native block ``"int8"``.
+            ``"zfp"`` is reserved for an optional fused CUDA backend and is rejected
+            when that backend is not compiled.
+        wavefield_compression_block_size: Spatial INT8 block shape. Defaults to
+            ``(8, 8)`` in 2D and ``(4, 4, 4)`` in 3D.
+        wavefield_compression_rate: Reserved rate setting for the optional ZFP backend.
         use_async_offload: Whether CUDA should offload saved wavefields to pinned CPU memory.
         fdtd_order: Spatial finite-difference order, supported values are 2, 4, and 8.
         mode: FWI gradient mode; 2 uses Ez only, 3 uses Ex, Ey, and Ez.
@@ -574,6 +754,37 @@ def compute(device, dx=None, dt=None,
     if not isinstance(model_gradient_sampling_interval, int) or model_gradient_sampling_interval < 1:
         raise ValueError("model_gradient_sampling_interval must be a positive integer.")
     wavefield_storage_dtype = _normalize_wavefield_storage_dtype(wavefield_storage_dtype)
+    wavefield_compression = _normalize_wavefield_compression(wavefield_compression)
+    if wavefield_compression == "zfp":
+        raise NotImplementedError(
+            "wavefield_compression='zfp' requires a block-level CUDA decoder fused "
+            "with DeepGPR's material-gradient kernel. No such optional backend is "
+            "compiled in this source tree; the GPU-native fused 'int8' mode remains "
+            "available without third-party dependencies."
+        )
+    if wavefield_compression_rate is not None:
+        raise ValueError(
+            "wavefield_compression_rate is only meaningful for the optional ZFP backend."
+        )
+    if wavefield_compression == "int8":
+        if device.type != "cuda":
+            raise ValueError("wavefield_compression='int8' is CUDA-only and GPU-resident.")
+        if wavefield_storage_dtype != torch.float32:
+            raise ValueError(
+                "wavefield_storage_dtype must remain float32 when "
+                "wavefield_compression='int8'; the compressed history format is "
+                "selected independently by wavefield_compression."
+            )
+        if use_async_offload:
+            raise ValueError(
+                "use_async_offload=True is incompatible with GPU-resident INT8 "
+                "wavefield compression."
+            )
+    elif wavefield_compression_block_size is not None:
+        raise ValueError(
+            "wavefield_compression_block_size is only valid when "
+            "wavefield_compression='int8'."
+        )
     if source_direction not in (0, 1, 2) or receiver_component not in (0, 1, 2):
         raise ValueError("source_direction and receiver_component must be 0, 1, or 2.")
     if getattr(mu_r, "requires_grad", False):
@@ -582,6 +793,14 @@ def compute(device, dx=None, dt=None,
     grid_spacing = _normalize_grid_spacing(dx)
     mu_r_supplied = mu_r is not None
     eps_r,sigma,nx,ny,nz,nt,nstep,nsr,nrx,eps_r_pad,sigma_pad,mu_r,spatial_mode,dtype,pmlthick,source_amplitudes=initialization(device,eps_r,sigma,mu_r,source_amplitudes,source_location,receiver_location,grid_spacing,dt,pmlthick,fdtd_order)
+
+    compression_block_size = (
+        _normalize_compression_block_size(
+            wavefield_compression_block_size, spatial_mode
+        )
+        if wavefield_compression == "int8"
+        else None
+    )
 
     needs_model_gradient = eps_r.requires_grad or sigma.requires_grad
     if needs_model_gradient and model_gradient_sampling_interval > 1:
@@ -622,6 +841,8 @@ def compute(device, dx=None, dt=None,
             receiver_component=receiver_component,
             model_gradient_sampling_interval=model_gradient_sampling_interval,
             wavefield_storage_dtype=wavefield_storage_dtype,
+            wavefield_compression=wavefield_compression,
+            wavefield_compression_block_size=compression_block_size,
             use_async_offload=use_async_offload,
             fdtd_order=fdtd_order,
             mode=mode,
@@ -640,11 +861,26 @@ def compute(device, dx=None, dt=None,
     x0EPhi1,x0EPhi2,x0HPhi1,x0HPhi2,xmEPhi1,xmEPhi2,xmHPhi1,xmHPhi2,y0EPhi1,y0EPhi2,y0HPhi1,y0HPhi2,ymEPhi1,ymEPhi2,ymHPhi1,ymHPhi2,z0EPhi1,z0EPhi2,z0HPhi1,z0HPhi2,zmEPhi1,zmEPhi2,zmHPhi1,zmHPhi2=build_pml_phi(x0,xm,y0,ym,z0,zm,nstep,PML,device)
 
     Ex,Ey,Ez,Hx,Hy,Hz,x0EPhi1,x0EPhi2,x0HPhi1,x0HPhi2,xmEPhi1,xmEPhi2,xmHPhi1,xmHPhi2,y0EPhi1,y0EPhi2,y0HPhi1,y0HPhi2,ymEPhi1,ymEPhi2,ymHPhi1,ymHPhi2,z0EPhi1,z0EPhi2,z0HPhi1,z0HPhi2,zmEPhi1,zmEPhi2,zmHPhi1,zmHPhi2,E_saved,receiver_amplitudes = DeepGPR.apply(
-        eps_r, sigma,Ex,Ey,Ez,Hx,Hy,Hz,x0EPhi1,x0EPhi2,x0HPhi1,x0HPhi2,xmEPhi1,xmEPhi2,xmHPhi1,xmHPhi2,y0EPhi1,y0EPhi2,y0HPhi1,y0HPhi2,ymEPhi1,ymEPhi2,ymHPhi1,ymHPhi2,z0EPhi1,z0EPhi2,z0HPhi1,z0HPhi2,zmEPhi1,zmEPhi2,zmHPhi1,zmHPhi2, mu_r,grid_spacing,nx,ny,nz,dt,nt,nstep,source_amplitudes,source_location,receiver_location,pmlthick,nsr,nrx,device,dtype,x0,xm,y0,ym,z0,zm,x01,x02,xm1,xm2,y01,y02,ym1,ym2,z01,z02,zm1,zm2,eps_r_pad,sigma_pad,source_direction, receiver_component, model_gradient_sampling_interval, wavefield_storage_dtype, use_async_offload, fdtd_order, mode, debug)
+        eps_r, sigma,Ex,Ey,Ez,Hx,Hy,Hz,x0EPhi1,x0EPhi2,x0HPhi1,x0HPhi2,xmEPhi1,xmEPhi2,xmHPhi1,xmHPhi2,y0EPhi1,y0EPhi2,y0HPhi1,y0HPhi2,ymEPhi1,ymEPhi2,ymHPhi1,ymHPhi2,z0EPhi1,z0EPhi2,z0HPhi1,z0HPhi2,zmEPhi1,zmEPhi2,zmHPhi1,zmHPhi2, mu_r,grid_spacing,nx,ny,nz,dt,nt,nstep,source_amplitudes,source_location,receiver_location,pmlthick,nsr,nrx,device,dtype,x0,xm,y0,ym,z0,zm,x01,x02,xm1,xm2,y01,y02,ym1,ym2,z01,z02,zm1,zm2,eps_r_pad,sigma_pad,source_direction, receiver_component, model_gradient_sampling_interval, (wavefield_storage_dtype, wavefield_compression, compression_block_size), use_async_offload, fdtd_order, mode, debug)
 
     if forward_wavefield_directory is not None:
+        saved_metadata = None
+        if wavefield_compression == "int8":
+            nt_saved = (nt + model_gradient_sampling_interval - 1) // model_gradient_sampling_interval
+            saved_metadata = {
+                "compression": "int8",
+                "block_size": compression_block_size,
+                "uncompressed_shape": (
+                    (3, nt_saved, nstep, nx, ny, nz)
+                    if mode == 3
+                    else (nt_saved, nstep, nx, ny, nz)
+                ),
+            }
         saved_path = _save_forward_wavefield(
-            E_saved, forward_wavefield_directory, forward_wavefield_run_time
+            E_saved,
+            forward_wavefield_directory,
+            forward_wavefield_run_time,
+            metadata=saved_metadata,
         )
         print(f"Forward wavefield saved to {saved_path}")
 
@@ -661,7 +897,7 @@ class DeepGPR(torch.autograd.Function):
                 y0,ym,z0,zm,x01,x02,xm1,xm2,
                 y01,y02,ym1,ym2,z01,z02,zm1,zm2,
                 eps_r_pad,sigma_pad,source_direction, receiver_component,
-                model_gradient_sampling_interval, wavefield_storage_dtype, use_async_offload, fdtd_order, mode, debug):
+                model_gradient_sampling_interval, wavefield_storage_config, use_async_offload, fdtd_order, mode, debug):
         """Call the native forward solver and save tensors for backward.
 
         Args:
@@ -701,7 +937,7 @@ class DeepGPR(torch.autograd.Function):
             source_direction: Source electric-field polarization, 0 for x, 1 for y, 2 for z.
             receiver_component: Receiver component to return, 0 for x, 1 for y, 2 for z.
             model_gradient_sampling_interval: Forward wavefield sampling interval.
-            wavefield_storage_dtype: Dtype used by saved E/R wavefield buffers.
+            wavefield_storage_config: Internal ``(dtype, compression, block_size)`` tuple.
             use_async_offload: Whether CUDA should offload saved wavefields to pinned CPU memory.
             fdtd_order: Spatial finite-difference order.
             mode: FWI gradient mode; 2 uses Ez only, 3 uses Ex, Ey, and Ez.
@@ -717,6 +953,18 @@ class DeepGPR(torch.autograd.Function):
         ).contiguous()
         c_lib = get_deepgpr_lib(device)
         set_library_fdtd_order(c_lib, fdtd_order)
+        (
+            wavefield_storage_dtype,
+            wavefield_compression,
+            compression_block_size,
+        ) = wavefield_storage_config
+        if wavefield_compression == "int8":
+            capability = getattr(c_lib, "deepgpr_supports_int8_wavefield", None)
+            if capability is None or int(capability()) != 1:
+                raise RuntimeError(
+                    "The loaded CUDA library does not contain the fused block-INT8 "
+                    "wavefield implementation. Rebuild deepgpr.cu from the current source."
+                )
         ctx.save_for_backward(mu_r, source_location, receiver_location,
                               x01,x02,xm1,xm2,
                               y01,y02,ym1,ym2,z01,z02,zm1,zm2,eps_r_pad,sigma_pad)
@@ -739,7 +987,13 @@ class DeepGPR(torch.autograd.Function):
         ctx.device=device
         ctx.dtype=dtype
         ctx.model_gradient_sampling_interval = model_gradient_sampling_interval
-        ctx.wavefield_storage_type = _WAVEFIELD_STORAGE_TYPES[wavefield_storage_dtype]
+        ctx.wavefield_compression = wavefield_compression
+        ctx.compression_block_size = compression_block_size
+        ctx.wavefield_storage_type = (
+            _encode_int8_storage_type(compression_block_size)
+            if wavefield_compression == "int8"
+            else _WAVEFIELD_STORAGE_TYPES[wavefield_storage_dtype]
+        )
         ctx.use_async_offload = bool(use_async_offload and device.type == "cuda")
         ctx.fdtd_order = fdtd_order
         ctx.mode = mode
@@ -754,7 +1008,18 @@ class DeepGPR(torch.autograd.Function):
         else:
             saved_shape = (nt_saved, nstep, nx, ny, nz)
 
-        if ctx.use_async_offload:
+        if wavefield_compression == "int8":
+            layout = _int8_history_layout(saved_shape, compression_block_size)
+            E_saved = torch.empty(
+                layout["packed_bytes"], device=device, dtype=torch.int8
+            )
+            R_saved = (
+                torch.empty(layout["packed_bytes"], device=device, dtype=torch.int8)
+                if ctx.eps_r_requires_grad or ctx.sigma_requires_grad
+                else torch.empty(0, device=device, dtype=torch.int8)
+            )
+            ctx.uncompressed_history_shape = saved_shape
+        elif ctx.use_async_offload:
             E_saved = torch.empty(
                 saved_shape,
                 device="cpu",
@@ -844,10 +1109,24 @@ class DeepGPR(torch.autograd.Function):
         _end_native_call(native_streams)
 
         if ctx.debug:
+            diagnostic_E_saved = (
+                decompress_wavefield_history(
+                    E_saved, saved_shape, compression_block_size
+                )
+                if wavefield_compression == "int8"
+                else E_saved
+            )
+            diagnostic_R_saved = (
+                decompress_wavefield_history(
+                    R_saved, saved_shape, compression_block_size
+                )
+                if wavefield_compression == "int8" and R_saved.numel()
+                else R_saved
+            )
             check_tensors_for_nan_inf(d="forward",
                 Ex=Ex, Ey=Ey, Ez=Ez,
                 Hx=Hx, Hy=Hy, Hz=Hz,
-                E_saved=E_saved, R_saved=R_saved,
+                E_saved=diagnostic_E_saved, R_saved=diagnostic_R_saved,
                 x0EPhi1=x0EPhi1, x0EPhi2=x0EPhi2,
                 x0HPhi1=x0HPhi1, x0HPhi2=x0HPhi2,
                 xmEPhi1=xmEPhi1, xmEPhi2=xmEPhi2,

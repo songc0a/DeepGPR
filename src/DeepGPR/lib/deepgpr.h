@@ -18,6 +18,7 @@ extern "C" {
 #endif
 
 DEEPGPR_API int deepgpr_abi_version(void);
+DEEPGPR_API int deepgpr_supports_int8_wavefield(void);
 DEEPGPR_API void set_fdtd_order(int order);
 
 DEEPGPR_API void forward(
