@@ -238,6 +238,8 @@ The backward solver applies the exact reverse-mode transpose of each executed op
 
 CPML is treated as a fixed numerical boundary. Its boundary material averages are explicitly detached, and CPML cells are excluded from the returned material gradients. This separation must be retained when optimizing a model.
 
+The material-gradient formulation in DeepGPR was informed in part by the differentiable FDTD implementation in [TIDE](https://github.com/Vcholerae1/tide-GPR), particularly its treatment of the discrete Maxwell electric-field update in gradient computation. We gratefully acknowledge the TIDE project and its authors for this work.
+
 Use `model_gradient_sampling_interval=1` and `wavefield_storage_dtype=torch.float32` for a directional derivative check in the physical model region. Temporal subsampling and lower-precision storage deliberately approximate the gradient. Run [the gradient-check notebook](examples/4.GradientCheck.ipynb) after rebuilding the native ABI 6 libraries.
 
 ## CPU Backend Build
