@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-08-26T08:30:22Z",
+  "pypi": {
+    "package": "DeepGPR",
+    "latest_version": "0.0.19",
+    "downloads": {
+      "last_day": 0,
+      "last_week": 41,
+      "last_month": 317
+    }
+  },
+  "github": {
+    "repository": "songc0a/DeepGPR",
+    "stars": 17,
+    "forks": 3,
+    "open_issues": 0,
+    "default_branch": "main",
+    "updated_at": "2026-08-18T16:45:13Z",
+    "release_asset_downloads_total": 0,
+    "latest_release": null
+  },
+  "sources": {
+    "pypi_recent": "ok",
+    "pypi_metadata": "ok",
+    "github_repository": "ok",
+    "github_releases": "ok"
+  }
+}

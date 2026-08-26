@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Benchmarks — DeepGPR</title>
+  <meta name="description" content="DeepGPR benchmark infrastructure for reproducible CPU and CUDA runtime, memory, profiling, and numerical comparisons."><meta name="theme-color" content="#050b13">
+  <meta property="og:type" content="website"><meta property="og:title" content="DeepGPR Benchmark Infrastructure"><meta property="og:description" content="Reproducible CPU and CUDA performance testing tools included in the DeepGPR repository."><meta property="og:url" content="https://songc0a.github.io/DeepGPR/benchmarks.html"><meta property="og:image" content="https://songc0a.github.io/DeepGPR/assets/images/og.png"><meta name="twitter:card" content="summary_large_image">
+  <link rel="canonical" href="https://songc0a.github.io/DeepGPR/benchmarks.html"><link rel="icon" href="assets/images/favicon.svg" type="image/svg+xml"><link rel="stylesheet" href="assets/css/style.css"><script src="assets/js/main.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="site-header"><div class="container nav-shell"><a class="brand" href="index.html"><span class="brand-mark" aria-hidden="true">DG</span><span>DeepGPR</span></a><button class="nav-toggle" type="button" aria-expanded="false" aria-controls="primary-navigation" aria-label="Toggle navigation"><span></span></button><nav class="nav-links" id="primary-navigation" aria-label="Primary navigation"><a href="index.html">Overview</a><a href="docs.html">Documentation</a><a href="examples.html">Examples</a><a href="benchmarks.html" aria-current="page">Benchmarks</a><a href="publications.html">Publications</a><a class="nav-github" href="https://github.com/songc0a/DeepGPR">GitHub ↗</a></nav></div></header>
+  <main id="main">
+    <section class="page-hero"><div class="container"><div><p class="eyebrow">Performance testing</p><h1>Benchmark infrastructure, not unsupported claims.</h1></div><p>The repository includes reproducible CPU and CUDA benchmark tools. Results depend on hardware, build, model, and solver configuration, so no universal speed figure is asserted.</p></div></section>
+    <section class="section"><div class="container">
+      <div class="section-heading single"><span class="kicker">Available tools</span><h2>Two benchmark entry points.</h2></div>
+      <div class="benchmark-grid">
+        <article class="benchmark-card"><span class="card-tag">CPU or CUDA</span><h2>Deterministic runtime benchmark</h2><p><code>benchmark_runtime.py</code> measures median forward and backward times, process memory, CUDA memory where applicable, and can compare saved receivers and gradients against a reference run.</p><code>python tests/benchmark_runtime.py --device cpu --warmup 2 --repeats 7</code><a class="file-link" href="https://github.com/songc0a/DeepGPR/blob/main/tests/benchmark_runtime.py">tests/benchmark_runtime.py ↗</a></article>
+        <article class="benchmark-card"><span class="card-tag">CUDA</span><h2>GPU timing and power sampling</h2><p><code>benchmark_cuda.py</code> reports separate median forward and backward times. Optional <code>nvidia-smi</code> sampling captures board power, utilization, memory use, temperature, and SM clock as diagnostic metadata.</p><code>python tests/benchmark_cuda.py --device cuda:0 --sample-power</code><a class="file-link" href="https://github.com/songc0a/DeepGPR/blob/main/tests/benchmark_cuda.py">tests/benchmark_cuda.py ↗</a></article>
+      </div>
+    </div></section>
+    <section class="section alt"><div class="container"><div class="section-heading"><div><span class="kicker">Method</span><h2>Compare like with like.</h2></div><p>The test documentation requires matched arguments and environments for meaningful revision comparisons.</p></div>
+      <div class="feature-grid">
+        <article class="feature-card"><span class="feature-index">01 / CASE</span><h3>Fixed workload</h3><p>Use identical grid dimensions, time steps, shots, receivers, PML thickness, stencil order, storage dtype, sampling interval, and random seed.</p></article>
+        <article class="feature-card"><span class="feature-index">02 / BUILD</span><h3>Recorded software</h3><p>Keep the PyTorch version, native backend build, Python environment, and source revision consistent.</p></article>
+        <article class="feature-card"><span class="feature-index">03 / HW</span><h3>Controlled hardware</h3><p>For GPU comparisons, hold power limit and application clocks constant and report the specific device.</p></article>
+        <article class="feature-card"><span class="feature-index">04 / WARMUP</span><h3>Warmup and repeats</h3><p>Run explicit warmup iterations, take multiple timed repeats, and compare medians rather than a single observation.</p></article>
+        <article class="feature-card"><span class="feature-index">05 / CORRECT</span><h3>Numerical comparison</h3><p>Save a reference run and compare receiver data plus relative-permittivity and conductivity gradients.</p></article>
+        <article class="feature-card"><span class="feature-index">06 / TRACE</span><h3>Native profiling</h3><p>The repository documents PyTorch profiling plus NVIDIA Nsight Systems and Compute for detailed CUDA investigation.</p></article>
+      </div>
+    </div></section>
+    <section class="section"><div class="container cite-panel"><div><span class="kicker">Results policy</span><h2>Measured results will be published with context.</h2></div><div><p class="citation">The repository currently provides benchmark programs and numerical verification reports, but not a stable cross-platform benchmark table intended for website publication. Performance results can be added when the hardware, software, configuration, commands, and revision are recorded together.</p><div class="section-actions"><a class="button" href="https://github.com/songc0a/DeepGPR/tree/main/tests">Inspect test infrastructure ↗</a><a class="button secondary" href="https://github.com/songc0a/DeepGPR/blob/main/tests/README.md">Read verification guide ↗</a></div></div></div></section>
+  </main>
+  <footer class="site-footer"><div class="container"><div class="footer-grid"><div class="footer-brand"><a class="brand" href="index.html"><span class="brand-mark" aria-hidden="true">DG</span><span>DeepGPR</span></a><p>Differentiable electromagnetic wave propagation for GPR modelling and inversion in PyTorch.</p></div><nav class="footer-links" aria-label="Footer navigation"><a href="https://github.com/songc0a/DeepGPR">GitHub</a><a href="https://pypi.org/project/DeepGPR/">PyPI</a><a href="docs.html">Documentation</a><a href="examples.html">Examples</a><a href="benchmarks.html">Benchmarks</a><a href="publications.html">Publications</a></nav></div><div class="footer-bottom"><span>© <span data-year>2026</span> Lei Liu. DeepGPR.</span><span>MIT License · Static site · No tracking</span></div></div></footer>
+</body>
+</html>
