@@ -235,8 +235,10 @@ __device__ __forceinline__ float2 load_wavefield_pair_native_device(
     if (STORAGE_TYPE == WAVEFIELD_FLOAT16) {
         return __half22float2(*((const __half2*)((const __half*)pointer + index)));
     }
-    return __bfloat1622float2(
-        *((const __nv_bfloat162*)((const __nv_bfloat16*)pointer + index)));
+    const __nv_bfloat162 value =
+        *((const __nv_bfloat162*)((const __nv_bfloat16*)pointer + index));
+    // CUDA 11.8 hides __bfloat1622float2 from pre-SM80 device passes.
+    return make_float2(__low2float(value), __high2float(value));
 }
 
 #define CEIL_DIV(x,y) (((x)+(y)-1)/(y))
