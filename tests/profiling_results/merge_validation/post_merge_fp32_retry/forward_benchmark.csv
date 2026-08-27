@@ -1,0 +1,2 @@
+mode,forward_mean_ms,forward_median_ms,forward_min_ms,forward_std_ms,wall_median_ms,peak_MiB,history_MiB
+fp32,90.98537101745606,76.7539176940918,75.31212615966797,27.455556288491973,76.85509894508868,7256.5263671875,7200.0

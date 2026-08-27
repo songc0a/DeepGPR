@@ -1,4 +1,5 @@
 import contextlib
+import inspect
 import io
 import math
 import re
@@ -327,9 +328,10 @@ class NumericsValidationTests(unittest.TestCase):
             self.assertIsNotNone(
                 re.fullmatch(r"forward_wavefield_\d{2}-\d{2}\.pt", saved_files[0].name)
             )
-            saved_wavefield = torch.load(
-                saved_files[0], map_location="cpu", weights_only=True
-            )
+            load_kwargs = {"map_location": "cpu"}
+            if "weights_only" in inspect.signature(torch.load).parameters:
+                load_kwargs["weights_only"] = True
+            saved_wavefield = torch.load(saved_files[0], **load_kwargs)
             self.assertTrue(torch.equal(saved_wavefield, result[0].detach().cpu()))
             result[-1].square().mean().backward()
             self.assertTrue(torch.isfinite(er.grad).all())
