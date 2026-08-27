@@ -1,6 +1,6 @@
 {
-  "schema_version": 1,
-  "generated_at": "2026-08-26T08:30:22Z",
+  "schema_version": 2,
+  "generated_at": "2026-08-27T00:37:34Z",
   "pypi": {
     "package": "DeepGPR",
     "latest_version": "0.0.19",
@@ -16,14 +16,11 @@
     "forks": 3,
     "open_issues": 0,
     "default_branch": "main",
-    "updated_at": "2026-08-18T16:45:13Z",
-    "release_asset_downloads_total": 0,
-    "latest_release": null
+    "updated_at": "2026-08-26T14:46:03Z"
   },
   "sources": {
-    "pypi_recent": "ok",
+    "pypi_recent": "error: HTTP 429 from pypistats.org",
     "pypi_metadata": "ok",
-    "github_repository": "ok",
-    "github_releases": "ok"
+    "github_repository": "ok"
   }
 }

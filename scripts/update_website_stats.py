@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode, urlparse
+from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 
@@ -39,7 +39,7 @@ def utc_now() -> str:
 def default_snapshot(package: str, repository: str) -> dict[str, Any]:
     """Return a valid snapshot with unavailable values represented by null."""
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "generated_at": None,
         "pypi": {
             "package": package,
@@ -57,14 +57,11 @@ def default_snapshot(package: str, repository: str) -> dict[str, Any]:
             "open_issues": None,
             "default_branch": None,
             "updated_at": None,
-            "release_asset_downloads_total": None,
-            "latest_release": None,
         },
         "sources": {
             "pypi_recent": "unavailable",
             "pypi_metadata": "unavailable",
             "github_repository": "unavailable",
-            "github_releases": "unavailable",
         },
     }
 
@@ -78,8 +75,8 @@ def validate_snapshot(data: Any) -> None:
     """Validate the stable fields consumed by the website."""
     if not isinstance(data, dict):
         raise StatsError("snapshot root must be an object")
-    if data.get("schema_version") != 1:
-        raise StatsError("schema_version must be 1")
+    if data.get("schema_version") != 2:
+        raise StatsError("schema_version must be 2")
     if data.get("generated_at") is not None and not isinstance(data.get("generated_at"), str):
         raise StatsError("generated_at must be a string or null")
 
@@ -102,29 +99,13 @@ def validate_snapshot(data: Any) -> None:
     repository = github.get("repository")
     if not isinstance(repository, str) or not REPOSITORY_PATTERN.fullmatch(repository):
         raise StatsError("github.repository must have owner/name form")
-    for key in ("stars", "forks", "open_issues", "release_asset_downloads_total"):
+    for key in ("stars", "forks", "open_issues"):
         require_optional_nonnegative_integer(github.get(key), f"github.{key}")
     for key in ("default_branch", "updated_at"):
         if github.get(key) is not None and not isinstance(github.get(key), str):
             raise StatsError(f"github.{key} must be a string or null")
 
-    latest_release = github.get("latest_release")
-    if latest_release is not None:
-        if not isinstance(latest_release, dict) or not isinstance(latest_release.get("tag"), str):
-            raise StatsError("github.latest_release must be null or an object with a tag")
-        if not isinstance(latest_release.get("assets"), list):
-            raise StatsError("github.latest_release.assets must be a list")
-        for index, asset in enumerate(latest_release["assets"]):
-            if not isinstance(asset, dict):
-                raise StatsError(f"github.latest_release.assets[{index}] must be an object")
-            if not isinstance(asset.get("name"), str) or not isinstance(asset.get("download_url"), str):
-                raise StatsError(f"github.latest_release.assets[{index}] is missing name or download_url")
-            require_optional_nonnegative_integer(
-                asset.get("download_count"), f"github.latest_release.assets[{index}].download_count"
-            )
-            require_optional_nonnegative_integer(asset.get("size"), f"github.latest_release.assets[{index}].size")
-
-    expected_sources = {"pypi_recent", "pypi_metadata", "github_repository", "github_releases"}
+    expected_sources = {"pypi_recent", "pypi_metadata", "github_repository"}
     if not expected_sources.issubset(sources):
         raise StatsError("sources is missing one or more required status fields")
     if any(not isinstance(sources[key], str) for key in expected_sources):
@@ -151,25 +132,6 @@ def get_json(url: str, token: str | None = None) -> Any:
         raise StatsError(f"network error from {urlparse(url).netloc}: {exc.reason}") from exc
     except (TimeoutError, json.JSONDecodeError) as exc:
         raise StatsError(f"invalid or timed-out response from {urlparse(url).netloc}") from exc
-
-
-def with_page(url: str, page: int) -> str:
-    separator = "&" if "?" in url else "?"
-    return f"{url}{separator}{urlencode({'per_page': 100, 'page': page})}"
-
-
-def get_paginated_list(url: str, token: str | None = None) -> list[dict[str, Any]]:
-    """Fetch every page from a GitHub list endpoint."""
-    rows: list[dict[str, Any]] = []
-    page = 1
-    while True:
-        payload = get_json(with_page(url, page), token)
-        if not isinstance(payload, list) or any(not isinstance(item, dict) for item in payload):
-            raise StatsError(f"expected a list response from {urlparse(url).netloc}")
-        rows.extend(payload)
-        if len(payload) < 100:
-            return rows
-        page += 1
 
 
 def parse_remote_repository(remote: str) -> str | None:
@@ -218,9 +180,38 @@ def load_existing(path: Path, package: str, repository: str) -> dict[str, Any]:
         return default_snapshot(package, repository)
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(data, dict) and data.get("schema_version") == 1:
+            migrated = default_snapshot(package, repository)
+            migrated["generated_at"] = data.get("generated_at")
+            legacy_pypi = data.get("pypi", {})
+            legacy_github = data.get("github", {})
+            legacy_sources = data.get("sources", {})
+            migrated["pypi"] = {
+                "package": legacy_pypi.get("package"),
+                "latest_version": legacy_pypi.get("latest_version"),
+                "downloads": legacy_pypi.get("downloads"),
+            }
+            migrated["github"] = {
+                key: legacy_github.get(key)
+                for key in (
+                    "repository",
+                    "stars",
+                    "forks",
+                    "open_issues",
+                    "default_branch",
+                    "updated_at",
+                )
+            }
+            migrated["sources"] = {
+                key: legacy_sources.get(key, "unavailable")
+                for key in ("pypi_recent", "pypi_metadata", "github_repository")
+            }
+            validate_snapshot(migrated)
+            LOGGER.info("Migrated statistics snapshot from schema 1 to schema 2")
+            return migrated
         validate_snapshot(data)
         return data
-    except (OSError, json.JSONDecodeError, StatsError) as exc:
+    except (AttributeError, OSError, TypeError, json.JSONDecodeError, StatsError) as exc:
         LOGGER.warning("Ignoring invalid previous snapshot: %s", exc)
         return default_snapshot(package, repository)
 
@@ -268,50 +259,6 @@ def update_github_repository(snapshot: dict[str, Any], repository: str, token: s
         snapshot["github"][target] = value if isinstance(value, str) and value else None
 
 
-def asset_record(asset: dict[str, Any]) -> dict[str, Any]:
-    name = asset.get("name")
-    download_url = asset.get("browser_download_url")
-    count = asset.get("download_count")
-    size = asset.get("size")
-    if not isinstance(name, str) or not isinstance(download_url, str):
-        raise StatsError("GitHub release asset is missing its name or download URL")
-    if not isinstance(count, int) or isinstance(count, bool) or count < 0:
-        raise StatsError(f"GitHub release asset {name!r} has an invalid download count")
-    if not isinstance(size, int) or isinstance(size, bool) or size < 0:
-        raise StatsError(f"GitHub release asset {name!r} has an invalid size")
-    return {"name": name, "download_url": download_url, "download_count": count, "size": size}
-
-
-def update_github_releases(snapshot: dict[str, Any], repository: str, token: str | None) -> None:
-    releases = get_paginated_list(f"https://api.github.com/repos/{repository}/releases", token)
-    total_downloads = 0
-    latest_release: dict[str, Any] | None = None
-    for release in releases:
-        assets_url = release.get("assets_url")
-        if not isinstance(assets_url, str):
-            raise StatsError("GitHub release is missing its assets URL")
-        assets = [asset_record(asset) for asset in get_paginated_list(assets_url, token)]
-        total_downloads += sum(asset["download_count"] for asset in assets)
-
-        if latest_release is None and not release.get("draft"):
-            tag = release.get("tag_name")
-            if not isinstance(tag, str) or not tag:
-                raise StatsError("latest GitHub release is missing a tag")
-            latest_release = {
-                "tag": tag,
-                "name": release.get("name") if isinstance(release.get("name"), str) else None,
-                "published_at": (
-                    release.get("published_at") if isinstance(release.get("published_at"), str) else None
-                ),
-                "url": release.get("html_url") if isinstance(release.get("html_url"), str) else None,
-                "prerelease": bool(release.get("prerelease")),
-                "assets": assets,
-            }
-
-    snapshot["github"]["release_asset_downloads_total"] = total_downloads
-    snapshot["github"]["latest_release"] = latest_release
-
-
 def run_source(name: str, snapshot: dict[str, Any], action: Any) -> None:
     try:
         action()
@@ -341,7 +288,7 @@ def build_snapshot(path: Path, package: str) -> dict[str, Any]:
         snapshot["pypi"] = empty["pypi"]
     if snapshot["github"]["repository"].lower() != repository.lower():
         snapshot["github"] = empty["github"]
-    snapshot["schema_version"] = 1
+    snapshot["schema_version"] = 2
     snapshot["generated_at"] = utc_now()
     snapshot["pypi"]["package"] = package
     snapshot["github"]["repository"] = repository
@@ -351,7 +298,6 @@ def build_snapshot(path: Path, package: str) -> dict[str, Any]:
     run_source(
         "github_repository", snapshot, lambda: update_github_repository(snapshot, repository, token)
     )
-    run_source("github_releases", snapshot, lambda: update_github_releases(snapshot, repository, token))
     validate_snapshot(snapshot)
     return snapshot
 
