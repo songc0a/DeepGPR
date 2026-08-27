@@ -1,0 +1,19 @@
+include README.md
+include license
+include pyproject.toml
+
+recursive-include src/DeepGPR *.py *.txt *.cu *.h *.c *.dll *.so *.dylib
+
+prune .agents
+prune .codex
+prune .github
+prune Fig
+prune docs
+prune examples
+prune scripts
+prune tests
+prune website
+
+global-exclude .DS_Store
+global-exclude *.py[cod]
+global-exclude __pycache__

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "DeepGPR"
-version = "0.0.19"
+version = "0.0.20"
 authors = [
     { name = "Lei Liu", email = "liulei990222@gmail.com" }
 ]
