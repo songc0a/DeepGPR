@@ -1,0 +1,9 @@
+
+ ** CUDA GPU MemOps Summary (by Size) (cuda_gpu_mem_size_sum):
+
+ Total (MB)  Count  Avg (MB)  Med (MB)  Min (MB)  Max (MB)  StdDev (MB)            Operation
+ ----------  -----  --------  --------  --------  --------  -----------  ------------------------------
+      2.802      5     0.560     0.786     0.000     1.229        0.542  [CUDA memcpy Device-to-Host]
+      2.463     66     0.037     0.000     0.000     1.229        0.212  [CUDA memcpy Device-to-Device]
+      0.001     18     0.000     0.000     0.000     0.000        0.000  [CUDA memcpy Host-to-Device]
+      0.000     16     0.000     0.000     0.000     0.000        0.000  [CUDA memset]

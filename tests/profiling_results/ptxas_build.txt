@@ -1,0 +1,26 @@
+Build command:
+nvcc -std=c++14 -O3 -lineinfo -Xptxas=-v -arch=sm_89 --shared \
+  -Xcompiler -fPIC -o src/DeepGPR/lib/deepgpr.so \
+  src/DeepGPR/lib/deepgpr.cu
+
+Selected sm_89 ptxas resource output (registers/thread):
+- update_e_gpu<2>: 40 registers, 0 spill stores, 0 spill loads
+- update_h_gpu<2>: 36 registers, 0 spill stores, 0 spill loads
+- cpml_e_gpu<2>: 44 registers, 0 spill stores, 0 spill loads
+- cpml_h_gpu<2>: 49 registers, 0 spill stores, 0 spill loads
+- save_e_snapshot_gpu<float32>: 34 registers, 0 spills
+- save_e_snapshot_gpu<float16>: 36 registers, 0 spills
+- save_rhs_snapshot_gpu<float32>: 32 registers, 0 spills
+- save_rhs_snapshot_gpu<float16>: 32 registers, 0 spills
+- quantize_e_int8_snapshot_gpu: 30 registers, 0 spills
+- quantize_rhs_int8_snapshot_gpu: 30 registers, 0 spills
+- accumulate_material_gradients_gpu<float32>: 36 registers, 0 spills
+- accumulate_material_gradients_gpu<float16>: 30 registers, 16-byte stack
+  frame, 0 spill stores, 0 spill loads
+- accumulate_material_gradients_int8_gpu: 40 registers, 16 bytes static
+  shared memory, 0 spill stores, 0 spill loads
+
+The INT8 compression kernels use dynamic shared memory sized by the 64-thread
+8x8 tile (256 bytes for the block-max reduction); ptxas reports only the static
+allocation above. The compiled shared library was subsequently loaded from:
+/home/ll/下载/DeepGPR-dev/src/DeepGPR/lib/deepgpr.so

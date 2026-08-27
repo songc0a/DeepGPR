@@ -1,0 +1,49 @@
+DeepGPR CUDA native-primitives audit: frozen baseline
+date=2026-08-27 Asia/Shanghai
+repository=/home/ll/下载/DeepGPR-dev
+git_status=unavailable (.git is empty; this workspace is not a Git repository)
+gpu=NVIDIA GeForce RTX 4090
+driver=575.51.03
+system_cuda_reported_by_driver=12.9
+nvcc=12.4.131
+torch=1.11.0+cu115
+python=/home/ll/anaconda3/envs/deepgpr/bin/python
+ncu=2025.2.0.0
+nsys=2023.4.4.54
+build=nvcc -std=c++14 -O3 -lineinfo -Xptxas=-v -arch=sm_89 --shared -Xcompiler -fPIC -o src/DeepGPR/lib/deepgpr.so src/DeepGPR/lib/deepgpr.cu
+native_library=/home/ll/下载/DeepGPR-dev/src/DeepGPR/lib/deepgpr.so
+native_abi=6
+int8_capability=1
+
+Frozen INT8 implementation
+- quantize E: quantize_e_int8_snapshot_gpu, deepgpr.cu:1678
+- quantize RHS: quantize_rhs_int8_snapshot_gpu, deepgpr.cu:1754
+- block/tile: default 8x8x1 = 64 threads (benchmark defaults and encoded storage config)
+- reduction: one float per thread in dynamic shared memory followed by a power-of-two tree reduction with one __syncthreads per stage, deepgpr.cu:1720-1727 and 1802-1809
+- scale: max_abs / 127 for max_abs >= 1e-30, otherwise 1, deepgpr.cu:1737-1740 and 1818-1821
+- encode: __float2int_rn(value / scale), clamp to [-127,127], signed-char payload, deepgpr.cu:1743-1748 and 1824-1829
+- packed layout: contiguous signed-INT8 payload followed by four-byte-aligned FP32 scales
+- backward decode: accumulate_material_gradients_int8_gpu, scale load/broadcast in shared memory and fused per-value decode-gradient, deepgpr.cu:1955-2070
+- ptxas: quantize E/R use 30 registers/thread and no spills; fused INT8 gradient uses 40 registers/thread, 16 bytes static shared memory, and no spills
+
+Case
+nx=512 ny=384 nt=1200 shots=4 receivers=64 sampling_interval=1
+warmup=5 repeat=20 timing=CUDA Events
+
+Forward-only baseline
+mode,forward_mean_ms,forward_median_ms,forward_min_ms,forward_std_ms,peak_MiB,history_MiB
+fdtd,55.817222,55.885824,54.921215,0.358562,56.53,0.00
+fp32,89.062576,83.696129,76.485634,16.341592,7256.53,7200.00
+fp16,80.425169,79.563343,77.974525,2.602088,3656.53,3600.00
+int8,97.879213,96.771919,95.413315,2.467647,1968.86,1912.50
+fdtd_vs_fp32_data_relative_l2=0.000000000e+00
+fdtd_vs_fp32_data_max_abs=0.000000000e+00
+fp32_history_overhead_ms=27.810305 percentage=49.763%
+fp16_history_overhead_ms=23.677519 percentage=42.368%
+int8_history_overhead_ms=40.886095 percentage=73.160%
+
+Full forward/backward baseline
+mode,forward_mean_ms,forward_median_ms,backward_mean_ms,backward_median_ms,total_mean_ms,total_median_ms,peak_MiB,history_MiB,eps_rel,eps_cos,sigma_rel,sigma_cos
+fp32,80.808914,80.850433,104.559473,104.498177,185.381631,185.357307,10898.73,7200.00,0.000000000e+00,1.000000000,0.000000000e+00,1.000000000
+fp16,83.081598,82.973698,101.302585,101.301758,184.472475,184.452614,5498.73,3600.00,2.286440031e-05,1.000000000,2.190761552e-05,1.000000000
+int8,101.394089,101.315201,100.142056,100.070721,201.626215,201.559044,2967.32,1912.50,4.549366713e-04,0.999999899,3.644989920e-04,0.999999940

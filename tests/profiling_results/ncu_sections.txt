@@ -1,0 +1,14 @@
+Command: ncu --list-sections
+Nsight Compute: 2025.2.0.0
+
+Available sections used/planned for this study:
+- SpeedOfLight
+- MemoryWorkloadAnalysis
+- SchedulerStats
+- WarpStateStats
+- LaunchStats
+- Occupancy
+
+Other installed sections include ComputeWorkloadAnalysis, InstructionStats,
+MemoryWorkloadAnalysis_Chart, MemoryWorkloadAnalysis_Tables, SourceCounters,
+WorkloadDistribution, and the installed roofline/NVLink/PM-sampling sections.

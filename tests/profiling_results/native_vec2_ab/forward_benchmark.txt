@@ -1,0 +1,22 @@
+native_library=/home/ll/下载/DeepGPR-dev/src/DeepGPR/lib/deepgpr.so
+case nx=512 ny=384 nt=1200 shots=4 receivers=64 sampling_interval=1
+mode,forward_mean_ms,forward_median_ms,forward_min_ms,forward_std_ms,peak_MiB,history_MiB
+fdtd,60.274686,60.288511,59.442368,0.499473,56.53,0.00
+fp32,90.602568,87.400257,85.440926,5.208443,7256.53,7200.00
+fp16_legacy,88.555070,88.211967,86.871262,1.384468,3656.53,3600.00
+fp16_native,87.675258,87.314434,85.806084,1.622242,3656.53,3600.00
+fp16_vec2,90.333055,90.381310,89.521149,0.521867,3656.53,3600.00
+bf16_legacy,88.319339,88.541183,86.914047,0.493337,3656.53,3600.00
+bf16_native,88.087526,88.201378,86.408195,0.633386,3656.53,3600.00
+bf16_vec2,90.438945,90.388481,88.890366,1.072233,3656.53,3600.00
+int8,110.472756,110.410755,108.698624,1.053895,1968.86,1912.50
+fdtd_vs_fp32_data_relative_l2=0.000000000e+00
+fdtd_vs_fp32_data_max_abs=0.000000000e+00
+fp32_history_overhead_ms=27.111746 percentage=44.970%
+fp16_legacy_history_overhead_ms=27.923456 percentage=46.316%
+fp16_native_history_overhead_ms=27.025923 percentage=44.828%
+fp16_vec2_history_overhead_ms=30.092798 percentage=49.915%
+bf16_legacy_history_overhead_ms=28.252672 percentage=46.862%
+bf16_native_history_overhead_ms=27.912867 percentage=46.299%
+bf16_vec2_history_overhead_ms=30.099970 percentage=49.927%
+int8_history_overhead_ms=50.122244 percentage=83.137%

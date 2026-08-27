@@ -1,7 +1,11 @@
 #include <cuda_runtime.h>
+#include <cuda_fp16.h>
+#include <cuda_bf16.h>
+#include <cub/block/block_reduce.cuh>
 #include <iostream>
 #include <stdio.h>
 #include <cfloat>
+#include <stdint.h>
 
 #define DEEPGPR_BUILD
 #include "deepgpr.h"
@@ -21,7 +25,24 @@ enum {
     INT8_BLOCK_X_SHIFT = 8,
     INT8_BLOCK_Y_SHIFT = 14,
     INT8_BLOCK_Z_SHIFT = 20,
-    INT8_BLOCK_DIM_MASK = 0x3f
+    INT8_BLOCK_DIM_MASK = 0x3f,
+    WAVEFIELD_HISTORY_DISABLED = 1 << 26,
+    WAVEFIELD_CONVERSION_SHIFT = 27,
+    WAVEFIELD_CONVERSION_MASK = 0x3,
+    INT8_REDUCTION_SHIFT = 29,
+    INT8_REDUCTION_MASK = 0x3
+};
+
+enum {
+    WAVEFIELD_CONVERSION_LEGACY = 0,
+    WAVEFIELD_CONVERSION_NATIVE_SCALAR = 1,
+    WAVEFIELD_CONVERSION_NATIVE_VEC2 = 2
+};
+
+enum {
+    INT8_REDUCTION_CURRENT = 0,
+    INT8_REDUCTION_CUB_BLOCK = 1,
+    INT8_REDUCTION_WARP_SHUFFLE = 2
 };
 
 static int wavefield_storage_kind_host(int storage_type)
@@ -42,6 +63,16 @@ static int int8_block_y_host(int storage_type)
 static int int8_block_z_host(int storage_type)
 {
     return (storage_type >> INT8_BLOCK_Z_SHIFT) & INT8_BLOCK_DIM_MASK;
+}
+
+static int wavefield_conversion_backend_host(int storage_type)
+{
+    return (storage_type >> WAVEFIELD_CONVERSION_SHIFT) & WAVEFIELD_CONVERSION_MASK;
+}
+
+static int int8_reduction_backend_host(int storage_type)
+{
+    return (storage_type >> INT8_REDUCTION_SHIFT) & INT8_REDUCTION_MASK;
 }
 
 static __host__ __device__ long long align_four_bytes(long long value)
@@ -143,31 +174,69 @@ __device__ __forceinline__ unsigned short float_to_bfloat16_bits_device(float va
     return (unsigned short)(bits >> 16);
 }
 
-template<int STORAGE_TYPE>
+template<int STORAGE_TYPE, int CONVERSION_BACKEND>
 __device__ __forceinline__ void store_wavefield_value_device(
     void* pointer, long long index, float value)
 {
     if (STORAGE_TYPE == WAVEFIELD_FLOAT16) {
-        ((unsigned short*)pointer)[index] = float_to_half_bits_device(value);
+        if (CONVERSION_BACKEND == WAVEFIELD_CONVERSION_LEGACY) {
+            ((unsigned short*)pointer)[index] = float_to_half_bits_device(value);
+        } else {
+            ((__half*)pointer)[index] = __float2half_rn(value);
+        }
     } else if (STORAGE_TYPE == WAVEFIELD_BFLOAT16) {
-        ((unsigned short*)pointer)[index] = float_to_bfloat16_bits_device(value);
+        if (CONVERSION_BACKEND == WAVEFIELD_CONVERSION_LEGACY) {
+            ((unsigned short*)pointer)[index] = float_to_bfloat16_bits_device(value);
+        } else {
+            ((__nv_bfloat16*)pointer)[index] = __float2bfloat16_rn(value);
+        }
     } else {
         ((float*)pointer)[index] = value;
     }
 }
 
-template<int STORAGE_TYPE>
+template<int STORAGE_TYPE, int CONVERSION_BACKEND>
 __device__ __forceinline__ float load_wavefield_value_device(
     const void* pointer, long long index)
 {
     if (STORAGE_TYPE == WAVEFIELD_FLOAT16) {
-        return half_bits_to_float_device(((const unsigned short*)pointer)[index]);
+        if (CONVERSION_BACKEND == WAVEFIELD_CONVERSION_LEGACY) {
+            return half_bits_to_float_device(((const unsigned short*)pointer)[index]);
+        }
+        return __half2float(((const __half*)pointer)[index]);
     }
     if (STORAGE_TYPE == WAVEFIELD_BFLOAT16) {
-        unsigned int bits = (unsigned int)((const unsigned short*)pointer)[index] << 16;
-        return __uint_as_float(bits);
+        if (CONVERSION_BACKEND == WAVEFIELD_CONVERSION_LEGACY) {
+            unsigned int bits = (unsigned int)((const unsigned short*)pointer)[index] << 16;
+            return __uint_as_float(bits);
+        }
+        return __bfloat162float(((const __nv_bfloat16*)pointer)[index]);
     }
     return ((const float*)pointer)[index];
+}
+
+template<int STORAGE_TYPE>
+__device__ __forceinline__ void store_wavefield_pair_native_device(
+    void* pointer, long long index, float first, float second)
+{
+    if (STORAGE_TYPE == WAVEFIELD_FLOAT16) {
+        __half2 value = __floats2half2_rn(first, second);
+        *(__half2*)((__half*)pointer + index) = value;
+    } else {
+        __nv_bfloat162 value = __floats2bfloat162_rn(first, second);
+        *(__nv_bfloat162*)((__nv_bfloat16*)pointer + index) = value;
+    }
+}
+
+template<int STORAGE_TYPE>
+__device__ __forceinline__ float2 load_wavefield_pair_native_device(
+    const void* pointer, long long index)
+{
+    if (STORAGE_TYPE == WAVEFIELD_FLOAT16) {
+        return __half22float2(*((const __half2*)((const __half*)pointer + index)));
+    }
+    return __bfloat1622float2(
+        *((const __nv_bfloat162*)((const __nv_bfloat16*)pointer + index)));
 }
 
 #define CEIL_DIV(x,y) (((x)+(y)-1)/(y))
@@ -222,14 +291,120 @@ struct CudaCallResources {
 
 /* Keep storage-format decisions on the host so FP32 kernels contain no dtype branch. */
 #define LAUNCH_STORAGE_KERNEL(kernel, grid, block, stream, storage_type, ...) do { \
-    if ((storage_type) == WAVEFIELD_FLOAT16) { \
-        kernel<WAVEFIELD_FLOAT16><<<(grid), (block), 0, (stream)>>>(__VA_ARGS__); \
-    } else if ((storage_type) == WAVEFIELD_BFLOAT16) { \
-        kernel<WAVEFIELD_BFLOAT16><<<(grid), (block), 0, (stream)>>>(__VA_ARGS__); \
+    int storage_kind__ = wavefield_storage_kind_host(storage_type); \
+    int conversion_backend__ = wavefield_conversion_backend_host(storage_type); \
+    if (storage_kind__ == WAVEFIELD_FLOAT16) { \
+        if (conversion_backend__ == WAVEFIELD_CONVERSION_LEGACY) { \
+            kernel<WAVEFIELD_FLOAT16, WAVEFIELD_CONVERSION_LEGACY><<<(grid), (block), 0, (stream)>>>(__VA_ARGS__); \
+        } else { \
+            kernel<WAVEFIELD_FLOAT16, WAVEFIELD_CONVERSION_NATIVE_SCALAR><<<(grid), (block), 0, (stream)>>>(__VA_ARGS__); \
+        } \
+    } else if (storage_kind__ == WAVEFIELD_BFLOAT16) { \
+        if (conversion_backend__ == WAVEFIELD_CONVERSION_LEGACY) { \
+            kernel<WAVEFIELD_BFLOAT16, WAVEFIELD_CONVERSION_LEGACY><<<(grid), (block), 0, (stream)>>>(__VA_ARGS__); \
+        } else { \
+            kernel<WAVEFIELD_BFLOAT16, WAVEFIELD_CONVERSION_NATIVE_SCALAR><<<(grid), (block), 0, (stream)>>>(__VA_ARGS__); \
+        } \
     } else { \
-        kernel<WAVEFIELD_FLOAT32><<<(grid), (block), 0, (stream)>>>(__VA_ARGS__); \
+        kernel<WAVEFIELD_FLOAT32, WAVEFIELD_CONVERSION_LEGACY><<<(grid), (block), 0, (stream)>>>(__VA_ARGS__); \
     } \
 } while (0)
+
+#define LAUNCH_SAVE_KERNEL(kernel_scalar, kernel_vec2, grid_scalar, grid_vec2, block, stream, storage_type, ...) do { \
+    int save_storage_kind__ = wavefield_storage_kind_host(storage_type); \
+    int save_conversion_backend__ = wavefield_conversion_backend_host(storage_type); \
+    if (save_conversion_backend__ == WAVEFIELD_CONVERSION_NATIVE_VEC2) { \
+        if (save_storage_kind__ == WAVEFIELD_FLOAT16) { \
+            kernel_vec2<WAVEFIELD_FLOAT16><<<(grid_vec2), (block), 0, (stream)>>>(__VA_ARGS__); \
+        } else { \
+            kernel_vec2<WAVEFIELD_BFLOAT16><<<(grid_vec2), (block), 0, (stream)>>>(__VA_ARGS__); \
+        } \
+    } else { \
+        LAUNCH_STORAGE_KERNEL(kernel_scalar, grid_scalar, block, stream, storage_type, __VA_ARGS__); \
+    } \
+} while (0)
+
+#define LAUNCH_INT8_QUANT_KERNEL(kernel, grid, block, shared_bytes, stream, reduction_backend, ...) do { \
+    if ((reduction_backend) == INT8_REDUCTION_CUB_BLOCK) { \
+        kernel<INT8_REDUCTION_CUB_BLOCK><<<(grid), (block), (shared_bytes), (stream)>>>(__VA_ARGS__); \
+    } else if ((reduction_backend) == INT8_REDUCTION_WARP_SHUFFLE) { \
+        kernel<INT8_REDUCTION_WARP_SHUFFLE><<<(grid), (block), (shared_bytes), (stream)>>>(__VA_ARGS__); \
+    } else { \
+        kernel<INT8_REDUCTION_CURRENT><<<(grid), (block), (shared_bytes), (stream)>>>(__VA_ARGS__); \
+    } \
+} while (0)
+
+template<int STORAGE_TYPE, int CONVERSION_BACKEND>
+__global__ void test_wavefield_conversion_gpu(
+    const float* __restrict__ input, void* __restrict__ encoded,
+    float* __restrict__ decoded, long long count)
+{
+    long long index = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (index >= count) return;
+    store_wavefield_value_device<STORAGE_TYPE, CONVERSION_BACKEND>(
+        encoded, index, input[index]);
+    decoded[index] = load_wavefield_value_device<STORAGE_TYPE, CONVERSION_BACKEND>(
+        encoded, index);
+}
+
+template<int STORAGE_TYPE>
+__global__ void test_wavefield_conversion_vec2_gpu(
+    const float* __restrict__ input, void* __restrict__ encoded,
+    float* __restrict__ decoded, long long count)
+{
+    long long index = 2LL * ((long long)blockIdx.x * blockDim.x + threadIdx.x);
+    if (index >= count) return;
+    if (index + 1 < count) {
+        store_wavefield_pair_native_device<STORAGE_TYPE>(
+            encoded, index, input[index], input[index + 1]);
+        float2 values = load_wavefield_pair_native_device<STORAGE_TYPE>(encoded, index);
+        decoded[index] = values.x;
+        decoded[index + 1] = values.y;
+    } else {
+        store_wavefield_value_device<STORAGE_TYPE, WAVEFIELD_CONVERSION_NATIVE_SCALAR>(
+            encoded, index, input[index]);
+        decoded[index] = load_wavefield_value_device<
+            STORAGE_TYPE, WAVEFIELD_CONVERSION_NATIVE_SCALAR>(encoded, index);
+    }
+}
+
+DEEPGPR_API void deepgpr_test_wavefield_conversion(
+    const float* input, void* encoded, float* decoded, long long count,
+    int storage_kind, int conversion_backend)
+{
+    if (count < 1 || (storage_kind != WAVEFIELD_FLOAT16
+        && storage_kind != WAVEFIELD_BFLOAT16)) return;
+    int block = 256;
+    dim3 grid((unsigned int)CEIL_DIV(count, block));
+    dim3 grid_vec2((unsigned int)CEIL_DIV(count, 2LL * block));
+    if (conversion_backend == WAVEFIELD_CONVERSION_NATIVE_VEC2) {
+        if (storage_kind == WAVEFIELD_FLOAT16) {
+            test_wavefield_conversion_vec2_gpu<WAVEFIELD_FLOAT16>
+                <<<grid_vec2, block>>>(input, encoded, decoded, count);
+        } else {
+            test_wavefield_conversion_vec2_gpu<WAVEFIELD_BFLOAT16>
+                <<<grid_vec2, block>>>(input, encoded, decoded, count);
+        }
+        cudaGetLastError();
+        return;
+    }
+    if (storage_kind == WAVEFIELD_FLOAT16) {
+        if (conversion_backend == WAVEFIELD_CONVERSION_LEGACY) {
+            test_wavefield_conversion_gpu<WAVEFIELD_FLOAT16, WAVEFIELD_CONVERSION_LEGACY>
+                <<<grid, block>>>(input, encoded, decoded, count);
+        } else {
+            test_wavefield_conversion_gpu<WAVEFIELD_FLOAT16, WAVEFIELD_CONVERSION_NATIVE_SCALAR>
+                <<<grid, block>>>(input, encoded, decoded, count);
+        }
+    } else if (conversion_backend == WAVEFIELD_CONVERSION_LEGACY) {
+        test_wavefield_conversion_gpu<WAVEFIELD_BFLOAT16, WAVEFIELD_CONVERSION_LEGACY>
+            <<<grid, block>>>(input, encoded, decoded, count);
+    } else {
+        test_wavefield_conversion_gpu<WAVEFIELD_BFLOAT16, WAVEFIELD_CONVERSION_NATIVE_SCALAR>
+            <<<grid, block>>>(input, encoded, decoded, count);
+    }
+    cudaGetLastError();
+}
 
 /* Compile each stencil order independently to unroll adjoint curl loops. */
 #define LAUNCH_ORDER_KERNEL(kernel, grid, block, stream, order, ...) do { \
@@ -391,6 +566,16 @@ DEEPGPR_API int deepgpr_abi_version(void)
 
 /* Optional capability probe used to reject stale ABI-compatible CUDA libraries. */
 DEEPGPR_API int deepgpr_supports_int8_wavefield(void)
+{
+    return 1;
+}
+
+DEEPGPR_API int deepgpr_supports_conversion_backends(void)
+{
+    return 1;
+}
+
+DEEPGPR_API int deepgpr_supports_int8_reduction_backends(void)
 {
     return 1;
 }
@@ -1602,7 +1787,7 @@ __global__ void adjoint_source_injection_gpu(
  *   step: Number of shots or simulations in the batch.
  *   NX, NY, NZ: Padded field grid sizes.
  */
-template<int STORAGE_TYPE>
+template<int STORAGE_TYPE, int CONVERSION_BACKEND>
 __global__ void save_e_snapshot_gpu(
     void* __restrict__ dst_ptr, int t_idx, const float* __restrict__ E,
     float* __restrict__ exact_Eold,
@@ -1625,7 +1810,7 @@ __global__ void save_e_snapshot_gpu(
     long long src_idx = (long long)s * field_stride + i * NY * NZ + j * NZ + k;
     long long dst_idx = (long long)t_idx * step * total + (long long)s * total + idx;
     float value = E[src_idx];
-    store_wavefield_value_device<STORAGE_TYPE>(dst_ptr, dst_idx, value);
+    store_wavefield_value_device<STORAGE_TYPE, CONVERSION_BACKEND>(dst_ptr, dst_idx, value);
     if (STORAGE_TYPE != WAVEFIELD_FLOAT32 && exact_Eold != nullptr) {
         exact_Eold[work] = value;
     }
@@ -1633,7 +1818,7 @@ __global__ void save_e_snapshot_gpu(
 
 
 /* Save R from the executed update E^(n+1) = ca E^n + cb R. */
-template<int STORAGE_TYPE>
+template<int STORAGE_TYPE, int CONVERSION_BACKEND>
 __global__ void save_rhs_snapshot_gpu(
     void* __restrict__ dst_ptr, int t_idx,
     const float* __restrict__ E, const void* __restrict__ Eold_ptr,
@@ -1659,12 +1844,112 @@ __global__ void save_rhs_snapshot_gpu(
     float cb_value = cb[material_idx];
 
     float e_old = STORAGE_TYPE == WAVEFIELD_FLOAT32
-        ? load_wavefield_value_device<STORAGE_TYPE>(Eold_ptr, saved_idx)
+        ? load_wavefield_value_device<STORAGE_TYPE, CONVERSION_BACKEND>(Eold_ptr, saved_idx)
         : exact_Eold[work];
     float rhs = cb_value != 0.0f
         ? (E[field_idx] - ca[material_idx] * e_old) / cb_value
         : 0.0f;
-    store_wavefield_value_device<STORAGE_TYPE>(dst_ptr, saved_idx, rhs);
+    store_wavefield_value_device<STORAGE_TYPE, CONVERSION_BACKEND>(dst_ptr, saved_idx, rhs);
+}
+
+
+__device__ __forceinline__ void compact_snapshot_indices(
+    long long work, long long total, int NX, int NY, int NZ,
+    long long* field_idx, long long* material_idx)
+{
+    long long ny1 = NY - 1, nz1 = NZ - 1;
+    int shot = (int)(work / total);
+    long long idx = work % total;
+    long long i = idx / (ny1 * nz1);
+    long long remainder = idx % (ny1 * nz1);
+    long long j = remainder / nz1;
+    long long k = remainder % nz1;
+    *material_idx = i * NY * NZ + j * NZ + k;
+    *field_idx = (long long)shot * NX * NY * NZ + *material_idx;
+}
+
+
+template<int STORAGE_TYPE>
+__global__ void save_e_snapshot_vec2_gpu(
+    void* __restrict__ dst_ptr, int t_idx, const float* __restrict__ E,
+    float* __restrict__ exact_Eold,
+    int step, int NX, int NY, int NZ)
+{
+    long long total = (long long)(NX - 1) * (NY - 1) * (NZ - 1);
+    long long count = (long long)step * total;
+    long long work = 2LL * ((long long)blockIdx.x * blockDim.x + threadIdx.x);
+    if (work >= count) return;
+
+    long long field0, material0;
+    compact_snapshot_indices(work, total, NX, NY, NZ, &field0, &material0);
+    float value0 = E[field0];
+    if (exact_Eold != nullptr) exact_Eold[work] = value0;
+    long long dst_idx = (long long)t_idx * count + work;
+
+    if (work + 1 < count) {
+        long long field1, material1;
+        compact_snapshot_indices(work + 1, total, NX, NY, NZ, &field1, &material1);
+        float value1 = E[field1];
+        if (exact_Eold != nullptr) exact_Eold[work + 1] = value1;
+        uintptr_t address = (uintptr_t)((unsigned short*)dst_ptr + dst_idx);
+        if ((address & 0x3u) == 0u) {
+            store_wavefield_pair_native_device<STORAGE_TYPE>(
+                dst_ptr, dst_idx, value0, value1);
+        } else {
+            store_wavefield_value_device<STORAGE_TYPE, WAVEFIELD_CONVERSION_NATIVE_SCALAR>(
+                dst_ptr, dst_idx, value0);
+            store_wavefield_value_device<STORAGE_TYPE, WAVEFIELD_CONVERSION_NATIVE_SCALAR>(
+                dst_ptr, dst_idx + 1, value1);
+        }
+    } else {
+        store_wavefield_value_device<STORAGE_TYPE, WAVEFIELD_CONVERSION_NATIVE_SCALAR>(
+            dst_ptr, dst_idx, value0);
+    }
+}
+
+
+template<int STORAGE_TYPE>
+__global__ void save_rhs_snapshot_vec2_gpu(
+    void* __restrict__ dst_ptr, int t_idx,
+    const float* __restrict__ E, const void* __restrict__,
+    const float* __restrict__ exact_Eold,
+    const float* __restrict__ ca, const float* __restrict__ cb,
+    int step, int NX, int NY, int NZ)
+{
+    long long total = (long long)(NX - 1) * (NY - 1) * (NZ - 1);
+    long long count = (long long)step * total;
+    long long work = 2LL * ((long long)blockIdx.x * blockDim.x + threadIdx.x);
+    if (work >= count) return;
+
+    long long field0, material0;
+    compact_snapshot_indices(work, total, NX, NY, NZ, &field0, &material0);
+    float cb0 = cb[material0];
+    float value0 = cb0 != 0.0f
+        ? (E[field0] - ca[material0] * exact_Eold[work]) / cb0
+        : 0.0f;
+    long long dst_idx = (long long)t_idx * count + work;
+
+    if (work + 1 < count) {
+        long long field1, material1;
+        compact_snapshot_indices(work + 1, total, NX, NY, NZ, &field1, &material1);
+        float cb1 = cb[material1];
+        float value1 = cb1 != 0.0f
+            ? (E[field1] - ca[material1] * exact_Eold[work + 1]) / cb1
+            : 0.0f;
+        uintptr_t address = (uintptr_t)((unsigned short*)dst_ptr + dst_idx);
+        if ((address & 0x3u) == 0u) {
+            store_wavefield_pair_native_device<STORAGE_TYPE>(
+                dst_ptr, dst_idx, value0, value1);
+        } else {
+            store_wavefield_value_device<STORAGE_TYPE, WAVEFIELD_CONVERSION_NATIVE_SCALAR>(
+                dst_ptr, dst_idx, value0);
+            store_wavefield_value_device<STORAGE_TYPE, WAVEFIELD_CONVERSION_NATIVE_SCALAR>(
+                dst_ptr, dst_idx + 1, value1);
+        }
+    } else {
+        store_wavefield_value_device<STORAGE_TYPE, WAVEFIELD_CONVERSION_NATIVE_SCALAR>(
+            dst_ptr, dst_idx, value0);
+    }
 }
 
 
@@ -1674,6 +1959,65 @@ __global__ void save_rhs_snapshot_gpu(
  * gradient kernel are coalesced along the native z-fastest layout. FP32 scales
  * follow the signed-INT8 payload at a four-byte-aligned offset.
  */
+template<int REDUCTION_BACKEND>
+struct Int8BlockMaximum;
+
+template<>
+struct Int8BlockMaximum<INT8_REDUCTION_CURRENT> {
+    __device__ __forceinline__ static float reduce(float value, float* reduction)
+    {
+        int local = threadIdx.x;
+        reduction[local] = value;
+        __syncthreads();
+        for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+            if (local < stride && reduction[local + stride] > reduction[local]) {
+                reduction[local] = reduction[local + stride];
+            }
+            __syncthreads();
+        }
+        return reduction[0];
+    }
+};
+
+template<>
+struct Int8BlockMaximum<INT8_REDUCTION_CUB_BLOCK> {
+    __device__ __forceinline__ static float reduce(float value, float*)
+    {
+        typedef cub::BlockReduce<float, 64> BlockReduce;
+        __shared__ typename BlockReduce::TempStorage temporary;
+        return BlockReduce(temporary).Reduce(value, cub::Max());
+    }
+};
+
+template<>
+struct Int8BlockMaximum<INT8_REDUCTION_WARP_SHUFFLE> {
+    __device__ __forceinline__ static float reduce(float value, float*)
+    {
+        __shared__ float warp_maxima[2];
+        unsigned int mask = 0xffffffffu;
+        int lane = threadIdx.x & 31;
+        int warp = threadIdx.x >> 5;
+        for (int offset = 16; offset > 0; offset >>= 1) {
+            float other = __shfl_down_sync(mask, value, offset);
+            if (other > value) value = other;
+        }
+        if (lane == 0) warp_maxima[warp] = value;
+        __syncthreads();
+        if (warp == 0) {
+            value = lane < 2 ? warp_maxima[lane] : 0.0f;
+            for (int offset = 16; offset > 0; offset >>= 1) {
+                float other = __shfl_down_sync(mask, value, offset);
+                if (other > value) value = other;
+            }
+            if (lane == 0) warp_maxima[0] = value;
+        }
+        __syncthreads();
+        return warp_maxima[0];
+    }
+};
+
+
+template<int REDUCTION_BACKEND>
 __global__ void quantize_e_int8_snapshot_gpu(
     void* __restrict__ packed, int t_idx, int component,
     const float* __restrict__ E, float* __restrict__ exact_Eold,
@@ -1716,14 +2060,8 @@ __global__ void quantize_e_int8_snapshot_gpu(
         exact_Eold[(long long)shot * total_cells + idx] = value;
     }
 
-    reduction[local] = value < 0.0f ? -value : value;
-    __syncthreads();
-    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
-        if (local < stride && reduction[local + stride] > reduction[local]) {
-            reduction[local] = reduction[local + stride];
-        }
-        __syncthreads();
-    }
+    float maximum = Int8BlockMaximum<REDUCTION_BACKEND>::reduce(
+        value < 0.0f ? -value : value, reduction);
 
     signed char* q = (signed char*)packed;
     long long q_idx = (long long)component * component_stride
@@ -1734,7 +2072,6 @@ __global__ void quantize_e_int8_snapshot_gpu(
     float* scales = (float*)((unsigned char*)packed
         + align_four_bytes((long long)components * component_stride));
     if (local == 0) {
-        float maximum = reduction[0];
         scales[scale_idx] = maximum >= 1.0e-30f ? maximum / 127.0f : 1.0f;
     }
     __syncthreads();
@@ -1750,6 +2087,7 @@ __global__ void quantize_e_int8_snapshot_gpu(
 
 
 /* Quantize the exact executed RHS: E^(n+1) = ca E^n + cb R^n. */
+template<int REDUCTION_BACKEND>
 __global__ void quantize_rhs_int8_snapshot_gpu(
     void* __restrict__ packed, int t_idx, int component,
     const float* __restrict__ E, const float* __restrict__ exact_Eold,
@@ -1798,14 +2136,8 @@ __global__ void quantize_rhs_int8_snapshot_gpu(
             : 0.0f;
     }
 
-    reduction[local] = value < 0.0f ? -value : value;
-    __syncthreads();
-    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
-        if (local < stride && reduction[local + stride] > reduction[local]) {
-            reduction[local] = reduction[local + stride];
-        }
-        __syncthreads();
-    }
+    float maximum = Int8BlockMaximum<REDUCTION_BACKEND>::reduce(
+        value < 0.0f ? -value : value, reduction);
 
     signed char* q = (signed char*)packed;
     long long q_idx = (long long)component * component_stride
@@ -1815,7 +2147,6 @@ __global__ void quantize_rhs_int8_snapshot_gpu(
     float* scales = (float*)((unsigned char*)packed
         + align_four_bytes((long long)components * component_stride));
     if (local == 0) {
-        float maximum = reduction[0];
         scales[scale_idx] = maximum >= 1.0e-30f ? maximum / 127.0f : 1.0f;
     }
     __syncthreads();
@@ -1852,7 +2183,7 @@ __global__ void quantize_rhs_int8_snapshot_gpu(
  *   use_async_offload: Whether E_saved is read through d_E_buf.
  *   fwi_mode: Gradient mode; 2 uses lambda_ez only, 3 uses lambda_ex, lambda_ey, and lambda_ez.
  */
-template<int STORAGE_TYPE>
+template<int STORAGE_TYPE, int CONVERSION_BACKEND>
 __global__ void accumulate_material_gradients_gpu(
     const float* __restrict__ lambda_ex, const float* __restrict__ lambda_ey, const float* __restrict__ lambda_ez,
     const void* __restrict__ E_saved, const void* __restrict__ R_saved,
@@ -1913,12 +2244,12 @@ __global__ void accumulate_material_gradients_gpu(
 
             if (use_async_offload) {
                 long long device_idx = (long long)c * snap_stride + base_idx;
-                e_old = load_wavefield_value_device<STORAGE_TYPE>(d_E_buf, device_idx);
-                rhs = load_wavefield_value_device<STORAGE_TYPE>(d_R_buf, device_idx);
+                e_old = load_wavefield_value_device<STORAGE_TYPE, CONVERSION_BACKEND>(d_E_buf, device_idx);
+                rhs = load_wavefield_value_device<STORAGE_TYPE, CONVERSION_BACKEND>(d_R_buf, device_idx);
             } else {
                 long long saved_idx = comp_offset + (long long)(i / S) * snap_stride + base_idx;
-                e_old = load_wavefield_value_device<STORAGE_TYPE>(E_saved, saved_idx);
-                rhs = load_wavefield_value_device<STORAGE_TYPE>(R_saved, saved_idx);
+                e_old = load_wavefield_value_device<STORAGE_TYPE, CONVERSION_BACKEND>(E_saved, saved_idx);
+                rhs = load_wavefield_value_device<STORAGE_TYPE, CONVERSION_BACKEND>(R_saved, saved_idx);
             }
 
             float adjoint_val = adjoint_values[(fwi_mode == 3) ? c : 2];
@@ -2133,17 +2464,26 @@ DEEPGPR_API void forward(const float* __restrict__ eps_r_pad, const float* __res
              int sampling_interval, int fwi_mode, int storage_type, int save_model_history,
              int use_async_offload)
 {
-    int use_async = use_async_offload != 0;
+    int save_wavefield_history = (storage_type & WAVEFIELD_HISTORY_DISABLED) == 0;
+    int use_async = save_wavefield_history && use_async_offload != 0;
     int storage_kind = wavefield_storage_kind_host(storage_type);
-    int use_int8 = storage_kind == WAVEFIELD_INT8;
+    int use_int8 = save_wavefield_history && storage_kind == WAVEFIELD_INT8;
     int int8_bx = use_int8 ? int8_block_x_host(storage_type) : 1;
     int int8_by = use_int8 ? int8_block_y_host(storage_type) : 1;
     int int8_bz = use_int8 ? int8_block_z_host(storage_type) : 1;
     int int8_threads = int8_bx * int8_by * int8_bz;
+    int int8_reduction_backend = use_int8
+        ? int8_reduction_backend_host(storage_type) : INT8_REDUCTION_CURRENT;
     if (use_int8 && (use_async || int8_bx < 1 || int8_by < 1 || int8_bz < 1
         || int8_threads > 256 || (int8_threads & (int8_threads - 1)) != 0)) {
         std::cerr << "DeepGPR INT8 wavefield compression requires GPU-resident "
                   << "power-of-two blocks with at most 256 voxels." << std::endl;
+        return;
+    }
+    if (use_int8 && int8_reduction_backend != INT8_REDUCTION_CURRENT
+        && int8_threads != 64) {
+        std::cerr << "DeepGPR CUB/warp INT8 reduction experiments require "
+                  << "exactly 64 threads per compression tile." << std::endl;
         return;
     }
     int fdtd_order = g_fdtd_order;
@@ -2179,7 +2519,7 @@ DEEPGPR_API void forward(const float* __restrict__ eps_r_pad, const float* __res
         CUDA_CHECK(cudaEventRecord(event_input, 0));
         CUDA_CHECK(cudaStreamWaitEvent(stream_comp, event_input, 0));
     }
-    if (save_model_history && storage_kind != WAVEFIELD_FLOAT32) {
+    if (save_wavefield_history && save_model_history && storage_kind != WAVEFIELD_FLOAT32) {
         CUDA_CHECK(cudaMalloc(&d_exact_Eold, e_components * snap_size * sizeof(float)));
     }
 
@@ -2207,35 +2547,42 @@ DEEPGPR_API void forward(const float* __restrict__ eps_r_pad, const float* __res
   
     long long total_copy = (long long)(NX_FIELDS - 1) * (NY_FIELDS - 1) * (NZ_FIELDS - 1); 
     dim3 grid_copy(CEIL_DIV((long long)step * total_copy, blockSize));
+    dim3 grid_copy_vec2(CEIL_DIV((long long)step * total_copy, 2LL * blockSize));
     long long int8_blocks_per_shot = use_int8
         ? (long long)CEIL_DIV(NX_FIELDS - 1, int8_bx)
             * CEIL_DIV(NY_FIELDS - 1, int8_by)
             * CEIL_DIV(NZ_FIELDS - 1, int8_bz)
         : 0;
     dim3 grid_int8(use_int8 ? (unsigned int)(step * int8_blocks_per_shot) : 1);
-    size_t int8_shared_bytes = use_int8 ? int8_threads * sizeof(float) : 0;
+    size_t int8_shared_bytes = use_int8
+        && int8_reduction_backend == INT8_REDUCTION_CURRENT
+        ? int8_threads * sizeof(float) : 0;
 
     for (int i = 0; i < nt; i++) {
-        if (i % sampling_interval == 0) {
+        if (save_wavefield_history && i % sampling_interval == 0) {
             int t_saved = i / sampling_interval;
             if (use_int8) {
                 if (fwi_mode == 3) {
-                    quantize_e_int8_snapshot_gpu<<<grid_int8, int8_threads, int8_shared_bytes, stream_comp>>>(
+                    LAUNCH_INT8_QUANT_KERNEL(quantize_e_int8_snapshot_gpu,
+                        grid_int8, int8_threads, int8_shared_bytes, stream_comp, int8_reduction_backend,
                         E_saved, t_saved, 0, Ex, d_exact_Eold,
                         step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, nt_saved, e_components,
                         int8_bx, int8_by, int8_bz);
-                    quantize_e_int8_snapshot_gpu<<<grid_int8, int8_threads, int8_shared_bytes, stream_comp>>>(
+                    LAUNCH_INT8_QUANT_KERNEL(quantize_e_int8_snapshot_gpu,
+                        grid_int8, int8_threads, int8_shared_bytes, stream_comp, int8_reduction_backend,
                         E_saved, t_saved, 1, Ey,
                         d_exact_Eold != nullptr ? d_exact_Eold + snap_size : nullptr,
                         step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, nt_saved, e_components,
                         int8_bx, int8_by, int8_bz);
-                    quantize_e_int8_snapshot_gpu<<<grid_int8, int8_threads, int8_shared_bytes, stream_comp>>>(
+                    LAUNCH_INT8_QUANT_KERNEL(quantize_e_int8_snapshot_gpu,
+                        grid_int8, int8_threads, int8_shared_bytes, stream_comp, int8_reduction_backend,
                         E_saved, t_saved, 2, Ez,
                         d_exact_Eold != nullptr ? d_exact_Eold + 2 * snap_size : nullptr,
                         step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, nt_saved, e_components,
                         int8_bx, int8_by, int8_bz);
                 } else {
-                    quantize_e_int8_snapshot_gpu<<<grid_int8, int8_threads, int8_shared_bytes, stream_comp>>>(
+                    LAUNCH_INT8_QUANT_KERNEL(quantize_e_int8_snapshot_gpu,
+                        grid_int8, int8_threads, int8_shared_bytes, stream_comp, int8_reduction_backend,
                         E_saved, t_saved, 0, Ez, d_exact_Eold,
                         step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, nt_saved, e_components,
                         int8_bx, int8_by, int8_bz);
@@ -2249,31 +2596,31 @@ DEEPGPR_API void forward(const float* __restrict__ eps_r_pad, const float* __res
                     CUDA_CHECK(cudaStreamWaitEvent(stream_comp, event_transfer[buf_idx], 0));
                 }
                 if (fwi_mode == 3) {
-                    LAUNCH_STORAGE_KERNEL(save_e_snapshot_gpu, grid_copy, blockSize, stream_comp, storage_type,
+                    LAUNCH_SAVE_KERNEL(save_e_snapshot_gpu, save_e_snapshot_vec2_gpu, grid_copy, grid_copy_vec2, blockSize, stream_comp, storage_type,
                         buffer, 0, Ex, d_exact_Eold, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
-                    LAUNCH_STORAGE_KERNEL(save_e_snapshot_gpu, grid_copy, blockSize, stream_comp, storage_type,
+                    LAUNCH_SAVE_KERNEL(save_e_snapshot_gpu, save_e_snapshot_vec2_gpu, grid_copy, grid_copy_vec2, blockSize, stream_comp, storage_type,
                         buffer + snap_size * storage_size, 0, Ey,
                         d_exact_Eold != nullptr ? d_exact_Eold + snap_size : nullptr, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
-                    LAUNCH_STORAGE_KERNEL(save_e_snapshot_gpu, grid_copy, blockSize, stream_comp, storage_type,
+                    LAUNCH_SAVE_KERNEL(save_e_snapshot_gpu, save_e_snapshot_vec2_gpu, grid_copy, grid_copy_vec2, blockSize, stream_comp, storage_type,
                         buffer + 2 * snap_size * storage_size, 0, Ez,
                         d_exact_Eold != nullptr ? d_exact_Eold + 2 * snap_size : nullptr, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
                 } else {
-                    LAUNCH_STORAGE_KERNEL(save_e_snapshot_gpu, grid_copy, blockSize, stream_comp, storage_type,
+                    LAUNCH_SAVE_KERNEL(save_e_snapshot_gpu, save_e_snapshot_vec2_gpu, grid_copy, grid_copy_vec2, blockSize, stream_comp, storage_type,
                         buffer, 0, Ez, d_exact_Eold, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
                 }
                 CUDA_CHECK_LAST();
             } else if (fwi_mode == 3) {
-                LAUNCH_STORAGE_KERNEL(save_e_snapshot_gpu, grid_copy, blockSize, stream_comp, storage_type,
+                LAUNCH_SAVE_KERNEL(save_e_snapshot_gpu, save_e_snapshot_vec2_gpu, grid_copy, grid_copy_vec2, blockSize, stream_comp, storage_type,
                     E_saved, t_saved, Ex, d_exact_Eold, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
-                LAUNCH_STORAGE_KERNEL(save_e_snapshot_gpu, grid_copy, blockSize, stream_comp, storage_type,
+                LAUNCH_SAVE_KERNEL(save_e_snapshot_gpu, save_e_snapshot_vec2_gpu, grid_copy, grid_copy_vec2, blockSize, stream_comp, storage_type,
                     wavefield_offset_host(E_saved, component_stride, storage_type), t_saved, Ey,
                     d_exact_Eold != nullptr ? d_exact_Eold + snap_size : nullptr, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
-                LAUNCH_STORAGE_KERNEL(save_e_snapshot_gpu, grid_copy, blockSize, stream_comp, storage_type,
+                LAUNCH_SAVE_KERNEL(save_e_snapshot_gpu, save_e_snapshot_vec2_gpu, grid_copy, grid_copy_vec2, blockSize, stream_comp, storage_type,
                     wavefield_offset_host(E_saved, 2 * component_stride, storage_type), t_saved, Ez,
                     d_exact_Eold != nullptr ? d_exact_Eold + 2 * snap_size : nullptr, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
                 CUDA_CHECK_LAST();
             } else {
-                LAUNCH_STORAGE_KERNEL(save_e_snapshot_gpu, grid_copy, blockSize, stream_comp, storage_type,
+                LAUNCH_SAVE_KERNEL(save_e_snapshot_gpu, save_e_snapshot_vec2_gpu, grid_copy, grid_copy_vec2, blockSize, stream_comp, storage_type,
                     E_saved, t_saved, Ez, d_exact_Eold, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
                 CUDA_CHECK_LAST();
             }
@@ -2344,24 +2691,28 @@ DEEPGPR_API void forward(const float* __restrict__ eps_r_pad, const float* __res
             nsrc, polarisation, nt, nrx, receiverlocation, rxs, receiver_component);
         CUDA_CHECK_LAST();
 
-        if (i % sampling_interval == 0) {
+        if (save_wavefield_history && i % sampling_interval == 0) {
             int t_saved = i / sampling_interval;
             if (use_int8) {
                 if (save_model_history && fwi_mode == 3) {
-                    quantize_rhs_int8_snapshot_gpu<<<grid_int8, int8_threads, int8_shared_bytes, stream_comp>>>(
+                    LAUNCH_INT8_QUANT_KERNEL(quantize_rhs_int8_snapshot_gpu,
+                        grid_int8, int8_threads, int8_shared_bytes, stream_comp, int8_reduction_backend,
                         R_saved, t_saved, 0, Ex, d_exact_Eold, ce_hist, ce_rhs,
                         step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, nt_saved, e_components,
                         int8_bx, int8_by, int8_bz);
-                    quantize_rhs_int8_snapshot_gpu<<<grid_int8, int8_threads, int8_shared_bytes, stream_comp>>>(
+                    LAUNCH_INT8_QUANT_KERNEL(quantize_rhs_int8_snapshot_gpu,
+                        grid_int8, int8_threads, int8_shared_bytes, stream_comp, int8_reduction_backend,
                         R_saved, t_saved, 1, Ey, d_exact_Eold + snap_size, ce_hist, ce_rhs,
                         step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, nt_saved, e_components,
                         int8_bx, int8_by, int8_bz);
-                    quantize_rhs_int8_snapshot_gpu<<<grid_int8, int8_threads, int8_shared_bytes, stream_comp>>>(
+                    LAUNCH_INT8_QUANT_KERNEL(quantize_rhs_int8_snapshot_gpu,
+                        grid_int8, int8_threads, int8_shared_bytes, stream_comp, int8_reduction_backend,
                         R_saved, t_saved, 2, Ez, d_exact_Eold + 2 * snap_size, ce_hist, ce_rhs,
                         step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, nt_saved, e_components,
                         int8_bx, int8_by, int8_bz);
                 } else if (save_model_history) {
-                    quantize_rhs_int8_snapshot_gpu<<<grid_int8, int8_threads, int8_shared_bytes, stream_comp>>>(
+                    LAUNCH_INT8_QUANT_KERNEL(quantize_rhs_int8_snapshot_gpu,
+                        grid_int8, int8_threads, int8_shared_bytes, stream_comp, int8_reduction_backend,
                         R_saved, t_saved, 0, Ez, d_exact_Eold, ce_hist, ce_rhs,
                         step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, nt_saved, e_components,
                         int8_bx, int8_by, int8_bz);
@@ -2374,19 +2725,19 @@ DEEPGPR_API void forward(const float* __restrict__ eps_r_pad, const float* __res
                 unsigned char* r_buffer = save_model_history
                     ? d_R_buf + buf_base * storage_size : nullptr;
                 if (save_model_history && fwi_mode == 3) {
-                    LAUNCH_STORAGE_KERNEL(save_rhs_snapshot_gpu, grid_copy, blockSize, stream_comp, storage_type,
+                    LAUNCH_SAVE_KERNEL(save_rhs_snapshot_gpu, save_rhs_snapshot_vec2_gpu, grid_copy, grid_copy_vec2, blockSize, stream_comp, storage_type,
                         r_buffer, 0, Ex, e_buffer, d_exact_Eold,
                         ce_hist, ce_rhs, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
-                    LAUNCH_STORAGE_KERNEL(save_rhs_snapshot_gpu, grid_copy, blockSize, stream_comp, storage_type,
+                    LAUNCH_SAVE_KERNEL(save_rhs_snapshot_gpu, save_rhs_snapshot_vec2_gpu, grid_copy, grid_copy_vec2, blockSize, stream_comp, storage_type,
                         r_buffer + snap_size * storage_size, 0, Ey,
                         e_buffer + snap_size * storage_size, d_exact_Eold != nullptr ? d_exact_Eold + snap_size : nullptr,
                         ce_hist, ce_rhs, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
-                    LAUNCH_STORAGE_KERNEL(save_rhs_snapshot_gpu, grid_copy, blockSize, stream_comp, storage_type,
+                    LAUNCH_SAVE_KERNEL(save_rhs_snapshot_gpu, save_rhs_snapshot_vec2_gpu, grid_copy, grid_copy_vec2, blockSize, stream_comp, storage_type,
                         r_buffer + 2 * snap_size * storage_size, 0, Ez,
                         e_buffer + 2 * snap_size * storage_size, d_exact_Eold != nullptr ? d_exact_Eold + 2 * snap_size : nullptr,
                         ce_hist, ce_rhs, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
                 } else if (save_model_history) {
-                    LAUNCH_STORAGE_KERNEL(save_rhs_snapshot_gpu, grid_copy, blockSize, stream_comp, storage_type,
+                    LAUNCH_SAVE_KERNEL(save_rhs_snapshot_gpu, save_rhs_snapshot_vec2_gpu, grid_copy, grid_copy_vec2, blockSize, stream_comp, storage_type,
                         r_buffer, 0, Ez, e_buffer, d_exact_Eold,
                         ce_hist, ce_rhs, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
                 }
@@ -2412,19 +2763,19 @@ DEEPGPR_API void forward(const float* __restrict__ eps_r_pad, const float* __res
                 transfer_buffer_in_use[buf_idx] = 1;
             } else {
                 if (save_model_history && fwi_mode == 3) {
-                    LAUNCH_STORAGE_KERNEL(save_rhs_snapshot_gpu, grid_copy, blockSize, stream_comp, storage_type,
+                    LAUNCH_SAVE_KERNEL(save_rhs_snapshot_gpu, save_rhs_snapshot_vec2_gpu, grid_copy, grid_copy_vec2, blockSize, stream_comp, storage_type,
                         R_saved, t_saved, Ex, E_saved, d_exact_Eold,
                         ce_hist, ce_rhs, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
-                    LAUNCH_STORAGE_KERNEL(save_rhs_snapshot_gpu, grid_copy, blockSize, stream_comp, storage_type,
+                    LAUNCH_SAVE_KERNEL(save_rhs_snapshot_gpu, save_rhs_snapshot_vec2_gpu, grid_copy, grid_copy_vec2, blockSize, stream_comp, storage_type,
                         wavefield_offset_host(R_saved, component_stride, storage_type), t_saved, Ey,
                         wavefield_const_offset_host(E_saved, component_stride, storage_type), d_exact_Eold != nullptr ? d_exact_Eold + snap_size : nullptr,
                         ce_hist, ce_rhs, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
-                    LAUNCH_STORAGE_KERNEL(save_rhs_snapshot_gpu, grid_copy, blockSize, stream_comp, storage_type,
+                    LAUNCH_SAVE_KERNEL(save_rhs_snapshot_gpu, save_rhs_snapshot_vec2_gpu, grid_copy, grid_copy_vec2, blockSize, stream_comp, storage_type,
                         wavefield_offset_host(R_saved, 2 * component_stride, storage_type), t_saved, Ez,
                         wavefield_const_offset_host(E_saved, 2 * component_stride, storage_type), d_exact_Eold != nullptr ? d_exact_Eold + 2 * snap_size : nullptr,
                         ce_hist, ce_rhs, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
                 } else if (save_model_history) {
-                    LAUNCH_STORAGE_KERNEL(save_rhs_snapshot_gpu, grid_copy, blockSize, stream_comp, storage_type,
+                    LAUNCH_SAVE_KERNEL(save_rhs_snapshot_gpu, save_rhs_snapshot_vec2_gpu, grid_copy, grid_copy_vec2, blockSize, stream_comp, storage_type,
                         R_saved, t_saved, Ez, E_saved, d_exact_Eold,
                         ce_hist, ce_rhs, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
                 }

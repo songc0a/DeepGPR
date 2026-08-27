@@ -218,9 +218,12 @@ This section defines the geometric observation system (coordinates) and the exci
 | :--- | :--- | :--- | :--- |
 | **`pmlthick`** | `int` / `list` / `Tensor`| Scalar or list of 6 | Thickness (in grid layers) of the PML (Perfectly Matched Layer) absorbing boundaries.<br>- Integer `p`: All six boundaries have thickness `p` (Z-boundaries are ignored in 2D).<br>- List `[x0, xm, y0, ym, z0, zm]`: Specific thicknesses for the 6 boundaries. |
 | **`model_gradient_sampling_interval`**| `int` | Scalar | Wavefield sampling interval during forward propagation (Default: 1).<br>A larger integer reduces VRAM use for `E_saved` and `R_saved`, but uses an explicitly approximate model gradient. The last incomplete sampling block is weighted by its actual length. |
+| **`save_wavefield_history`** | `bool` | Scalar | Independently controls allocation and native writes of the E/R histories used by adjoint model-gradient backward (Default: `True`). `False` still executes the complete FDTD, CPML, source-injection, and receiver-recording path, returns an empty `E_saved`, and raises a clear error if history-dependent backward is attempted. |
 | **`wavefield_storage_dtype`** | `torch.dtype` / `str` | `float32`, `float16`, or `bfloat16` | Storage format for saved `E_saved` and `R_saved` model-gradient wavefields. FDTD propagation remains float32. `float16` and `bfloat16` halve saved-wavefield memory at the cost of gradient accuracy; `bfloat16` has the safer dynamic range. String aliases such as `"fp16"` and `"bf16"` are accepted. |
+| **`wavefield_conversion_backend`** | `str` | `"auto"`, `"legacy"`, `"native_scalar"`, or `"native_vec2"` | CUDA FP16/BF16 history conversion. The audited default `"auto"` uses NVIDIA scalar intrinsics for CUDA FP16 and the legacy path otherwise. Explicit values retain the correctness/performance A/B paths; vec2 is not the default because it was slower on RTX 4090. |
 | **`wavefield_compression`** | `str` | `"none"`, `"int8"`, or `"zfp"` | `"int8"` enables CUDA-native per-block symmetric INT8 histories with FP32 scales and inline decode in the fused material-gradient kernel. `"none"` is the unchanged default. `"zfp"` is reserved for an optional fused CUDA decoder and is rejected by the current dependency-free build instead of silently materializing a decoded global-memory history. |
 | **`wavefield_compression_block_size`** | sequence / `None` | 2D or 3D spatial block | INT8 block shape; defaults to `(8, 8)` in 2D and `(4, 4, 4)` in 3D. The block volume must be a power of two no larger than 256. Partial boundary blocks are supported. |
+| **`int8_reduction_backend`** | `str` | `"auto"`, `"current"`, `"cub_block"`, or `"warp_shuffle"` | Tile maximum reduction. The audited default `"auto"` selects NVIDIA CUB `BlockReduce` for 64-voxel tiles and preserves the prior shared-memory tree for other valid tile sizes. Explicit values expose the retained A/B implementations. |
 | **`wavefield_compression_rate`** | scalar / `None` | Optional ZFP setting | Reserved for an optional ZFP backend. It is rejected unless that backend is selected and available. |
 | **`use_async_offload`** | `bool` | Scalar | CUDA-only VRAM optimization flag (Default: `False`).<br>If `True`, `E_saved` and `R_saved` are asynchronously offloaded to page-locked host memory (`pin_memory` CPU RAM). This reduces GPU VRAM consumption at the cost of PCIe transfers. On CPU this option is ignored. |
 
@@ -257,6 +260,11 @@ gradient. It does not allocate or write a reconstructed global-memory history.
 `use_async_offload=True`, CPU execution, and a non-float32
 `wavefield_storage_dtype` are explicitly incompatible with `"int8"`.
 
+The current shared-memory maximum reduction remains available as
+`int8_reduction_backend="current"`. The RTX 4090 audit selected CUB
+`BlockReduce` for the default 64-voxel tiles; `"auto"` falls back to the current
+tree for other supported power-of-two tile volumes.
+
 `E_saved` is an opaque one-dimensional `torch.int8` packed tensor in this mode.
 For diagnostics only, reconstruct it with
 `DeepGPR.decompress_wavefield_history(E_saved, original_shape, block_size)`.
@@ -269,9 +277,13 @@ preserves source correlation for Nsight; `-Xptxas=-v` prints registers and spill
 stores/loads for each kernel.
 
 ```bash
-nvcc -std=c++14 -O3 -lineinfo -Xptxas=-v --shared -Xcompiler -fPIC \
+nvcc -std=c++14 -O3 -lineinfo -Xptxas=-v -arch=sm_89 --shared -Xcompiler -fPIC \
   -o src/DeepGPR/lib/deepgpr.so src/DeepGPR/lib/deepgpr.cu
 ```
+
+The command above is the audited RTX 4090 build path. Select the matching
+architecture when building for a different GPU; do not add `--use_fast_math`
+unless a separate numerical and gradient validation explicitly permits it.
 
 The new INT8 path deliberately keeps native ABI 6 because the forward/backward
 C signatures are unchanged. A capability symbol prevents an older ABI-6 CUDA
@@ -325,6 +337,7 @@ return E_saved, (Ex, Ey, Ez), (Hx, Hy, Hz), (x0EPhi1...zmHPhi2), receiver_amplit
 ```
 
 1.  **`E_saved`**: The pre-update electric field history `E^n` saved for gradient calculation and diagnostics. An internal `R_saved` tensor stores the corresponding discrete right-hand side `R^n`.
+    *   With `save_wavefield_history=False`, `E_saved` is a zero-length tensor and neither E nor R history storage/compression kernels are launched.
     *   **Shape when `mode=2`**: `(nt_saved, nstep, nx, ny, nz)`, storing Ez only.
     *   **Shape when `mode=3`**: `(3, nt_saved, nstep, nx, ny, nz)`, storing components in `[Ex, Ey, Ez]` order.
     *   `nt_saved` depends on `nt` and `model_gradient_sampling_interval`.

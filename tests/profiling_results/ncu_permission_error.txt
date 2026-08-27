@@ -1,0 +1,14 @@
+Attempted target: one update_e_gpu<2> launch in FDTD-only mode
+Launch selection: --launch-skip 100 --launch-count 1
+Requested sections: SpeedOfLight, MemoryWorkloadAnalysis, SchedulerStats,
+WarpStateStats, LaunchStats, Occupancy
+
+Nsight Compute error:
+ERR_NVGPUCTRPERM - The user does not have permission to access NVIDIA GPU
+Performance Counters on target device 0.
+
+Read-only driver check:
+RmProfilingAdminOnly: 1
+
+No system configuration, kernel-module option, or driver setting was changed.
+No .ncu-rep/CSV with hardware counter data was produced.

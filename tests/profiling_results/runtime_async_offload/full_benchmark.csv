@@ -1,0 +1,2 @@
+mode,forward_mean_ms,forward_median_ms,backward_mean_ms,backward_median_ms,total_mean_ms,total_median_ms,peak_MiB,history_MiB,wall_median_ms,eps_rel,eps_cos,sigma_rel,sigma_cos
+fp16_legacy,9.412265586853028,9.4202880859375,8.857678365707397,8.800400257110596,18.290224170684816,18.081472396850586,3.9365234375,28.125,18.188853515312076,nan,nan,nan,nan

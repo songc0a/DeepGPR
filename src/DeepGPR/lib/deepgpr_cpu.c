@@ -31,7 +31,8 @@ static const float M0 = 1.25663706212e-06f;
 enum {
     WAVEFIELD_FLOAT32 = 0,
     WAVEFIELD_FLOAT16 = 1,
-    WAVEFIELD_BFLOAT16 = 2
+    WAVEFIELD_BFLOAT16 = 2,
+    WAVEFIELD_HISTORY_DISABLED = 1 << 26
 };
 
 static size_t wavefield_element_size(int storage_type)
@@ -1602,6 +1603,7 @@ DEEPGPR_API void forward(const float* RESTRICT eps_r_pad, const float* RESTRICT 
              int use_async_offload)
 {
     (void)use_async_offload;
+    int save_wavefield_history = (storage_type & WAVEFIELD_HISTORY_DISABLED) == 0;
     int fdtd_order = g_fdtd_order;
     int e_components = (fwi_mode == 3) ? 3 : 1;
     int has_cpml = pml0 || pml1 || pml2 || pml3 || pml4 || pml5;
@@ -1610,7 +1612,7 @@ DEEPGPR_API void forward(const float* RESTRICT eps_r_pad, const float* RESTRICT 
     long long component_stride = (long long)nt_saved * snap_size;
     float* exact_Eold = NULL;
 
-    if (save_model_history && storage_type != WAVEFIELD_FLOAT32) {
+    if (save_wavefield_history && save_model_history && storage_type != WAVEFIELD_FLOAT32) {
         exact_Eold = (float*)malloc((size_t)e_components * (size_t)snap_size * sizeof(float));
     }
 
@@ -1619,7 +1621,7 @@ DEEPGPR_API void forward(const float* RESTRICT eps_r_pad, const float* RESTRICT 
     DEEPGPR_OMP_PARALLEL
     {
     for (int i = 0; i < nt; i++) {
-        if (i % sampling_interval == 0) {
+        if (save_wavefield_history && i % sampling_interval == 0) {
             int t_saved = i / sampling_interval;
             if (fwi_mode == 3) {
                 save_e_snapshot_cpu(E_saved, t_saved, Ex, exact_Eold, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, storage_type);
@@ -1655,7 +1657,7 @@ DEEPGPR_API void forward(const float* RESTRICT eps_r_pad, const float* RESTRICT 
         inject_sources_cpu(step, i, dx, dy, dz, sourcelocation, srcwaveforms,
             Ex, Ey, Ez, ce_rhs, NX_FIELDS, NY_FIELDS, NZ_FIELDS, nsrc, polarisation, nt);
 
-        if (save_model_history && i % sampling_interval == 0) {
+        if (save_wavefield_history && save_model_history && i % sampling_interval == 0) {
             int t_saved = i / sampling_interval;
             if (fwi_mode == 3) {
                 save_rhs_snapshot_cpu(R_saved, t_saved, Ex, E_saved, exact_Eold, ce_hist, ce_rhs,

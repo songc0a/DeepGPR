@@ -1,0 +1,4 @@
+native_library=/home/ll/下载/DeepGPR-dev/src/DeepGPR/lib/deepgpr.so
+case nx=128 ny=96 nt=300 shots=2 receivers=32 sampling_interval=1
+mode,forward_mean_ms,forward_median_ms,backward_mean_ms,backward_median_ms,total_mean_ms,total_median_ms,peak_MiB,history_MiB,wall_median_ms,eps_rel,eps_cos,sigma_rel,sigma_cos
+fp16_legacy,9.412266,9.420288,8.857678,8.800400,18.290224,18.081472,3.94,28.12,18.188854,nan,nan,nan,nan

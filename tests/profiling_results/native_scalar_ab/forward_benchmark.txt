@@ -1,0 +1,18 @@
+native_library=/home/ll/下载/DeepGPR-dev/src/DeepGPR/lib/deepgpr.so
+case nx=512 ny=384 nt=1200 shots=4 receivers=64 sampling_interval=1
+mode,forward_mean_ms,forward_median_ms,forward_min_ms,forward_std_ms,peak_MiB,history_MiB
+fdtd,61.299442,61.248671,60.612610,0.467727,56.53,0.00
+fp32,88.735118,87.578941,86.250496,2.910610,7256.53,7200.00
+fp16_legacy,89.696307,89.138176,88.173569,1.579413,3656.53,3600.00
+fp16_native,88.328265,88.121517,86.726654,1.314560,3656.53,3600.00
+bf16_legacy,88.741597,88.622589,87.554306,0.858229,3656.53,3600.00
+bf16_native,88.610854,88.600574,87.416832,0.643645,3656.53,3600.00
+int8,110.886730,110.795311,109.682686,0.728745,1968.86,1912.50
+fdtd_vs_fp32_data_relative_l2=0.000000000e+00
+fdtd_vs_fp32_data_max_abs=0.000000000e+00
+fp32_history_overhead_ms=26.330271 percentage=42.989%
+fp16_legacy_history_overhead_ms=27.889505 percentage=45.535%
+fp16_native_history_overhead_ms=26.872847 percentage=43.875%
+bf16_legacy_history_overhead_ms=27.373919 percentage=44.693%
+bf16_native_history_overhead_ms=27.351904 percentage=44.657%
+int8_history_overhead_ms=49.546640 percentage=80.894%

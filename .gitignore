@@ -6,3 +6,10 @@ build/
 *.egg-info/
 .DS_Store
 experiment/
+
+# Nsight Compute/Systems raw profiler captures and database exports.
+*.nsys-rep
+*.ncu-rep
+*.sqlite
+*.qdrep
+*.qdstrm

@@ -236,6 +236,25 @@ def _configure_deepgpr_library(lib: ctypes.CDLL) -> None:
         lib.deepgpr_supports_int8_wavefield.argtypes = []
         lib.deepgpr_supports_int8_wavefield.restype = ctypes.c_int
 
+    if hasattr(lib, "deepgpr_supports_conversion_backends"):
+        lib.deepgpr_supports_conversion_backends.argtypes = []
+        lib.deepgpr_supports_conversion_backends.restype = ctypes.c_int
+
+    if hasattr(lib, "deepgpr_supports_int8_reduction_backends"):
+        lib.deepgpr_supports_int8_reduction_backends.argtypes = []
+        lib.deepgpr_supports_int8_reduction_backends.restype = ctypes.c_int
+
+    if hasattr(lib, "deepgpr_test_wavefield_conversion"):
+        lib.deepgpr_test_wavefield_conversion.argtypes = [
+            _FLOAT_P,
+            _VOID_P,
+            _FLOAT_P,
+            ctypes.c_longlong,
+            ctypes.c_int,
+            ctypes.c_int,
+        ]
+        lib.deepgpr_test_wavefield_conversion.restype = None
+
     lib._deepgpr_argtypes_configured = True
 
 

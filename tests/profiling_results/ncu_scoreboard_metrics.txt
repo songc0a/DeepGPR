@@ -1,0 +1,11 @@
+Commands executed:
+  ncu --query-metrics-mode all | grep -i scoreboard
+  ncu --query-metrics-mode all | grep -i long_scoreboard
+
+Both commands produced no stdout with this NCU/device combination. The
+installed WarpStateStats section defines the following actual metric names:
+  smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio
+  smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio
+
+The metrics could not be collected because the first targeted NCU run failed
+with ERR_NVGPUCTRPERM; see ncu_permission_error.txt.

@@ -1,0 +1,9 @@
+
+ ** CUDA GPU MemOps Summary (by Time) (cuda_gpu_mem_time_sum):
+
+ Time (%)  Total Time (ns)  Count  Avg (ns)  Med (ns)  Min (ns)  Max (ns)  StdDev (ns)            Operation
+ --------  ---------------  -----  --------  --------  --------  --------  -----------  ------------------------------
+     45.8            65440      3   21813.3    1216.0      1151     63073      35731.9  [CUDA memcpy Device-to-Host]
+     41.6            59520     64     930.0     928.0       863      1024         51.3  [CUDA memcpy Device-to-Device]
+      7.5            10722     18     595.7     704.0       352       865        192.4  [CUDA memcpy Host-to-Device]
+      5.1             7329     14     523.5     384.0       352       832        194.0  [CUDA memset]

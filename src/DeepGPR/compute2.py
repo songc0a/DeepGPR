@@ -26,6 +26,19 @@ _INT8_BLOCK_X_SHIFT = 8
 _INT8_BLOCK_Y_SHIFT = 14
 _INT8_BLOCK_Z_SHIFT = 20
 _INT8_BLOCK_DIM_MASK = 0x3F
+_WAVEFIELD_HISTORY_DISABLED = 1 << 26
+_WAVEFIELD_CONVERSION_SHIFT = 27
+_WAVEFIELD_CONVERSION_BACKENDS = {
+    "legacy": 0,
+    "native_scalar": 1,
+    "native_vec2": 2,
+}
+_INT8_REDUCTION_SHIFT = 29
+_INT8_REDUCTION_BACKENDS = {
+    "current": 0,
+    "cub_block": 1,
+    "warp_shuffle": 2,
+}
 
 
 def _normalize_wavefield_compression(value):
@@ -37,6 +50,38 @@ def _normalize_wavefield_compression(value):
     value = value.lower()
     if value not in ("none", "int8", "zfp"):
         raise ValueError("wavefield_compression must be 'none', 'int8', or 'zfp'.")
+    return value
+
+
+def _normalize_wavefield_conversion_backend(value):
+    """Normalize the CUDA FP16/BF16 history-conversion backend."""
+    if not isinstance(value, str):
+        raise TypeError(
+            "wavefield_conversion_backend must be 'auto', 'legacy', "
+            "'native_scalar', or 'native_vec2'."
+        )
+    value = value.lower()
+    if value != "auto" and value not in _WAVEFIELD_CONVERSION_BACKENDS:
+        raise ValueError(
+            "wavefield_conversion_backend must be 'auto', 'legacy', "
+            "'native_scalar', or 'native_vec2'."
+        )
+    return value
+
+
+def _normalize_int8_reduction_backend(value):
+    """Normalize the experimental CUDA INT8 tile-reduction backend."""
+    if not isinstance(value, str):
+        raise TypeError(
+            "int8_reduction_backend must be 'auto', 'current', 'cub_block', "
+            "or 'warp_shuffle'."
+        )
+    value = value.lower()
+    if value != "auto" and value not in _INT8_REDUCTION_BACKENDS:
+        raise ValueError(
+            "int8_reduction_backend must be 'auto', 'current', 'cub_block', "
+            "or 'warp_shuffle'."
+        )
     return value
 
 
@@ -74,7 +119,7 @@ def _normalize_compression_block_size(value, spatial_mode):
     return block_size
 
 
-def _encode_int8_storage_type(block_size):
+def _encode_int8_storage_type(block_size, reduction_backend="current"):
     """Pack the block shape into the existing native storage-type argument."""
     bx, by, bz = block_size
     return (
@@ -82,6 +127,7 @@ def _encode_int8_storage_type(block_size):
         | (bx << _INT8_BLOCK_X_SHIFT)
         | (by << _INT8_BLOCK_Y_SHIFT)
         | (bz << _INT8_BLOCK_Z_SHIFT)
+        | (_INT8_REDUCTION_BACKENDS[reduction_backend] << _INT8_REDUCTION_SHIFT)
     )
 
 
@@ -218,6 +264,7 @@ def _estimate_compute_memory(
     use_async_offload,
     er_requires_grad,
     se_requires_grad,
+    save_wavefield_history=True,
     wavefield_compression="none",
     compression_block_size=None,
 ):
@@ -251,8 +298,11 @@ def _estimate_compute_memory(
         + acquisition_bytes
     )
 
-    needs_backward = er_requires_grad or se_requires_grad
-    if wavefield_compression == "int8":
+    needs_backward = save_wavefield_history and (er_requires_grad or se_requires_grad)
+    if not save_wavefield_history:
+        packed_history_bytes = 0
+        saved_wavefield_bytes = 0
+    elif wavefield_compression == "int8":
         block_size = compression_block_size or ((8, 8, 1) if nz == 1 else (4, 4, 4))
         history_shape = (
             (components, nt_saved, nstep, nx, ny, nz)
@@ -282,7 +332,8 @@ def _estimate_compute_memory(
     )
     exact_old_bytes = (
         components * snapshot_cells * float_bytes
-        if needs_backward
+        if save_wavefield_history
+        and needs_backward
         and (storage_dtype != torch.float32 or wavefield_compression == "int8")
         else 0
     )
@@ -390,8 +441,11 @@ def _print_compute_preview(
     receiver_component,
     model_gradient_sampling_interval,
     wavefield_storage_dtype,
+    wavefield_conversion_backend,
+    int8_reduction_backend,
     wavefield_compression,
     wavefield_compression_block_size,
+    save_wavefield_history,
     use_async_offload,
     fdtd_order,
     mode,
@@ -419,6 +473,7 @@ def _print_compute_preview(
         storage_dtype=wavefield_storage_dtype,
         wavefield_compression=wavefield_compression,
         compression_block_size=wavefield_compression_block_size,
+        save_wavefield_history=save_wavefield_history,
         use_async_offload=use_async_offload,
         er_requires_grad=er.requires_grad,
         se_requires_grad=se.requires_grad,
@@ -461,6 +516,7 @@ def _print_compute_preview(
     print(f"  mu_r range / supplied: [{mr_min:.6e}, {mr_max:.6e}] / {mr_supplied}")
     print(f"  propagation dtype: {er.dtype}")
     print("Wavefield and runtime options")
+    print(f"  save wavefield history: {save_wavefield_history}")
     print(
         "  gradient sampling interval / saved time steps: "
         f"{model_gradient_sampling_interval} / {estimate['nt_saved']}"
@@ -472,8 +528,10 @@ def _print_compute_preview(
             f"{wavefield_compression_block_size} / "
             f"{_format_memory_size(estimate['packed_history_per_quantity'])}"
         )
+        print(f"  INT8 reduction backend: {int8_reduction_backend}")
     else:
         print(f"  saved wavefield storage dtype: {wavefield_storage_dtype}")
+        print(f"  CUDA conversion backend: {wavefield_conversion_backend}")
     print(
         f"  async offload requested / effective: {bool(use_async_offload)} / "
         f"{estimate['effective_async_offload']}"
@@ -686,8 +744,11 @@ def compute(device, dx=None, dt=None,
             print_parameters=False,
             save_forward_wavefield_path=None,
             *, eps_r=None, sigma=None, mu_r=None, receiver_component=None,
+            save_wavefield_history=True,
             wavefield_compression="none",
             wavefield_compression_block_size=None,
+            wavefield_conversion_backend="auto",
+            int8_reduction_backend="auto",
             wavefield_compression_rate=None):
     """Run DeepGPR FDTD forward modeling with autograd support.
 
@@ -714,6 +775,17 @@ def compute(device, dx=None, dt=None,
             when that backend is not compiled.
         wavefield_compression_block_size: Spatial INT8 block shape. Defaults to
             ``(8, 8)`` in 2D and ``(4, 4, 4)`` in 3D.
+        wavefield_conversion_backend: CUDA FP16/BF16 history conversion backend:
+            ``"auto"`` selects native scalar for CUDA FP16 and legacy otherwise;
+            ``"legacy"`` preserves the manual bit conversion and
+            ``"native_scalar"`` uses NVIDIA CUDA scalar intrinsics.
+            ``"native_vec2"`` uses pair conversion/store in the forward history
+            kernels and native scalar decode in the adjoint kernel.
+        int8_reduction_backend: INT8 tile-maximum implementation. ``"auto"``
+            selects CUB for 64-voxel tiles and current otherwise; ``"current"``
+            preserves the optimized shared-memory tree. ``"cub_block"`` and
+            ``"warp_shuffle"`` are explicit compile-time selections for
+            64-voxel tiles.
         wavefield_compression_rate: Reserved rate setting for the optional ZFP backend.
         use_async_offload: Whether CUDA should offload saved wavefields to pinned CPU memory.
         fdtd_order: Spatial finite-difference order, supported values are 2, 4, and 8.
@@ -726,6 +798,9 @@ def compute(device, dx=None, dt=None,
         sigma: Electrical conductivity tensor with the same shape as eps_r.
         mu_r: Relative permeability tensor, or None to use ones.
         receiver_component: Receiver component to return, 0 for x, 1 for y, 2 for z.
+        save_wavefield_history: Whether to allocate and write the forward E/R
+            histories used by adjoint model-gradient backward. ``False`` still
+            runs the complete FDTD/PML/source/receiver forward simulation.
     """
     if eps_r is not None and er is not None:
         raise TypeError("Specify only one of eps_r and its deprecated alias er.")
@@ -745,6 +820,8 @@ def compute(device, dx=None, dt=None,
         raise ValueError("mode must be 2 or 3.")
     if not isinstance(print_parameters, bool):
         raise TypeError("print_parameters must be a bool.")
+    if not isinstance(save_wavefield_history, bool):
+        raise TypeError("save_wavefield_history must be a bool.")
     forward_wavefield_directory = _normalize_forward_wavefield_directory(
         save_forward_wavefield_path
     )
@@ -755,6 +832,20 @@ def compute(device, dx=None, dt=None,
         raise ValueError("model_gradient_sampling_interval must be a positive integer.")
     wavefield_storage_dtype = _normalize_wavefield_storage_dtype(wavefield_storage_dtype)
     wavefield_compression = _normalize_wavefield_compression(wavefield_compression)
+    wavefield_conversion_backend = _normalize_wavefield_conversion_backend(
+        wavefield_conversion_backend
+    )
+    int8_reduction_backend = _normalize_int8_reduction_backend(
+        int8_reduction_backend
+    )
+    if wavefield_conversion_backend == "auto":
+        wavefield_conversion_backend = (
+            "native_scalar"
+            if device.type == "cuda"
+            and wavefield_compression == "none"
+            and wavefield_storage_dtype == torch.float16
+            else "legacy"
+        )
     if wavefield_compression == "zfp":
         raise NotImplementedError(
             "wavefield_compression='zfp' requires a block-level CUDA decoder fused "
@@ -765,6 +856,15 @@ def compute(device, dx=None, dt=None,
     if wavefield_compression_rate is not None:
         raise ValueError(
             "wavefield_compression_rate is only meaningful for the optional ZFP backend."
+        )
+    if not save_wavefield_history and use_async_offload:
+        raise ValueError(
+            "use_async_offload=True is incompatible with "
+            "save_wavefield_history=False because there is no history to offload."
+        )
+    if not save_wavefield_history and forward_wavefield_directory is not None:
+        raise ValueError(
+            "save_forward_wavefield_path requires save_wavefield_history=True."
         )
     if wavefield_compression == "int8":
         if device.type != "cuda":
@@ -785,6 +885,27 @@ def compute(device, dx=None, dt=None,
             "wavefield_compression_block_size is only valid when "
             "wavefield_compression='int8'."
         )
+    if wavefield_compression != "int8" and int8_reduction_backend not in (
+        "auto",
+        "current",
+    ):
+        raise ValueError(
+            "int8_reduction_backend is only selectable when "
+            "wavefield_compression='int8'."
+        )
+    if wavefield_conversion_backend != "legacy":
+        if device.type != "cuda":
+            raise ValueError(
+                "Native wavefield conversion backends are CUDA-only."
+            )
+        if wavefield_compression != "none" or wavefield_storage_dtype not in (
+            torch.float16,
+            torch.bfloat16,
+        ):
+            raise ValueError(
+                "wavefield_conversion_backend is only selectable for uncompressed "
+                "CUDA float16/bfloat16 histories."
+            )
     if source_direction not in (0, 1, 2) or receiver_component not in (0, 1, 2):
         raise ValueError("source_direction and receiver_component must be 0, 1, or 2.")
     if getattr(mu_r, "requires_grad", False):
@@ -801,16 +922,36 @@ def compute(device, dx=None, dt=None,
         if wavefield_compression == "int8"
         else None
     )
+    if int8_reduction_backend == "auto":
+        int8_reduction_backend = (
+            "cub_block"
+            if wavefield_compression == "int8"
+            and math.prod(compression_block_size) == 64
+            else "current"
+        )
+    if (
+        wavefield_compression == "int8"
+        and int8_reduction_backend != "current"
+        and math.prod(compression_block_size) != 64
+    ):
+        raise ValueError(
+            "The cub_block and warp_shuffle INT8 reduction experiments require "
+            "a compression block containing exactly 64 voxels."
+        )
 
     needs_model_gradient = eps_r.requires_grad or sigma.requires_grad
-    if needs_model_gradient and model_gradient_sampling_interval > 1:
+    if (
+        save_wavefield_history
+        and needs_model_gradient
+        and model_gradient_sampling_interval > 1
+    ):
         warnings.warn(
             "model_gradient_sampling_interval > 1 uses a weighted temporal-sampling "
             "approximation; use interval 1 with float32 storage for exact gradients.",
             RuntimeWarning,
             stacklevel=2,
         )
-    if needs_model_gradient and mode == 2:
+    if save_wavefield_history and needs_model_gradient and mode == 2:
         if spatial_mode != 2 or source_direction != 2 or receiver_component != 2:
             raise ValueError(
                 "mode=2 is an exact model-gradient mode only for 2D Ez-TM modeling. "
@@ -841,8 +982,11 @@ def compute(device, dx=None, dt=None,
             receiver_component=receiver_component,
             model_gradient_sampling_interval=model_gradient_sampling_interval,
             wavefield_storage_dtype=wavefield_storage_dtype,
+            wavefield_conversion_backend=wavefield_conversion_backend,
+            int8_reduction_backend=int8_reduction_backend,
             wavefield_compression=wavefield_compression,
             wavefield_compression_block_size=compression_block_size,
+            save_wavefield_history=save_wavefield_history,
             use_async_offload=use_async_offload,
             fdtd_order=fdtd_order,
             mode=mode,
@@ -861,11 +1005,11 @@ def compute(device, dx=None, dt=None,
     x0EPhi1,x0EPhi2,x0HPhi1,x0HPhi2,xmEPhi1,xmEPhi2,xmHPhi1,xmHPhi2,y0EPhi1,y0EPhi2,y0HPhi1,y0HPhi2,ymEPhi1,ymEPhi2,ymHPhi1,ymHPhi2,z0EPhi1,z0EPhi2,z0HPhi1,z0HPhi2,zmEPhi1,zmEPhi2,zmHPhi1,zmHPhi2=build_pml_phi(x0,xm,y0,ym,z0,zm,nstep,PML,device)
 
     Ex,Ey,Ez,Hx,Hy,Hz,x0EPhi1,x0EPhi2,x0HPhi1,x0HPhi2,xmEPhi1,xmEPhi2,xmHPhi1,xmHPhi2,y0EPhi1,y0EPhi2,y0HPhi1,y0HPhi2,ymEPhi1,ymEPhi2,ymHPhi1,ymHPhi2,z0EPhi1,z0EPhi2,z0HPhi1,z0HPhi2,zmEPhi1,zmEPhi2,zmHPhi1,zmHPhi2,E_saved,receiver_amplitudes = DeepGPR.apply(
-        eps_r, sigma,Ex,Ey,Ez,Hx,Hy,Hz,x0EPhi1,x0EPhi2,x0HPhi1,x0HPhi2,xmEPhi1,xmEPhi2,xmHPhi1,xmHPhi2,y0EPhi1,y0EPhi2,y0HPhi1,y0HPhi2,ymEPhi1,ymEPhi2,ymHPhi1,ymHPhi2,z0EPhi1,z0EPhi2,z0HPhi1,z0HPhi2,zmEPhi1,zmEPhi2,zmHPhi1,zmHPhi2, mu_r,grid_spacing,nx,ny,nz,dt,nt,nstep,source_amplitudes,source_location,receiver_location,pmlthick,nsr,nrx,device,dtype,x0,xm,y0,ym,z0,zm,x01,x02,xm1,xm2,y01,y02,ym1,ym2,z01,z02,zm1,zm2,eps_r_pad,sigma_pad,source_direction, receiver_component, model_gradient_sampling_interval, (wavefield_storage_dtype, wavefield_compression, compression_block_size), use_async_offload, fdtd_order, mode, debug)
+        eps_r, sigma,Ex,Ey,Ez,Hx,Hy,Hz,x0EPhi1,x0EPhi2,x0HPhi1,x0HPhi2,xmEPhi1,xmEPhi2,xmHPhi1,xmHPhi2,y0EPhi1,y0EPhi2,y0HPhi1,y0HPhi2,ymEPhi1,ymEPhi2,ymHPhi1,ymHPhi2,z0EPhi1,z0EPhi2,z0HPhi1,z0HPhi2,zmEPhi1,zmEPhi2,zmHPhi1,zmHPhi2, mu_r,grid_spacing,nx,ny,nz,dt,nt,nstep,source_amplitudes,source_location,receiver_location,pmlthick,nsr,nrx,device,dtype,x0,xm,y0,ym,z0,zm,x01,x02,xm1,xm2,y01,y02,ym1,ym2,z01,z02,zm1,zm2,eps_r_pad,sigma_pad,source_direction, receiver_component, model_gradient_sampling_interval, (wavefield_storage_dtype, wavefield_compression, compression_block_size, wavefield_conversion_backend, int8_reduction_backend), save_wavefield_history, use_async_offload, fdtd_order, mode, debug)
 
     if forward_wavefield_directory is not None:
         saved_metadata = None
-        if wavefield_compression == "int8":
+        if save_wavefield_history and wavefield_compression == "int8":
             nt_saved = (nt + model_gradient_sampling_interval - 1) // model_gradient_sampling_interval
             saved_metadata = {
                 "compression": "int8",
@@ -897,7 +1041,8 @@ class DeepGPR(torch.autograd.Function):
                 y0,ym,z0,zm,x01,x02,xm1,xm2,
                 y01,y02,ym1,ym2,z01,z02,zm1,zm2,
                 eps_r_pad,sigma_pad,source_direction, receiver_component,
-                model_gradient_sampling_interval, wavefield_storage_config, use_async_offload, fdtd_order, mode, debug):
+                model_gradient_sampling_interval, wavefield_storage_config,
+                save_wavefield_history, use_async_offload, fdtd_order, mode, debug):
         """Call the native forward solver and save tensors for backward.
 
         Args:
@@ -937,7 +1082,8 @@ class DeepGPR(torch.autograd.Function):
             source_direction: Source electric-field polarization, 0 for x, 1 for y, 2 for z.
             receiver_component: Receiver component to return, 0 for x, 1 for y, 2 for z.
             model_gradient_sampling_interval: Forward wavefield sampling interval.
-            wavefield_storage_config: Internal ``(dtype, compression, block_size)`` tuple.
+            wavefield_storage_config: Internal storage/compression backend tuple.
+            save_wavefield_history: Whether native forward history stores are enabled.
             use_async_offload: Whether CUDA should offload saved wavefields to pinned CPU memory.
             fdtd_order: Spatial finite-difference order.
             mode: FWI gradient mode; 2 uses Ez only, 3 uses Ex, Ey, and Ez.
@@ -957,17 +1103,41 @@ class DeepGPR(torch.autograd.Function):
             wavefield_storage_dtype,
             wavefield_compression,
             compression_block_size,
+            wavefield_conversion_backend,
+            int8_reduction_backend,
         ) = wavefield_storage_config
-        if wavefield_compression == "int8":
+        if save_wavefield_history and wavefield_conversion_backend != "legacy":
+            capability = getattr(c_lib, "deepgpr_supports_conversion_backends", None)
+            if capability is None or int(capability()) != 1:
+                raise RuntimeError(
+                    "The loaded CUDA library does not contain selectable native "
+                    "FP16/BF16 conversion backends. Rebuild deepgpr.cu."
+                )
+        if save_wavefield_history and wavefield_compression == "int8":
             capability = getattr(c_lib, "deepgpr_supports_int8_wavefield", None)
             if capability is None or int(capability()) != 1:
                 raise RuntimeError(
                     "The loaded CUDA library does not contain the fused block-INT8 "
                     "wavefield implementation. Rebuild deepgpr.cu from the current source."
                 )
-        ctx.save_for_backward(mu_r, source_location, receiver_location,
-                              x01,x02,xm1,xm2,
-                              y01,y02,ym1,ym2,z01,z02,zm1,zm2,eps_r_pad,sigma_pad)
+            if int8_reduction_backend != "current":
+                capability = getattr(
+                    c_lib, "deepgpr_supports_int8_reduction_backends", None
+                )
+                if capability is None or int(capability()) != 1:
+                    raise RuntimeError(
+                        "The loaded CUDA library does not contain selectable INT8 "
+                        "reduction backends. Rebuild deepgpr.cu."
+                    )
+        if save_wavefield_history:
+            ctx.save_for_backward(
+                mu_r, source_location, receiver_location,
+                x01, x02, xm1, xm2,
+                y01, y02, ym1, ym2, z01, z02, zm1, zm2,
+                eps_r_pad, sigma_pad,
+            )
+        else:
+            ctx.save_for_backward()
         dx, dy, dz = grid_spacing
         ctx.grid_spacing=grid_spacing
         ctx.nx=nx
@@ -990,10 +1160,21 @@ class DeepGPR(torch.autograd.Function):
         ctx.wavefield_compression = wavefield_compression
         ctx.compression_block_size = compression_block_size
         ctx.wavefield_storage_type = (
-            _encode_int8_storage_type(compression_block_size)
+            _encode_int8_storage_type(
+                compression_block_size, int8_reduction_backend
+            )
             if wavefield_compression == "int8"
-            else _WAVEFIELD_STORAGE_TYPES[wavefield_storage_dtype]
+            else (
+                _WAVEFIELD_STORAGE_TYPES[wavefield_storage_dtype]
+                | (
+                    _WAVEFIELD_CONVERSION_BACKENDS[wavefield_conversion_backend]
+                    << _WAVEFIELD_CONVERSION_SHIFT
+                )
+            )
         )
+        ctx.save_wavefield_history = bool(save_wavefield_history)
+        if not ctx.save_wavefield_history:
+            ctx.wavefield_storage_type |= _WAVEFIELD_HISTORY_DISABLED
         ctx.use_async_offload = bool(use_async_offload and device.type == "cuda")
         ctx.fdtd_order = fdtd_order
         ctx.mode = mode
@@ -1008,7 +1189,10 @@ class DeepGPR(torch.autograd.Function):
         else:
             saved_shape = (nt_saved, nstep, nx, ny, nz)
 
-        if wavefield_compression == "int8":
+        if not ctx.save_wavefield_history:
+            E_saved = torch.empty(0, device=device, dtype=wavefield_storage_dtype)
+            R_saved = torch.empty(0, device=device, dtype=wavefield_storage_dtype)
+        elif wavefield_compression == "int8":
             layout = _int8_history_layout(saved_shape, compression_block_size)
             E_saved = torch.empty(
                 layout["packed_bytes"], device=device, dtype=torch.int8
@@ -1104,7 +1288,10 @@ class DeepGPR(torch.autograd.Function):
                 model_gradient_sampling_interval,
                 mode,
                 ctx.wavefield_storage_type,
-                int(ctx.eps_r_requires_grad or ctx.sigma_requires_grad),
+                int(
+                    ctx.save_wavefield_history
+                    and (ctx.eps_r_requires_grad or ctx.sigma_requires_grad)
+                ),
                 int(ctx.use_async_offload))
         _end_native_call(native_streams)
 
@@ -1113,7 +1300,7 @@ class DeepGPR(torch.autograd.Function):
                 decompress_wavefield_history(
                     E_saved, saved_shape, compression_block_size
                 )
-                if wavefield_compression == "int8"
+                if wavefield_compression == "int8" and ctx.save_wavefield_history
                 else E_saved
             )
             diagnostic_R_saved = (
@@ -1166,6 +1353,11 @@ class DeepGPR(torch.autograd.Function):
         """
         
         del _g_E_saved
+        if not ctx.save_wavefield_history:
+            raise RuntimeError(
+                "Forward wavefield history is disabled; adjoint/model-gradient "
+                "backward is unavailable."
+            )
         (
             mu_r, source_location, receiver_location,
             x01, x02, xm1, xm2, y01, y02, ym1, ym2,
@@ -1363,7 +1555,7 @@ class DeepGPR(torch.autograd.Function):
         ctx.R_saved = None
         del E_saved,R_saved,mu_r,source_location,receiver_location,x01,x02,xm1,xm2,y01,y02,ym1,ym2,z01,z02,zm1,zm2,eps_r_pad,sigma_pad,ce_hist,ce_curl,ce_rhs,ch_hist,ch_curl,ch_rhs
 
-        gradients = [None] * 76
+        gradients = [None] * len(ctx.needs_input_grad)
         gradients[0] = grad_eps_r if eps_r_requires_grad else None
         gradients[1] = grad_sigma if sigma_requires_grad else None
         for index, (gradient, required) in enumerate(

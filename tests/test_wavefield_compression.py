@@ -32,7 +32,61 @@ def _cosine(candidate, reference):
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA is not available")
 class Int8WavefieldCompressionTests(unittest.TestCase):
-    def _run_2d(self, compression):
+    def _forward_history_case(self, save_wavefield_history):
+        device = torch.device("cuda")
+        nx, ny, nt = 18, 21, 48
+        eps_r = torch.full(
+            (nx, ny), 4.0, device=device, requires_grad=True
+        )
+        sigma = torch.full(
+            (nx, ny), 2.0e-4, device=device, requires_grad=True
+        )
+        source = DeepGPR.wavelet.ricker(
+            3.5e8, nt, 2.5e-11, 2.0e-9, device=device
+        ).reshape(1, nt, 1)
+        source_location = torch.tensor(
+            [[[8, 7, 0]]], dtype=torch.int32, device=device
+        )
+        receiver_location = torch.tensor(
+            [[[7, 12, 0], [9, 14, 0]]], dtype=torch.int32, device=device
+        )
+        result = DeepGPR.compute(
+            device=device,
+            dx=(0.020, 0.016, 0.012),
+            dt=2.5e-11,
+            source_amplitudes=source,
+            source_location=source_location,
+            receiver_location=receiver_location,
+            eps_r=eps_r,
+            sigma=sigma,
+            pmlthick=3,
+            fdtd_order=4,
+            mode=2,
+            save_wavefield_history=save_wavefield_history,
+        )
+        return result, eps_r, sigma
+
+    def test_fdtd_only_matches_fp32_history_receiver_data(self):
+        reference, _, _ = self._forward_history_case(True)
+        fdtd_only, _, _ = self._forward_history_case(False)
+        reference_data = reference[-1].detach()
+        fdtd_data = fdtd_only[-1].detach()
+
+        self.assertGreater(reference[0].numel(), 0)
+        self.assertEqual(fdtd_only[0].numel(), 0)
+        self.assertLess(_relative_l2(fdtd_data, reference_data), 1.0e-7)
+        self.assertLess(float((fdtd_data - reference_data).abs().max()), 1.0e-7)
+
+    def test_fdtd_only_backward_fails_explicitly(self):
+        result, _, _ = self._forward_history_case(False)
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "Forward wavefield history is disabled; adjoint/model-gradient "
+            "backward is unavailable",
+        ):
+            result[-1].square().mean().backward()
+
+    def _run_2d(self, compression, int8_reduction_backend="current"):
         device = torch.device("cuda")
         nx, ny, nt = 18, 21, 96
         x = torch.linspace(0.0, 1.0, nx, device=device)[:, None]
@@ -62,6 +116,7 @@ class Int8WavefieldCompressionTests(unittest.TestCase):
             wavefield_storage_dtype=torch.float32,
             wavefield_compression=compression,
             wavefield_compression_block_size=(8, 8) if compression == "int8" else None,
+            int8_reduction_backend=int8_reduction_backend,
         )
         result = DeepGPR.compute(**kwargs)
         data = result[-1]
@@ -146,6 +201,35 @@ class Int8WavefieldCompressionTests(unittest.TestCase):
             )
             best_error = min(best_error, error)
         self.assertLess(best_error, 1.5e-1)
+
+    def test_int8_reduction_backends_are_bit_exact(self):
+        current = self._run_2d("int8", "current")
+        for backend in ("cub_block", "warp_shuffle"):
+            candidate = self._run_2d("int8", backend)
+            with self.subTest(backend=backend):
+                self.assertTrue(torch.equal(candidate["history"], current["history"]))
+                self.assertTrue(torch.equal(candidate["data"], current["data"]))
+                # The fused adjoint uses pre-existing atomicAdd accumulation, so
+                # independent launches need not be bit deterministic.  The observed
+                # current-vs-current noise is ~2.3e-7 relative on this case.
+                self.assertLess(_relative_l2(candidate["eps"], current["eps"]), 1.0e-6)
+                self.assertLess(
+                    _relative_l2(candidate["sigma"], current["sigma"]), 1.0e-6
+                )
+                self.assertGreater(_cosine(candidate["eps"], current["eps"]), 0.999999)
+                self.assertGreater(
+                    _cosine(candidate["sigma"], current["sigma"]), 0.999999
+                )
+
+    def test_int8_experimental_reduction_requires_64_voxels(self):
+        current = self._run_2d("int8", "current")
+        kwargs = dict(current["kwargs"])
+        kwargs["eps_r"] = kwargs["eps_r"].detach()
+        kwargs["sigma"] = kwargs["sigma"].detach()
+        kwargs["wavefield_compression_block_size"] = (4, 8)
+        kwargs["int8_reduction_backend"] = "cub_block"
+        with self.assertRaisesRegex(ValueError, "exactly 64 voxels"):
+            DeepGPR.compute(**kwargs)
 
     def test_3d_partial_tiles_are_device_safe(self):
         device = torch.device("cuda")

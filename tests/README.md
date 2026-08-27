@@ -46,6 +46,12 @@ sensitive to different implementation errors:
 11. `99_verification_summary.ipynb`: validates and summarizes the JSON reports,
     rejecting reports produced by a different ABI, source tree, or native library.
 
+`checkpoint_example.ipynb` is a separate CUDA example rather than part of the
+release-report sequence. It compares full-history autograd with segmented
+temporal recomputation, verifies receiver and material-gradient agreement, and
+plots measured peak GPU memory (about 20 GiB for the default uncheckpointed
+case), runtime, traces, and permittivity gradients.
+
 Run the notebooks in numeric order from this directory. Each successful
 notebook writes a JSON report to `tests/results`. The summary notebook
 requires reports 00 through 09. On a CUDA server, set the target device before
@@ -82,21 +88,40 @@ an optimization objective; memory-bound FDTD kernels may reach their best
 runtime below the GPU's maximum power limit.
 
 `benchmark_wavefield_compression.py` runs FP32, FP16, and fused block-INT8 on
-the same acquisition. It reports saved-history bytes, peak allocated CUDA
-memory, forward/backward/iteration time, wavefield reconstruction errors,
-epsilon/conductivity gradient relative L2 errors and cosine similarities, plus
-history-read and logical decode throughput estimates:
+the same acquisition. Its default case is `512 x 384`, 1200 time steps, four
+shots, and 64 receivers. The two FP32 saved histories contain about 7.0 GiB,
+which is large enough to expose bandwidth effects while fitting comfortably on
+a 24 GiB RTX 4090 with the current solver. It reports saved-history bytes, peak
+allocated CUDA memory, wall time, CUDA-event time, host/synchronization delta,
+wavefield reconstruction errors, epsilon/conductivity gradient relative L2
+errors and cosine similarities, plus payload-rate estimates:
+
+```bash
+python tests/benchmark_wavefield_compression.py --device cuda:0
+# Reproduce the former smaller case:
+python tests/benchmark_wavefield_compression.py --device cuda:0 \
+  --nx 384 --ny 256 --nt 800 --shots 4 --receivers 32
+```
+
+The optional PyTorch/CUPTI profile is intrusive, so use ordinary repeats for
+the headline iteration runtime. It prints forward and backward CUDA time split
+into coefficient construction, FDTD/CPML updates, source/receiver work,
+history writes, fused history-gradient work, and transfers. It also lists the
+top individual kernels and CUDA synchronization API time. Limit the intrusive
+profile to one storage mode when desired, and optionally save traces that can
+be opened in Perfetto (`https://ui.perfetto.dev`):
 
 ```bash
 python tests/benchmark_wavefield_compression.py --device cuda:0 \
-  --nx 384 --ny 256 --nt 800 --shots 4 --receivers 32
-python tests/benchmark_wavefield_compression.py --device cuda:0 \
-  --profile-kernels --warmup 1 --repeats 5
+  --profile-kernels --profile-mode int8 --profile-top-kernels 20 \
+  --trace-dir compression_traces --warmup 1 --repeats 5
 ```
 
-The profiler option is intrusive and is intended to split FDTD, compression,
-adjoint, and gradient CUDA kernel time. Use ordinary repeats for iteration
-runtime and Nsight for hardware counters.
+The INT8 backward material-gradient kernel is intentionally fused: history
+read, block decode, and gradient accumulation happen inside one kernel. They do
+not occupy separable timeline intervals. The script reports that fused kernel's
+total time and effective stored/logical payload rates; use Nsight Compute to
+explain its internal stalls and throughput.
 
 `benchmark_runtime.py` provides the same deterministic case on CPU or CUDA,
 reports peak memory, saves outputs and gradients, and can compare a run with a
@@ -115,18 +140,27 @@ Use NVIDIA Nsight tools for native timelines and kernel metrics when they are
 available on the CUDA host:
 
 ```bash
-nsys profile -o deepgpr_nsys --force-overwrite=true \
-  python tests/benchmark_runtime.py --device cuda:0 --warmup 1 --repeats 1
+nsys profile --trace=cuda,nvtx,osrt -o deepgpr_compression_nsys \
+  --force-overwrite=true \
+  python tests/benchmark_wavefield_compression.py --device cuda:0 \
+    --warmup 1 --repeats 1 --nvtx
 ncu --set full --target-processes all -o deepgpr_ncu \
   python tests/benchmark_runtime.py --device cuda:0 --warmup 0 --repeats 1
 ```
+
+Nsight Systems is the right first tool for the end-to-end timeline: kernel
+ordering, stream overlap/gaps, CUDA API calls, CPU launch time, synchronization,
+and waiting. Nsight Compute profiles selected kernels in depth: DRAM/cache
+traffic, achieved occupancy, register use, instruction mix, and warp-stall
+reasons. It is not the right tool for measuring the full iteration wall time.
 
 For a focused before/after material-gradient comparison, profile each storage
 mode separately and filter both gradient kernel variants:
 
 ```bash
 ncu --target-processes all --kernel-name-base demangled \
-  --kernel-name regex:accumulate_material_gradients.* \
+  --kernel-name regex:accumulate_material_gradients_int8_gpu.* \
+  --launch-count 1 \
   --metrics \
 smsp__warp_issue_stalled_long_scoreboard_per_warp_active.pct,\
 smsp__warp_issue_stalled_short_scoreboard_per_warp_active.pct,\
