@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Documentation — DeepGPR</title>
+  <meta name="description" content="Install DeepGPR and learn its core PyTorch API for CPU or CUDA GPR forward modelling and full-waveform inversion.">
+  <meta name="theme-color" content="#050b13">
+  <meta property="og:type" content="website"><meta property="og:title" content="DeepGPR Documentation"><meta property="og:description" content="Installation, basic usage, device configuration, forward modelling, and core API.">
+  <meta property="og:url" content="https://songc0a.github.io/DeepGPR/docs.html"><meta property="og:image" content="https://songc0a.github.io/DeepGPR/assets/images/og.png">
+  <meta name="twitter:card" content="summary_large_image"><link rel="canonical" href="https://songc0a.github.io/DeepGPR/docs.html">
+  <link rel="icon" href="assets/images/favicon.svg" type="image/svg+xml"><link rel="stylesheet" href="assets/css/style.css"><script src="assets/js/main.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="site-header"><div class="container nav-shell">
+    <a class="brand" href="index.html" aria-label="DeepGPR home"><span class="brand-mark" aria-hidden="true">DG</span><span>DeepGPR</span></a>
+    <button class="nav-toggle" type="button" aria-expanded="false" aria-controls="primary-navigation" aria-label="Toggle navigation"><span></span></button>
+    <nav class="nav-links" id="primary-navigation" aria-label="Primary navigation"><a href="index.html">Overview</a><a href="docs.html" aria-current="page">Documentation</a><a href="examples.html">Examples</a><a href="publications.html">Publications</a><a class="nav-github" href="https://github.com/songc0a/DeepGPR">GitHub ↗</a></nav>
+  </div></header>
+
+  <main id="main">
+    <section class="page-hero"><div class="container"><div><p class="eyebrow">Documentation</p><h1>From tensors to GPR waveforms.</h1></div><p>A concise guide to the current public interface, based on the repository's README and implementation.</p></div></section>
+    <section class="section"><div class="container page-layout">
+      <nav class="side-nav" aria-label="Documentation sections"><strong>On this page</strong><a href="#installation">Installation</a><a href="#requirements">Requirements</a><a href="#quick-start">Basic usage</a><a href="#devices">Device setup</a><a href="#forward">Forward modelling</a><a href="#api">Main API</a><a href="#outputs">Outputs</a><a href="#examples">Examples</a></nav>
+      <div class="content-stack">
+        <section class="content-panel" id="installation">
+          <span class="kicker">01 / Setup</span><h2>Installation</h2>
+          <p>DeepGPR is published on PyPI. Install the package into the environment that already contains the PyTorch build appropriate for your hardware.</p>
+          <div class="code-window"><div class="code-titlebar"><span>terminal</span></div><pre><code>pip install DeepGPR</code></pre></div>
+          <div class="callout">DeepGPR uses packaged native libraries. CUDA execution additionally requires an NVIDIA GPU, a CUDA-enabled PyTorch installation, and a compatible CUDA backend library.</div>
+        </section>
+
+        <section class="content-panel" id="requirements">
+          <span class="kicker">02 / Environment</span><h2>Requirements</h2>
+          <div class="doc-grid">
+            <article class="info-card"><span class="card-tag">Python</span><h3>Python 3.8+</h3><p>The package metadata requires Python 3.8 or newer.</p></article>
+            <article class="info-card"><span class="card-tag">Libraries</span><h3>Scientific Python stack</h3><p>PyTorch, NumPy, SciPy, and Matplotlib are declared runtime dependencies.</p></article>
+            <article class="info-card"><span class="card-tag">CPU</span><h3>Linux, Windows, macOS</h3><p>The C/OpenMP CPU backend supports all three operating-system families listed by the project.</p></article>
+            <article class="info-card"><span class="card-tag">CUDA</span><h3>Linux and Windows</h3><p>CUDA execution is documented for Linux and Windows and requires an NVIDIA GPU with sufficient VRAM.</p></article>
+          </div>
+        </section>
+
+        <section class="content-panel" id="quick-start">
+          <span class="kicker">03 / Basic usage</span><h2>Run a differentiable forward model</h2>
+          <p>The model tensors use relative permittivity <code>eps_r</code> and electrical conductivity <code>sigma</code>. A 2D model is represented with a singleton third spatial dimension.</p>
+          <div class="code-window"><div class="code-titlebar"><span>quick_start.py</span></div><pre><code>import torch
+import DeepGPR
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+dx, dt, nt = 0.02, 3e-11, 500
+
+eps_r = torch.full((64, 96, 1), 4.0, device=device, requires_grad=True)
+sigma = torch.zeros_like(eps_r)
+source_location = torch.tensor([[[16, 12, 0]]], device=device)
+receiver_location = torch.tensor([[[48, 12, 0]]], device=device)
+
+source = DeepGPR.wavelet.ricker(
+    2e8, nt, dt, 5e-9, device=device
+).reshape(1, nt, 1)
+
+result = DeepGPR.compute(
+    device=device,
+    dx=dx,
+    dt=dt,
+    source_amplitudes=source,
+    source_location=source_location,
+    receiver_location=receiver_location,
+    eps_r=eps_r,
+    sigma=sigma,
+)
+
+receiver_data = result[-1]
+receiver_data.square().sum().backward()
+print(receiver_data.shape, eps_r.grad.shape)</code></pre></div>
+          <p>The final tuple element is receiver data with shape <code>(nstep, nt, nrx)</code>. Calling <code>backward()</code> populates requested gradients through PyTorch autograd.</p>
+        </section>
+
+        <section class="content-panel" id="devices">
+          <span class="kicker">04 / Hardware</span><h2>Device and GPU configuration</h2>
+          <p>Pass either a <code>torch.device</code> or a device string. DeepGPR selects the native backend for that device type.</p>
+          <div class="code-window"><div class="code-titlebar"><span>device_selection.py</span></div><pre><code># Automatic selection
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# Explicit choices
+cpu_device = torch.device("cpu")
+gpu_device = torch.device("cuda:0")
+
+# Optional CUDA memory control for saved model-gradient wavefields
+result = DeepGPR.compute(
+    device=gpu_device,
+    # model, source, and acquisition arguments...
+    wavefield_storage_dtype=torch.float16,
+    use_async_offload=True,
+)</code></pre></div>
+          <div class="callout"><code>use_async_offload=True</code> is CUDA-only and transfers saved wavefields to pinned CPU memory. Lower-precision storage and temporal sampling trade gradient accuracy for memory savings; use interval 1 with float32 storage for strict gradient checks.</div>
+        </section>
+
+        <section class="content-panel" id="forward">
+          <span class="kicker">05 / Solver</span><h2>Forward modelling</h2>
+          <p><code>DeepGPR.compute</code> advances the 2D or 3D Maxwell system with FDTD, applies CPML absorbing boundaries, records the requested electric-field component, and preserves the final solver state for continuation or differentiation.</p>
+          <div class="doc-grid">
+            <article class="info-card"><span class="card-tag">Grid</span><h3>Isotropic or anisotropic spacing</h3><p>Pass one scalar <code>dx</code> or three values for independent x, y, and z grid spacing.</p></article>
+            <article class="info-card"><span class="card-tag">Stencil</span><h3>Order 2, 4, or 8</h3><p>Select the spatial finite-difference order with <code>fdtd_order</code>; the default is 2.</p></article>
+            <article class="info-card"><span class="card-tag">Boundary</span><h3>Six-face CPML</h3><p><code>pmlthick</code> accepts one thickness or six boundary-specific values.</p></article>
+            <article class="info-card"><span class="card-tag">Polarization</span><h3>Electric-field components</h3><p>Source and receiver components use 0 = Ex, 1 = Ey, and 2 = Ez.</p></article>
+          </div>
+          <h3>Gradient modes</h3>
+          <p><code>mode=2</code> is the Ez-only material-gradient path for 2D Ez-TM modelling. <code>mode=3</code> uses Ex, Ey, and Ez contributions and is required for 3D or other electric-field component model gradients.</p>
+        </section>
+
+        <section class="content-panel" id="api">
+          <span class="kicker">06 / Reference</span><h2>Main API</h2>
+          <p>This table covers the parameters most often needed for modelling. The complete signature and constraints remain in the repository README.</p>
+          <table class="parameter-table"><thead><tr><th>Parameter</th><th>Purpose</th><th>Core form</th></tr></thead><tbody>
+            <tr><td>device</td><td>Execution device and native backend</td><td><code>"cpu"</code>, <code>"cuda:0"</code>, or <code>torch.device</code></td></tr>
+            <tr><td>dx</td><td>Grid spacing in metres</td><td>Scalar or three values</td></tr>
+            <tr><td>dt</td><td>Time-step size, checked against a material-aware CFL limit</td><td>Positive scalar</td></tr>
+            <tr><td>source_amplitudes</td><td>Source waveforms</td><td><code>(nwaveforms, nt, 1)</code></td></tr>
+            <tr><td>source_location</td><td>Source grid coordinates</td><td><code>(nstep, nsr, 3)</code></td></tr>
+            <tr><td>receiver_location</td><td>Receiver grid coordinates</td><td><code>(nstep, nrx, 3)</code></td></tr>
+            <tr><td>eps_r</td><td>Relative permittivity, values ≥ 1</td><td>2D or 3D tensor</td></tr>
+            <tr><td>sigma</td><td>Electrical conductivity, non-negative</td><td>Tensor matching <code>eps_r</code></td></tr>
+            <tr><td>mu_r</td><td>Optional relative permeability; gradients are not implemented</td><td>Tensor or <code>None</code></td></tr>
+            <tr><td>pmlthick</td><td>CPML boundary thickness</td><td>Integer or six values</td></tr>
+            <tr><td>fdtd_order</td><td>Spatial finite-difference order</td><td>2, 4, or 8</td></tr>
+            <tr><td>mode</td><td>Material-gradient component mode</td><td>2 or 3</td></tr>
+          </tbody></table>
+          <p><a href="https://github.com/songc0a/DeepGPR#compute-interface-documentation">Open the full interface documentation on GitHub ↗</a></p>
+        </section>
+
+        <section class="content-panel" id="outputs">
+          <span class="kicker">07 / Return state</span><h2>Outputs</h2>
+          <ol>
+            <li><strong><code>E_saved</code></strong> — saved electric-field history for model-gradient work and diagnostics.</li>
+            <li><strong><code>(Ex, Ey, Ez)</code></strong> — electric-field state at the final time step.</li>
+            <li><strong><code>(Hx, Hy, Hz)</code></strong> — magnetic-field state at the final time step.</li>
+            <li><strong><code>PML_Tuple</code></strong> — 24 CPML auxiliary state tensors.</li>
+            <li><strong><code>receiver_amplitudes</code></strong> — recorded data with shape <code>(nstep, nt, nrx)</code>.</li>
+          </ol>
+        </section>
+
+        <section class="content-panel" id="examples">
+          <span class="kicker">08 / Continue</span><h2>Examples and source</h2>
+          <p>The repository contains notebooks for forward modelling, 2D FWI, and 3D FWI, plus numerical verification and runtime benchmark tools.</p>
+          <div class="section-actions"><a class="button" href="examples.html">Browse examples</a><a class="button secondary" href="https://github.com/songc0a/DeepGPR/tree/main/examples">Open example source ↗</a><a class="button secondary" href="https://github.com/songc0a/DeepGPR/tree/main/src/DeepGPR">Open package source ↗</a></div>
+        </section>
+      </div>
+    </div></section>
+  </main>
+
+  <footer class="site-footer"><div class="container"><div class="footer-grid"><div class="footer-brand"><a class="brand" href="index.html"><span class="brand-mark" aria-hidden="true">DG</span><span>DeepGPR</span></a><p>Differentiable electromagnetic wave propagation for GPR modelling and inversion in PyTorch.</p></div><nav class="footer-links" aria-label="Footer navigation"><a href="https://github.com/songc0a/DeepGPR">GitHub</a><a href="https://pypi.org/project/DeepGPR/">PyPI</a><a href="docs.html">Documentation</a><a href="examples.html">Examples</a><a href="publications.html">Publications</a></nav></div><div class="footer-bottom"><span>© <span data-year>2026</span> Lei Liu. DeepGPR.</span><span>MIT License · Static site · No tracking</span></div></div></footer>
+</body>
+</html>

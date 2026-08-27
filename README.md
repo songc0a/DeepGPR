@@ -1,5 +1,7 @@
 # DeepGPR
 
+**Official Website / Documentation:** [https://songc0a.github.io/DeepGPR/](https://songc0a.github.io/DeepGPR/)
+
 DeepGPR provides a wave propagation module for PyTorch, designed for applications such as Ground Penetrating Radar (GPR) imaging and inversion. Its core concepts are derived from Deepwave. You can use it to perform both forward modeling and backpropagation—thereby enabling the simulation of wave propagation to generate synthetic data—as well as for Full Waveform Inversion (FWI). Furthermore, you can integrate this wave propagation functionality into a larger operational pipeline—incorporating various wavelets, loss functions, and other components—to achieve end-to-end forward and reverse propagation, powered by automatic differentiation and our high-performance operators.
 
 
@@ -241,6 +243,8 @@ When `eps_r` or `sigma` requires gradients, `mode=2` is restricted to 2D Ez-TM m
 The backward solver applies the exact reverse-mode transpose of each executed operation in reverse order: receiver sampling, source injection, electric CPML, electric update, magnetic CPML, and magnetic update. The derivative transpose is applied to the material-weighted field cotangent, so heterogeneous update coefficients and anisotropic grid spacing are handled by the executed discrete operator. Every electric and magnetic CPML auxiliary state has a separate cotangent recurrence on all six faces.
 
 CPML is treated as a fixed numerical boundary. Its boundary material averages are explicitly detached, and CPML cells are excluded from the returned material gradients. This separation must be retained when optimizing a model.
+
+The material-gradient formulation in DeepGPR was informed in part by the differentiable FDTD implementation in [TIDE](https://github.com/Vcholerae1/tide-GPR), particularly its treatment of the discrete Maxwell electric-field update in gradient computation. We gratefully acknowledge the TIDE project and its authors for this work.
 
 Use `model_gradient_sampling_interval=1` and `wavefield_storage_dtype=torch.float32` for a directional derivative check in the physical model region. Temporal subsampling and lower-precision storage deliberately approximate the gradient. Run [the gradient-check notebook](examples/4.GradientCheck.ipynb) after rebuilding the native ABI 6 libraries.
 

@@ -1,0 +1,284 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DeepGPR — Differentiable GPR modelling and inversion</title>
+  <meta name="description" content="DeepGPR provides differentiable 2D and 3D Maxwell FDTD modelling for ground-penetrating radar in PyTorch, with CPU and CUDA backends.">
+  <meta name="theme-color" content="#050b13">
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="DeepGPR — Differentiable GPR modelling and inversion">
+  <meta property="og:description" content="PyTorch-native 2D and 3D Maxwell FDTD for GPR forward modelling and full-waveform inversion.">
+  <meta property="og:url" content="https://songc0a.github.io/DeepGPR/">
+  <meta property="og:image" content="https://songc0a.github.io/DeepGPR/assets/images/og.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="canonical" href="https://songc0a.github.io/DeepGPR/">
+  <link rel="icon" href="assets/images/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="assets/css/style.css">
+  <script src="assets/js/main.js" defer></script>
+  <script src="assets/js/stats.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="site-header">
+    <div class="container nav-shell">
+      <a class="brand" href="index.html" aria-label="DeepGPR home">
+        <span class="brand-mark" aria-hidden="true">DG</span>
+        <span>DeepGPR</span>
+      </a>
+      <button class="nav-toggle" type="button" aria-expanded="false" aria-controls="primary-navigation" aria-label="Toggle navigation"><span></span></button>
+      <nav class="nav-links" id="primary-navigation" aria-label="Primary navigation">
+        <a href="index.html" aria-current="page">Overview</a>
+        <a href="docs.html">Documentation</a>
+        <a href="examples.html">Examples</a>
+        <a href="publications.html">Publications</a>
+        <a class="nav-github" href="https://github.com/songc0a/DeepGPR">GitHub ↗</a>
+      </nav>
+    </div>
+  </header>
+
+  <main id="main">
+    <section class="hero">
+      <div class="container hero-grid">
+        <div>
+          <p class="eyebrow">PyTorch × Maxwell FDTD</p>
+          <h1>Deep<span>GPR</span></h1>
+          <p class="hero-lead">Differentiable 2D and 3D electromagnetic modelling for ground-penetrating radar—built for forward simulation and full-waveform inversion with PyTorch.</p>
+          <div class="hero-actions">
+            <a class="button" href="docs.html#quick-start">Get started <span aria-hidden="true">→</span></a>
+            <a class="button secondary" href="docs.html">Read documentation</a>
+            <a class="button secondary" href="https://pypi.org/project/DeepGPR/">PyPI ↗</a>
+          </div>
+          <div class="install-command" aria-label="Installation command">
+            <span class="prompt" aria-hidden="true">$</span>
+            <code>pip install DeepGPR</code>
+            <button class="copy-button" type="button" data-copy="pip install DeepGPR" aria-label="Copy installation command">Copy</button>
+          </div>
+        </div>
+
+        <div class="radar-console" aria-label="Conceptual GPR wave propagation diagram">
+          <div class="console-bar">
+            <span>EM propagation / 2D slice</span>
+            <span class="console-status">Autograd ready</span>
+          </div>
+          <div class="radar-stage" aria-hidden="true">
+            <div class="ground-line"></div>
+            <div class="source-node"></div>
+            <div class="receiver-node"></div>
+            <div class="radar-wave wave-1"></div>
+            <div class="radar-wave wave-2"></div>
+            <div class="radar-wave wave-3"></div>
+            <div class="subsurface-layer"></div>
+            <div class="anomaly"></div>
+            <div class="console-readout">
+              <span>SOLVER <strong>MAXWELL FDTD</strong></span>
+              <span>BOUNDARY <strong>CPML</strong></span>
+              <span>BACKENDS <strong>CPU / CUDA</strong></span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <div class="capability-strip" aria-label="Core capabilities">
+      <div class="container capability-grid">
+        <div class="capability-item">2D + 3D</div>
+        <div class="capability-item">CPU + CUDA</div>
+        <div class="capability-item">Autograd</div>
+        <div class="capability-item">CPML</div>
+        <div class="capability-item">FDTD 2 / 4 / 8</div>
+      </div>
+    </div>
+
+    <section class="section" id="features">
+      <div class="container">
+        <div class="section-heading">
+          <div>
+            <span class="kicker">Core capabilities</span>
+            <h2>Physics operators that stay inside the PyTorch workflow.</h2>
+          </div>
+          <p>Build GPR simulations from familiar tensors, preserve gradient flow, and move between local CPU work and CUDA execution through one public interface.</p>
+        </div>
+        <div class="feature-grid">
+          <article class="feature-card">
+            <span class="feature-index">01 / FDTD</span>
+            <h3>2D and 3D Maxwell modelling</h3>
+            <p>Finite-difference time-domain forward modelling supports single and multiple excitation scenarios.</p>
+          </article>
+          <article class="feature-card">
+            <span class="feature-index">02 / ∇</span>
+            <h3>Differentiable parameters</h3>
+            <p>Backpropagate to relative permittivity, conductivity, initial wavefields, and source amplitudes through PyTorch autograd.</p>
+          </article>
+          <article class="feature-card">
+            <span class="feature-index">03 / HW</span>
+            <h3>CPU and CUDA backends</h3>
+            <p>A native C CPU backend is selected for CPU tensors; CUDA libraries handle NVIDIA GPU execution where available.</p>
+          </article>
+          <article class="feature-card">
+            <span class="feature-index">04 / BC</span>
+            <h3>Configurable CPML</h3>
+            <p>Set absorbing-layer widths independently on each boundary for controlled simulation domains.</p>
+          </article>
+          <article class="feature-card">
+            <span class="feature-index">05 / Δ</span>
+            <h3>Selectable spatial order</h3>
+            <p>Choose second-, fourth-, or eighth-order spatial finite differences, with material-aware CFL validation.</p>
+          </article>
+          <article class="feature-card">
+            <span class="feature-index">06 / MEM</span>
+            <h3>Large-model controls</h3>
+            <p>Checkpointing, DDP, lower-precision wavefield storage, sampling, and optional CUDA-to-CPU offload support memory-aware workflows.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section alt" id="workflow">
+      <div class="container">
+        <div class="section-heading single">
+          <span class="kicker">Differentiable workflow</span>
+          <h2>From subsurface parameters to an inversion update.</h2>
+        </div>
+        <div class="workflow" aria-label="DeepGPR modelling and inversion workflow">
+          <div class="workflow-step"><span>01</span><strong>Model<br>ε<sub>r</sub> + σ</strong></div>
+          <div class="workflow-step"><span>02</span><strong>FDTD forward<br>modelling</strong></div>
+          <div class="workflow-step"><span>03</span><strong>Receiver<br>waveforms</strong></div>
+          <div class="workflow-step"><span>04</span><strong>Data<br>misfit</strong></div>
+          <div class="workflow-step"><span>05</span><strong>Adjoint /<br>autograd</strong></div>
+          <div class="workflow-step"><span>06</span><strong>FWI model<br>update</strong></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="quick-start">
+      <div class="container quick-grid">
+        <div class="quick-copy">
+          <span class="kicker">Quick start</span>
+          <h2>A forward model with a gradient.</h2>
+          <p>Create material tensors, place a source and receiver, run <code class="inline-code">DeepGPR.compute</code>, then use standard PyTorch backpropagation.</p>
+          <div class="section-actions">
+            <a class="button" href="docs.html#quick-start">Walk through the API</a>
+            <a class="button secondary" href="examples.html">Explore notebooks</a>
+          </div>
+        </div>
+        <div class="code-window">
+          <div class="code-titlebar"><span>forward_model.py</span><span class="window-dots"><i></i><i></i><i></i></span></div>
+          <pre><code><span class="tok-key">import</span> <span class="tok-mod">torch</span>
+<span class="tok-key">import</span> <span class="tok-mod">DeepGPR</span>
+
+device = torch.device(<span class="tok-str">"cuda"</span> <span class="tok-key">if</span> torch.cuda.is_available() <span class="tok-key">else</span> <span class="tok-str">"cpu"</span>)
+eps_r = torch.full((<span class="tok-num">64</span>, <span class="tok-num">96</span>, <span class="tok-num">1</span>), <span class="tok-num">4.0</span>, device=device, requires_grad=<span class="tok-key">True</span>)
+sigma = torch.zeros_like(eps_r)
+
+source = DeepGPR.wavelet.ricker(
+    <span class="tok-num">2e8</span>, <span class="tok-num">500</span>, <span class="tok-num">3e-11</span>, <span class="tok-num">5e-9</span>, device=device
+).reshape(<span class="tok-num">1</span>, <span class="tok-num">500</span>, <span class="tok-num">1</span>)
+
+result = DeepGPR.compute(
+    device=device, dx=<span class="tok-num">0.02</span>, dt=<span class="tok-num">3e-11</span>,
+    source_amplitudes=source,
+    source_location=torch.tensor([[[<span class="tok-num">16</span>, <span class="tok-num">12</span>, <span class="tok-num">0</span>]]], device=device),
+    receiver_location=torch.tensor([[[<span class="tok-num">48</span>, <span class="tok-num">12</span>, <span class="tok-num">0</span>]]], device=device),
+    eps_r=eps_r, sigma=sigma,
+)
+
+receiver_data = result[-<span class="tok-num">1</span>]
+receiver_data.square().sum().backward()</code></pre>
+        </div>
+      </div>
+    </section>
+
+    <section class="section alt" id="statistics">
+      <div class="container">
+        <div class="section-heading">
+          <div>
+            <span class="kicker">Project snapshot</span>
+            <h2>Transparent, periodically refreshed statistics.</h2>
+          </div>
+          <p>The browser reads a static JSON snapshot generated by GitHub Actions. It never calls the GitHub or PyPI APIs directly.</p>
+        </div>
+        <div class="stats-grid">
+          <article class="stat-card stat-card-primary"><span class="stat-source">PyPI · persistent history</span><strong class="stat-value" data-stat="pypi.downloads.total">—</strong><span class="stat-label">Total PyPI Downloads</span><span class="stat-detail" data-cumulative-scope>Package file downloads from PyPI</span></article>
+          <article class="stat-card"><span class="stat-source">PyPI · rolling window</span><strong class="stat-value" data-stat="pypi.downloads.last_month">—</strong><span class="stat-label">Downloads · Last 30 days</span><span class="stat-detail">Recent distribution signal</span></article>
+          <article class="stat-card"><span class="stat-source">PyPI</span><strong class="stat-value" data-stat="pypi.downloads.last_week">—</strong><span class="stat-label">Downloads</span><span class="stat-detail">Last 7 days</span></article>
+          <article class="stat-card"><span class="stat-source">PyPI</span><strong class="stat-value" data-stat="pypi.downloads.last_day">—</strong><span class="stat-label">Downloads</span><span class="stat-detail">Last day</span></article>
+          <article class="stat-card"><span class="stat-source">GitHub</span><strong class="stat-value" data-stat="github.stars">—</strong><span class="stat-label">Stars</span><span class="stat-detail">Repository snapshot</span></article>
+          <article class="stat-card"><span class="stat-source">GitHub</span><strong class="stat-value" data-stat="github.forks">—</strong><span class="stat-label">Forks</span><span class="stat-detail">Repository snapshot</span></article>
+          <article class="stat-card stat-card-version"><span class="stat-source">PyPI package</span><strong class="stat-value" data-stat="pypi.latest_version" data-format="text">—</strong><span class="stat-label">Latest version</span><span class="stat-detail">Published package metadata</span></article>
+        </div>
+        <p class="stats-note"><span data-stats-generated>Loading statistics snapshot…</span>. PyPI counts represent package file downloads, not unique users or verified installations. The cumulative value is rebuilt from persistent daily history and excludes known mirrors; when history does not reach the first release, it is shown as a tracked lower bound.</p>
+      </div>
+    </section>
+
+    <section class="section light" id="results">
+      <div class="container">
+        <div class="section-heading">
+          <div>
+            <span class="kicker">Repository results</span>
+            <h2>Forward response and inversion outputs.</h2>
+          </div>
+          <p>These figures are copied without modification from the DeepGPR repository and correspond to the documented forward-modelling and 2D FWI examples.</p>
+        </div>
+        <div class="results-grid">
+          <article class="result-card">
+            <img src="assets/images/forward-response.png" width="782" height="297" loading="lazy" alt="Receiver waveform and relative-permittivity gradient from the forward modelling example">
+            <div class="result-copy"><h3>Forward modelling + gradient</h3><p>Receiver data and the material gradient from the README's small modelling test.</p></div>
+          </article>
+          <article class="result-card">
+            <img src="assets/images/fwi-2d-inverted.png" width="689" height="390" loading="lazy" alt="Inverted relative permittivity and conductivity models from the 2D FWI example">
+            <div class="result-copy"><h3>2D dual-parameter FWI</h3><p>Repository-provided inverted relative-permittivity and conductivity models.</p></div>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="installation">
+      <div class="container">
+        <div class="install-panel">
+          <div>
+            <span class="kicker">Installation</span>
+            <h2>Start with one package.</h2>
+            <p>Python 3.8 or newer is required. Choose a PyTorch build appropriate for CPU or CUDA execution.</p>
+          </div>
+          <div>
+            <div class="install-command">
+              <span class="prompt" aria-hidden="true">$</span>
+              <code>pip install DeepGPR</code>
+              <button class="copy-button" type="button" data-copy="pip install DeepGPR" aria-label="Copy installation command">Copy</button>
+            </div>
+            <div class="section-actions">
+              <a class="button" href="https://pypi.org/project/DeepGPR/">View on PyPI ↗</a>
+              <a class="button secondary" href="https://github.com/songc0a/DeepGPR">Browse source ↗</a>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section alt" id="citation">
+      <div class="container cite-panel">
+        <div><span class="kicker">Citation</span><h2>Research context</h2></div>
+        <p class="citation">The repository asks users to cite: Liu, Lei; Song, Chao; He, Liangsheng; Wang, Silin; Feng, Xuan; and Liu, Cai. <cite>“Fast ground penetrating radar dual-parameter full waveform inversion method accelerated by hybrid compilation of CUDA kernel function and PyTorch.”</cite> <em>Computers &amp; Geosciences</em>, 2026, 106101. <a href="publications.html">Citation details →</a></p>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="container">
+      <div class="footer-grid">
+        <div class="footer-brand">
+          <a class="brand" href="index.html"><span class="brand-mark" aria-hidden="true">DG</span><span>DeepGPR</span></a>
+          <p>Differentiable electromagnetic wave propagation for GPR modelling and inversion in PyTorch.</p>
+        </div>
+        <nav class="footer-links" aria-label="Footer navigation">
+          <a href="https://github.com/songc0a/DeepGPR">GitHub</a><a href="https://pypi.org/project/DeepGPR/">PyPI</a>
+          <a href="docs.html">Documentation</a><a href="examples.html">Examples</a>
+          <a href="publications.html">Publications</a>
+        </nav>
+      </div>
+      <div class="footer-bottom"><span>© <span data-year>2026</span> Lei Liu. DeepGPR.</span><span>MIT License · Static site · No tracking</span></div>
+    </div>
+  </footer>
+</body>
+</html>

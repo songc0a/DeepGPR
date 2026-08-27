@@ -1,0 +1,138 @@
+name: Deploy DeepGPR Website
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deepgpr-pages-and-statistics
+  cancel-in-progress: false
+
+env:
+  PYPI_PACKAGE: DeepGPR
+  PROJECT_REPOSITORY: songc0a/DeepGPR
+
+jobs:
+  statistics:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout website source
+        uses: actions/checkout@v6
+        with:
+          path: source
+
+      - name: Checkout repository for statistics history
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          path: history
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Prepare persistent statistics branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git -C history ls-remote --exit-code origin refs/heads/stats-history >/dev/null 2>&1; then
+            git -C history fetch origin stats-history:refs/remotes/origin/stats-history
+            git -C history switch --detach refs/remotes/origin/stats-history
+          else
+            git -C history switch --orphan stats-history
+          fi
+
+      - name: Generate public and cumulative statistics
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: >-
+          python source/scripts/update_website_stats.py
+          --output source/website/data/stats.json
+          --history history/pypi_cumulative.json
+
+      - name: Validate statistics JSON
+        run: >-
+          python source/scripts/update_website_stats.py
+          --validate-only
+          --require-history
+          --output source/website/data/stats.json
+          --history history/pypi_cumulative.json
+
+      - name: Save persistent PyPI history
+        shell: bash
+        run: |
+          set -euo pipefail
+          git -C history config user.name "github-actions[bot]"
+          git -C history config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C history add pypi_cumulative.json
+          if git -C history diff --cached --quiet; then
+            echo "Persistent history is already current."
+          else
+            git -C history commit -m "Update PyPI cumulative statistics"
+            git -C history push origin HEAD:stats-history
+          fi
+
+      - name: Upload generated public statistics
+        uses: actions/upload-artifact@v4
+        with:
+          name: website-statistics
+          path: source/website/data/stats.json
+          if-no-files-found: error
+          retention-days: 1
+
+  build:
+    runs-on: ubuntu-latest
+    needs: statistics
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Download generated public statistics
+        uses: actions/download-artifact@v5
+        with:
+          name: website-statistics
+          path: website/data
+
+      - name: Validate public statistics JSON
+        run: python scripts/update_website_stats.py --validate-only
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v6
+
+      - name: Upload website artifact
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: website
+
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      pages: write
+      id-token: write
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5
