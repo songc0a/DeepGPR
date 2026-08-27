@@ -843,7 +843,6 @@ pre {
 }
 
 .stat-card-version {
-  grid-column: span 6;
   background: linear-gradient(125deg, rgba(241, 167, 96, 0.08), transparent 65%), var(--ink-850);
 }
 
@@ -1347,8 +1346,7 @@ pre {
     grid-column: span 1;
   }
 
-  .stat-card-primary,
-  .stat-card-version {
+  .stat-card-primary {
     grid-column: span 2;
   }
 

@@ -11,6 +11,18 @@
     return value;
   };
 
+  const formatTrackedDate = (value) => {
+    if (typeof value !== "string") return null;
+    const timestamp = new Date(`${value}T00:00:00Z`);
+    if (Number.isNaN(timestamp.getTime())) return null;
+    return timestamp.toLocaleDateString("en-US", {
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+      timeZone: "UTC",
+    });
+  };
+
   const readPath = (data, path) =>
     path.split(".").reduce((current, key) => {
       if (current === null || current === undefined) return undefined;
@@ -34,6 +46,19 @@
           month: "short",
           day: "numeric",
         })}`;
+      }
+    }
+
+    const scope = document.querySelector("[data-cumulative-scope]");
+    if (scope) {
+      const cumulative = data.pypi && data.pypi.cumulative;
+      const trackedDate = cumulative && formatTrackedDate(cumulative.first_tracked_date);
+      if (cumulative && cumulative.history_complete === true) {
+        scope.textContent = "Complete history since first release";
+      } else if (trackedDate) {
+        scope.textContent = `Verified lower bound · tracked since ${trackedDate}`;
+      } else {
+        scope.textContent = "Cumulative history unavailable";
       }
     }
   };
