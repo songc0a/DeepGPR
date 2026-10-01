@@ -13,7 +13,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 import DeepGPR
 
 common = importlib.import_module('DeepGPR.common')
-compute_module = importlib.import_module('DeepGPR.compute2')
+# compute() and the autograd bridge moved; patch the modules that use the names.
+compute_module = importlib.import_module('DeepGPR.solver.modeling')
+autograd_module = importlib.import_module('DeepGPR.solver.autograd')
 
 
 def problem(shape=(8, 9), pml=(2, 3, 1, 2), device='cpu'):
@@ -157,7 +159,9 @@ class ExternalPMLTests(unittest.TestCase):
                     optimizer.zero_grad()
                     data.square().sum().backward()
                     for a,b in [(model.grad, ref_model.grad), (sigma.grad, ref_sigma.grad), (source.grad, ref_source.grad)]:
-                        torch.testing.assert_close(a, b, rtol=2.e-5, atol=1.e-5)
+                        # Segmented and full adjoints sum in a different order; scale
+                        # atol with the gradient (|g| ~ 1e6-1e7 here) for float32 round-off.
+                        torch.testing.assert_close(a, b, rtol=2.e-5, atol=max(1.e-5, 1.e-7 * float(b.abs().max())))
                     optimizer.step()
                     with torch.no_grad():
                         model.clamp_(min=1.0)
@@ -200,7 +204,7 @@ class ExternalPMLTests(unittest.TestCase):
 
     def test_stale_native_library_is_rejected(self):
         model, sigma, args = problem()
-        with patch.object(compute_module, 'get_deepgpr_lib', return_value=object()):
+        with patch.object(autograd_module, 'get_deepgpr_lib', return_value=object()):
             with self.assertRaisesRegex(RuntimeError, 'external-PML'):
                 DeepGPR.compute(eps_r=model, sigma=sigma, **args)
 

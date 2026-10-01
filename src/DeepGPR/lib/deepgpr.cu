@@ -10,8 +10,51 @@
 #define DEEPGPR_BUILD
 #include "deepgpr.h"
 
-__constant__ float e0 = 8.8541878128e-12;
-__constant__ float m0 = 1.25663706212e-06;
+__constant__ float e0 = DEEPGPR_EPSILON0_F;
+__constant__ float m0 = DEEPGPR_MU0_F;
+
+/*
+ * Error reporting. CUDA API/launch failures used to be printed to stderr and
+ * the call returned normally, so Python could not tell that it had failed.
+ * The message is now also kept per host thread and exposed through
+ * deepgpr_last_error(); the Python bridge raises NativeLibraryError from it.
+ */
+static thread_local char g_last_error[DEEPGPR_ERROR_BUFFER_SIZE];
+
+static void deepgpr_set_error(const char* message)
+{
+    snprintf(g_last_error, sizeof(g_last_error), "%s", message);
+    std::cerr << message << std::endl;
+}
+
+static void deepgpr_record_cuda_error(cudaError_t error, const char* file, int line)
+{
+    char message[DEEPGPR_ERROR_BUFFER_SIZE];
+    snprintf(message, sizeof(message), "CUDA error %s: %s at %s:%d",
+             cudaGetErrorName(error), cudaGetErrorString(error), file, line);
+    deepgpr_set_error(message);
+}
+
+DEEPGPR_API int deepgpr_supports_error_reporting(void)
+{
+    return 1;
+}
+
+DEEPGPR_API const char* deepgpr_last_error(void)
+{
+    return g_last_error;
+}
+
+DEEPGPR_API void deepgpr_clear_last_error(void)
+{
+    g_last_error[0] = '\0';
+}
+
+/* The CUDA adjoint accumulates with atomicAdd: not bitwise reproducible. */
+DEEPGPR_API int deepgpr_deterministic_adjoint(void)
+{
+    return 0;
+}
 
 enum {
     WAVEFIELD_FLOAT32 = 0,
@@ -246,8 +289,7 @@ __device__ __forceinline__ float2 load_wavefield_pair_native_device(
 #define CUDA_CHECK(call) do { \
     cudaError_t err__ = (call); \
     if (err__ != cudaSuccess) { \
-        std::cerr << "CUDA Error: " << cudaGetErrorString(err__) \
-                  << " at " << __FILE__ << ":" << __LINE__ << std::endl; \
+        deepgpr_record_cuda_error(err__, __FILE__, __LINE__); \
         return; \
     } \
 } while (0)
@@ -255,8 +297,7 @@ __device__ __forceinline__ float2 load_wavefield_pair_native_device(
 #define CUDA_CHECK_LAST() do { \
     cudaError_t err__ = cudaGetLastError(); \
     if (err__ != cudaSuccess) { \
-        std::cerr << "CUDA Error: " << cudaGetErrorString(err__) \
-                  << " at " << __FILE__ << ":" << __LINE__ << std::endl; \
+        deepgpr_record_cuda_error(err__, __FILE__, __LINE__); \
         return; \
     } \
 } while (0)
@@ -387,7 +428,7 @@ DEEPGPR_API void deepgpr_test_wavefield_conversion(
             test_wavefield_conversion_vec2_gpu<WAVEFIELD_BFLOAT16>
                 <<<grid_vec2, block>>>(input, encoded, decoded, count);
         }
-        cudaGetLastError();
+        CUDA_CHECK_LAST();
         return;
     }
     if (storage_kind == WAVEFIELD_FLOAT16) {
@@ -405,7 +446,7 @@ DEEPGPR_API void deepgpr_test_wavefield_conversion(
         test_wavefield_conversion_gpu<WAVEFIELD_BFLOAT16, WAVEFIELD_CONVERSION_NATIVE_SCALAR>
             <<<grid, block>>>(input, encoded, decoded, count);
     }
-    cudaGetLastError();
+    CUDA_CHECK_LAST();
 }
 
 /* Compile each stencil order independently to unroll adjoint curl loops. */
@@ -860,7 +901,7 @@ __global__ void build_update_coeffs_gpu(const float* __restrict__ eps_r_pad, con
         ch_curl[idx] = (1.0f / dx) / HA;
         ch_rhs[idx] = 1.0f / HA;
 
-        if (sigma_pad[idx] > 100.0f) {
+        if (sigma_pad[idx] > DEEPGPR_PEC_SIGMA_THRESHOLD_F) {
             ce_hist[idx] = 0.0f; ce_curl[idx] = 0.0f; ce_rhs[idx] = 0.0f;
         } else {
             float e_term = e0 * eps_r_pad[idx] / dt;
@@ -2236,7 +2277,7 @@ __global__ void accumulate_material_gradients_gpu(
     long long e_stride = (long long)NX * NY * NZ;
     float ca_value = ca[material_idx];
     float cb_value = cb[material_idx];
-    bool active_material = sigma_pad[material_idx] <= 100.0f;
+    bool active_material = sigma_pad[material_idx] <= DEEPGPR_PEC_SIGMA_THRESHOLD_F;
 
     for (int s = 0; s < step; ++s) {
         long long idx_E = (long long)s * e_stride + material_idx;
@@ -2342,7 +2383,7 @@ __global__ void accumulate_material_gradients_int8_gpu(
         && !(pml3 > 0 && iy >= sy - pml3)
         && !(pml4 > 0 && iz < pml4)
         && !(pml5 > 0 && iz >= sz - pml5);
-    bool active_material = outside_pml && sigma_pad[material_idx] <= 100.0f;
+    bool active_material = outside_pml && sigma_pad[material_idx] <= DEEPGPR_PEC_SIGMA_THRESHOLD_F;
     float ca_value = valid ? ca[material_idx] : 0.0f;
     float cb_value = valid ? cb[material_idx] : 0.0f;
     float local_grader = 0.0f;
@@ -2472,6 +2513,7 @@ DEEPGPR_API void forward(const float* __restrict__ eps_r_pad, const float* __res
              int sampling_interval, int fwi_mode, int storage_type, int save_model_history,
              int use_async_offload)
 {
+    deepgpr_clear_last_error();
     int save_wavefield_history = (storage_type & WAVEFIELD_HISTORY_DISABLED) == 0;
     int use_async = save_wavefield_history && use_async_offload != 0;
     int storage_kind = wavefield_storage_kind_host(storage_type);
@@ -2484,14 +2526,14 @@ DEEPGPR_API void forward(const float* __restrict__ eps_r_pad, const float* __res
         ? int8_reduction_backend_host(storage_type) : INT8_REDUCTION_CURRENT;
     if (use_int8 && (use_async || int8_bx < 1 || int8_by < 1 || int8_bz < 1
         || int8_threads > 256 || (int8_threads & (int8_threads - 1)) != 0)) {
-        std::cerr << "DeepGPR INT8 wavefield compression requires GPU-resident "
-                  << "power-of-two blocks with at most 256 voxels." << std::endl;
+        deepgpr_set_error("DeepGPR INT8 wavefield compression requires GPU-resident "
+                          "power-of-two blocks with at most 256 voxels.");
         return;
     }
     if (use_int8 && int8_reduction_backend != INT8_REDUCTION_CURRENT
         && int8_threads != 64) {
-        std::cerr << "DeepGPR CUB/warp INT8 reduction experiments require "
-                  << "exactly 64 threads per compression tile." << std::endl;
+        deepgpr_set_error("DeepGPR CUB/warp INT8 reduction experiments require "
+                          "exactly 64 threads per compression tile.");
         return;
     }
     int fdtd_order = g_fdtd_order;
@@ -2797,6 +2839,8 @@ DEEPGPR_API void forward(const float* __restrict__ eps_r_pad, const float* __res
         CUDA_CHECK(cudaStreamSynchronize(stream_comp));
         CUDA_CHECK(cudaStreamSynchronize(stream_trans));
     }
+    /* Report launch errors of the final kernels (no device synchronisation). */
+    CUDA_CHECK_LAST();
 }
 
 /*
@@ -2870,6 +2914,7 @@ DEEPGPR_API void backward(const float* __restrict__ eps_r_pad, const float* __re
              float*__restrict__ grad_eps_r,float*__restrict__ grad_sigma, int eps_r_requires_grad, int sigma_requires_grad,
              int sampling_interval, int fwi_mode, int storage_type, int use_async_offload)
 {
+    deepgpr_clear_last_error();
     int need_material_gradient = eps_r_requires_grad || sigma_requires_grad;
     int use_async = need_material_gradient && use_async_offload != 0;
     int storage_kind = wavefield_storage_kind_host(storage_type);
@@ -2880,8 +2925,8 @@ DEEPGPR_API void backward(const float* __restrict__ eps_r_pad, const float* __re
     int int8_threads = int8_bx * int8_by * int8_bz;
     if (use_int8 && (use_async || int8_bx < 1 || int8_by < 1 || int8_bz < 1
         || int8_threads > 256 || (int8_threads & (int8_threads - 1)) != 0)) {
-        std::cerr << "DeepGPR INT8 wavefield compression requires GPU-resident "
-                  << "power-of-two blocks with at most 256 voxels." << std::endl;
+        deepgpr_set_error("DeepGPR INT8 wavefield compression requires GPU-resident "
+                          "power-of-two blocks with at most 256 voxels.");
         return;
     }
     int fdtd_order = g_fdtd_order;
@@ -3044,4 +3089,6 @@ DEEPGPR_API void backward(const float* __restrict__ eps_r_pad, const float* __re
         CUDA_CHECK(cudaStreamSynchronize(stream_comp));
         CUDA_CHECK(cudaStreamSynchronize(stream_trans));
     }
+    /* Report launch errors of the final kernels (no device synchronisation). */
+    CUDA_CHECK_LAST();
 }

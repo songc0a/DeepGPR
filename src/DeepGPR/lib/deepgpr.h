@@ -13,9 +13,44 @@
 #define DEEPGPR_API __attribute__((visibility("default")))
 #endif
 
+/*
+ * Physical constants shared by the CPU and CUDA backends and mirrored by the
+ * Python package (DeepGPR/config/constants.py; tests/test_native_abi.py checks
+ * that both sides agree). CODATA 2018 values, SI units.
+ */
+#define DEEPGPR_EPSILON0 8.8541878128e-12   /* vacuum permittivity [F/m] */
+#define DEEPGPR_MU0 1.25663706212e-06       /* vacuum permeability [H/m] */
+#define DEEPGPR_EPSILON0_F 8.8541878128e-12f
+#define DEEPGPR_MU0_F 1.25663706212e-06f
+
+/*
+ * Cells whose conductivity exceeds this value [S/m] are treated as perfect
+ * electric conductors: their E update coefficients are zero and they receive
+ * no material gradient.
+ */
+#define DEEPGPR_PEC_SIGMA_THRESHOLD 100.0
+#define DEEPGPR_PEC_SIGMA_THRESHOLD_F 100.0f
+
+/* Capacity of the per-thread error message buffer (bytes, incl. NUL). */
+#define DEEPGPR_ERROR_BUFFER_SIZE 512
+
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/*
+ * Error reporting (additive to ABI 6).
+ *
+ * forward/backward clear the calling thread's error message on entry and set
+ * it when they stop early (allocation failure, CUDA API or launch error).
+ * deepgpr_last_error returns "" when the last call on this thread succeeded.
+ */
+DEEPGPR_API int deepgpr_supports_error_reporting(void);
+DEEPGPR_API const char* deepgpr_last_error(void);
+DEEPGPR_API void deepgpr_clear_last_error(void);
+
+/* 1 when the adjoint result is independent of the number of threads. */
+DEEPGPR_API int deepgpr_deterministic_adjoint(void);
 
 DEEPGPR_API int deepgpr_abi_version(void);
 DEEPGPR_API int deepgpr_supports_external_pml(void);

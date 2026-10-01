@@ -1,0 +1,7 @@
+-r requirements.txt
+ruff>=0.5
+mypy>=1.8
+pytest>=7
+nbformat
+nbclient
+scikit-image

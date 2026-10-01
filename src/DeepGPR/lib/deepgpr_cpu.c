@@ -1,5 +1,7 @@
+#include <stdarg.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -11,13 +13,17 @@
 #define DEEPGPR_OMP_PARALLEL _Pragma("omp parallel")
 #define DEEPGPR_OMP_PARALLEL_FOR _Pragma("omp for schedule(static)")
 #define DEEPGPR_OMP_STANDALONE_PARALLEL_FOR _Pragma("omp parallel for schedule(static)")
-#define DEEPGPR_OMP_ATOMIC_UPDATE _Pragma("omp atomic update")
 #else
 #define DEEPGPR_OMP_PARALLEL
 #define DEEPGPR_OMP_PARALLEL_FOR
 #define DEEPGPR_OMP_STANDALONE_PARALLEL_FOR
-#define DEEPGPR_OMP_ATOMIC_UPDATE
 #endif
+
+/*
+ * No OpenMP atomics are used anywhere in this backend: every parallel loop
+ * writes disjoint addresses, so forward and adjoint results are bitwise
+ * identical for any OMP_NUM_THREADS (see adjoint_e_step_cpu).
+ */
 
 #ifdef _WIN32
 #define RESTRICT __restrict
@@ -25,8 +31,45 @@
 #define RESTRICT restrict
 #endif
 
-static const float E0 = 8.8541878128e-12f;
-static const float M0 = 1.25663706212e-06f;
+static const float E0 = DEEPGPR_EPSILON0_F;
+static const float M0 = DEEPGPR_MU0_F;
+
+#if defined(_MSC_VER)
+#define DEEPGPR_THREAD_LOCAL __declspec(thread)
+#else
+#define DEEPGPR_THREAD_LOCAL __thread
+#endif
+
+/* Per-thread message of the last failed native call ("" after success). */
+static DEEPGPR_THREAD_LOCAL char g_last_error[DEEPGPR_ERROR_BUFFER_SIZE];
+
+static void deepgpr_set_error(const char* format, ...)
+{
+    va_list arguments;
+    va_start(arguments, format);
+    vsnprintf(g_last_error, sizeof(g_last_error), format, arguments);
+    va_end(arguments);
+}
+
+DEEPGPR_API int deepgpr_supports_error_reporting(void)
+{
+    return 1;
+}
+
+DEEPGPR_API const char* deepgpr_last_error(void)
+{
+    return g_last_error;
+}
+
+DEEPGPR_API void deepgpr_clear_last_error(void)
+{
+    g_last_error[0] = '\0';
+}
+
+DEEPGPR_API int deepgpr_deterministic_adjoint(void)
+{
+    return 1;
+}
 
 enum {
     WAVEFIELD_FLOAT32 = 0,
@@ -315,35 +358,130 @@ static float staggered_forward_diff(
     return acc;
 }
 
-/* Scatter the transpose of a staggered backward derivative. */
-static void add_staggered_backward_adjoint_cpu(
-    float* RESTRICT gradient, long long id, long long stride,
-    long long coord, long long n, int order, float weight)
+/*
+ * Deterministic transposes of the staggered derivatives.
+ *
+ * The forward E update reads H through staggered *backward* differences and
+ * the H update reads E through staggered *forward* differences. Their exact
+ * transposes used to be applied by scattering every source point into its
+ * stencil neighbours with OpenMP atomics, so the summation order - and the
+ * last bits of every gradient - depended on thread scheduling.
+ *
+ * The adjoint is now evaluated in two passes. Every source point first
+ * stores its stencil weight in one buffer per (target field, derivative axis)
+ * "channel"; every target point then gathers the transposed stencil from those
+ * weights in a fixed order. No two threads ever write the same address, so the
+ * results are bitwise identical for any OMP_NUM_THREADS.
+ *
+ * Near the model faces the stencil radius of each *source* point is clamped
+ * (usable_*_radius); the gather therefore evaluates the radius and the
+ * coefficient at the source, exactly as the scatter did.
+ */
+
+/* Transpose of staggered_backward_diff, gathered at target point t. */
+static float gather_backward_transpose(
+    const float* RESTRICT weights, long long t, long long stride,
+    long long coord, long long n, int order)
 {
-    int radius = order <= 2 ? 1 : usable_backward_radius(coord, n, fdtd_radius_for_order(order));
-    for (int r = 1; r <= radius; ++r) {
-        float value = weight * fdtd_coeff(radius, r);
-        DEEPGPR_OMP_ATOMIC_UPDATE
-        gradient[id + (long long)(r - 1) * stride] += value;
-        DEEPGPR_OMP_ATOMIC_UPDATE
-        gradient[id - (long long)r * stride] -= value;
+    if (order <= 2) {
+        float acc = weights[t];
+        if (coord + 1 < n) acc -= weights[t + stride];
+        return acc;
     }
+
+    int requested = fdtd_radius_for_order(order);
+    float acc = 0.0f;
+    if (coord >= 2 * requested - 1 && coord + 2 * requested - 1 < n) {
+        /* Interior: every contributing source uses the full stencil. The
+         * arithmetic is identical to the general branch below. */
+        for (int r = 1; r <= requested; ++r) {
+            float c = fdtd_coeff(requested, r);
+            acc += c * weights[t - (long long)(r - 1) * stride];
+            acc -= c * weights[t + (long long)r * stride];
+        }
+        return acc;
+    }
+    for (int r = 1; r <= requested; ++r) {
+        long long plus_source = coord - (r - 1);
+        if (plus_source >= 0) {
+            int radius = usable_backward_radius(plus_source, n, requested);
+            if (r <= radius) {
+                acc += fdtd_coeff(radius, r) * weights[t - (long long)(r - 1) * stride];
+            }
+        }
+        long long minus_source = coord + r;
+        if (minus_source < n) {
+            int radius = usable_backward_radius(minus_source, n, requested);
+            if (r <= radius) {
+                acc -= fdtd_coeff(radius, r) * weights[t + (long long)r * stride];
+            }
+        }
+    }
+    return acc;
 }
 
-/* Scatter the transpose of a staggered forward derivative. */
-static void add_staggered_forward_adjoint_cpu(
-    float* RESTRICT gradient, long long id, long long stride,
-    long long coord, long long n, int order, float weight)
+/* Transpose of staggered_forward_diff, gathered at target point t. */
+static float gather_forward_transpose(
+    const float* RESTRICT weights, long long t, long long stride,
+    long long coord, long long n, int order)
 {
-    int radius = order <= 2 ? 1 : usable_forward_radius(coord, n, fdtd_radius_for_order(order));
-    for (int r = 1; r <= radius; ++r) {
-        float value = weight * fdtd_coeff(radius, r);
-        DEEPGPR_OMP_ATOMIC_UPDATE
-        gradient[id + (long long)r * stride] += value;
-        DEEPGPR_OMP_ATOMIC_UPDATE
-        gradient[id - (long long)(r - 1) * stride] -= value;
+    if (order <= 2) {
+        float acc = 0.0f;
+        if (coord >= 1) acc += weights[t - stride];
+        acc -= weights[t];
+        return acc;
     }
+
+    int requested = fdtd_radius_for_order(order);
+    float acc = 0.0f;
+    if (coord >= 2 * requested - 1 && coord + 2 * requested <= n) {
+        /* Interior: every contributing source uses the full stencil. */
+        for (int r = 1; r <= requested; ++r) {
+            float c = fdtd_coeff(requested, r);
+            acc += c * weights[t - (long long)r * stride];
+            acc -= c * weights[t + (long long)(r - 1) * stride];
+        }
+        return acc;
+    }
+    for (int r = 1; r <= requested; ++r) {
+        long long plus_source = coord - r;
+        if (plus_source >= 0) {
+            int radius = usable_forward_radius(plus_source, n, requested);
+            if (r <= radius) {
+                acc += fdtd_coeff(radius, r) * weights[t - (long long)r * stride];
+            }
+        }
+        long long minus_source = coord + (r - 1);
+        if (minus_source < n) {
+            int radius = usable_forward_radius(minus_source, n, requested);
+            if (r <= radius) {
+                acc -= fdtd_coeff(radius, r) * weights[t + (long long)(r - 1) * stride];
+            }
+        }
+    }
+    return acc;
 }
+
+/*
+ * Adjoint of one CPML auxiliary update. Returns the weight that the CPML
+ * correction contributes to the transposed derivative of its source field and
+ * advances the auxiliary cotangent in place.
+ */
+static float pml_adjoint_weight(
+    float lambda_field, float inverse_spacing, float update_coeff, float sign,
+    float ra_minus_one, float rb, float re, float rf, float* RESTRICT lambda_phi)
+{
+    float phi_new = *lambda_phi;
+    float derivative_weight =
+        (sign * update_coeff * ra_minus_one * lambda_field - rf * phi_new) * inverse_spacing;
+    *lambda_phi = sign * update_coeff * rb * lambda_field + re * phi_new;
+    return derivative_weight;
+}
+
+/* Weight channels: target field and derivative axis of each transposed stencil. */
+enum {
+    CH_A_X = 0, CH_A_Y, CH_B_X, CH_B_Z, CH_C_Y, CH_C_Z, ADJOINT_CHANNELS
+};
 
 /*
  * Build forward-update coefficients for electric and magnetic fields.
@@ -380,7 +518,7 @@ static void build_update_coeffs_cpu(const float* RESTRICT eps_r_pad, const float
             ch_curl[idx] = (1.0f / dx) / HA;
             ch_rhs[idx] = 1.0f / HA;
 
-            if (sigma_pad[idx] > 100.0f) {
+            if (sigma_pad[idx] > DEEPGPR_PEC_SIGMA_THRESHOLD_F) {
                 ce_hist[idx] = 0.0f;
                 ce_curl[idx] = 0.0f;
                 ce_rhs[idx] = 0.0f;
@@ -439,6 +577,9 @@ static void sample_receivers_cpu(
 /*
  * Inject a Hertzian dipole source into one electric-field component.
  *
+ * Shots run in parallel; the sources of one shot are applied sequentially in
+ * index order, so coincident sources accumulate deterministically.
+ *
  * Parameters:
  *   step: Number of shots or simulations in the batch.
  *   iteration: Current time-step index.
@@ -459,33 +600,21 @@ static void inject_sources_cpu(
     int NX, int NY, int NZ, int nsrc, int polarisation, int nt)
 {
     long long field_stride = (long long)NX * NY * NZ;
-    long long total = (long long)step * nsrc;
-    long long work;
+    float* RESTRICT field = polarisation == 0 ? Ex : (polarisation == 1 ? Ey : Ez);
+    float dipole_length = polarisation == 0 ? dx : (polarisation == 1 ? dy : dz);
+    long long shot;
+
+    if (polarisation < 0 || polarisation > 2) return;
 
     DEEPGPR_OMP_PARALLEL_FOR
-    for (work = 0; work < total; ++work) {
-        int s = (int)(work / nsrc);
-        long long src = work % nsrc;
-        float waveform_value = srcwaveforms[src * nt + iteration];
-        float dipole_length = polarisation == 0 ? dx : (polarisation == 1 ? dy : dz);
-        float scale = waveform_value * dipole_length / (dx * dy * dz);
-
-        long long i = sourcelocation[s * nsrc * 3 + src * 3 + 0];
-        long long j = sourcelocation[s * nsrc * 3 + src * 3 + 1];
-        long long k = sourcelocation[s * nsrc * 3 + src * 3 + 2];
-
-        long long id3 = i * NY * NZ + j * NZ + k;
-        long long id4 = (long long)s * field_stride + id3;
-
-        if (polarisation == 0) {
-            DEEPGPR_OMP_ATOMIC_UPDATE
-            Ex[id4] -= ce_rhs[id3] * scale;
-        } else if (polarisation == 1) {
-            DEEPGPR_OMP_ATOMIC_UPDATE
-            Ey[id4] -= ce_rhs[id3] * scale;
-        } else if (polarisation == 2) {
-            DEEPGPR_OMP_ATOMIC_UPDATE
-            Ez[id4] -= ce_rhs[id3] * scale;
+    for (shot = 0; shot < step; ++shot) {
+        for (long long src = 0; src < nsrc; ++src) {
+            float waveform_value = srcwaveforms[src * nt + iteration];
+            float scale = waveform_value * dipole_length / (dx * dy * dz);
+            const int* location = sourcelocation + (shot * nsrc + src) * 3;
+            long long id3 = (long long)location[0] * NY * NZ + (long long)location[1] * NZ + location[2];
+            long long id4 = shot * field_stride + id3;
+            field[id4] -= ce_rhs[id3] * scale;
         }
     }
 }
@@ -705,125 +834,6 @@ static void cpml_e_cpu(
     }
 }
 
-static void pml_backward_derivative_adjoint_cpu(
-    float lambda_field, float* RESTRICT lambda_source,
-    long long source_id, long long stride, long long coord, long long n, int order,
-    float inverse_spacing, float update_coeff, float sign,
-    float ra_minus_one, float rb, float re, float rf,
-    float* RESTRICT lambda_phi);
-
-/* Apply the exact transpose of the electric CPML correction. */
-static void adjoint_cpml_e_cpu(
-    float* RESTRICT lambda_ex, float* RESTRICT lambda_ey, float* RESTRICT lambda_ez,
-    float* RESTRICT lambda_hx, float* RESTRICT lambda_hy, float* RESTRICT lambda_hz,
-    float dx, float dy, float dz, int step, int NX, int NY, int NZ,
-    int pml0, int pml1, int pml2, int pml3, int pml4, int pml5,
-    const float* RESTRICT x0R, const float* RESTRICT xmR,
-    const float* RESTRICT y0R, const float* RESTRICT ymR,
-    const float* RESTRICT z0R, const float* RESTRICT zmR,
-    const float* RESTRICT update,
-    float* RESTRICT x0P1, float* RESTRICT x0P2,
-    float* RESTRICT xmP1, float* RESTRICT xmP2,
-    float* RESTRICT y0P1, float* RESTRICT y0P2,
-    float* RESTRICT ymP1, float* RESTRICT ymP2,
-    float* RESTRICT z0P1, float* RESTRICT z0P2,
-    float* RESTRICT zmP1, float* RESTRICT zmP2, int order)
-{
-    long long ny_nz = (long long)NY * NZ;
-    long long field_stride = (long long)NX * ny_nz;
-    long long total_work = (long long)step * field_stride;
-    long long work;
-
-    DEEPGPR_OMP_PARALLEL_FOR
-    for (work = 0; work < total_work; ++work) {
-        int s = (int)(work / field_stride);
-        long long idx = work % field_stride;
-        long long i = idx / ny_nz;
-        long long rem = idx % ny_nz;
-        long long j = rem / NZ;
-        long long k = rem % NZ;
-        float upd = update[idx];
-
-#define APPLY_E_PML(R, P, p, q, stride, coord, n, spacing, field, source, sign) \
-        do { \
-            float ra = (R)[q] - 1.0f; \
-            float rb = (R)[(p) + (q)]; \
-            float re = (R)[2 * (p) + (q)]; \
-            float rf = (R)[3 * (p) + (q)]; \
-            pml_backward_derivative_adjoint_cpu( \
-                (field)[work], (source), work, (stride), (coord), (n), order, \
-                1.0f / (spacing), upd, (sign), ra, rb, re, rf, &(P)[p_idx]); \
-        } while (0)
-
-        if (pml0 > 0 && i > 0 && i <= pml0) {
-            long long q = pml0 - i;
-            if (j < NY - 1) {
-                long long p_idx = ((long long)s * (pml0 + 1) * (NY - 1) * NZ) + q * (NY - 1) * NZ + j * NZ + k;
-                APPLY_E_PML(x0R, x0P1, pml0, q, ny_nz, i, NX, dx, lambda_ey, lambda_hz, -1.0f);
-            }
-            if (k < NZ - 1) {
-                long long p_idx = ((long long)s * (pml0 + 1) * NY * (NZ - 1)) + q * NY * (NZ - 1) + j * (NZ - 1) + k;
-                APPLY_E_PML(x0R, x0P2, pml0, q, ny_nz, i, NX, dx, lambda_ez, lambda_hy, 1.0f);
-            }
-        }
-        if (pml1 > 0 && i >= NX - 1 - pml1 && i < NX - 1) {
-            long long q = i - (NX - 1 - pml1);
-            if (j < NY - 1 && i > 0) {
-                long long p_idx = ((long long)s * (pml1 + 1) * (NY - 1) * NZ) + q * (NY - 1) * NZ + j * NZ + k;
-                APPLY_E_PML(xmR, xmP1, pml1, q, ny_nz, i, NX, dx, lambda_ey, lambda_hz, -1.0f);
-            }
-            if (k < NZ - 1 && i > 0) {
-                long long p_idx = ((long long)s * (pml1 + 1) * NY * (NZ - 1)) + q * NY * (NZ - 1) + j * (NZ - 1) + k;
-                APPLY_E_PML(xmR, xmP2, pml1, q, ny_nz, i, NX, dx, lambda_ez, lambda_hy, 1.0f);
-            }
-        }
-        if (pml2 > 0 && j > 0 && j <= pml2) {
-            long long q = pml2 - j;
-            if (i < NX - 1) {
-                long long p_idx = ((long long)s * (NX - 1) * (pml2 + 1) * NZ) + i * (pml2 + 1) * NZ + q * NZ + k;
-                APPLY_E_PML(y0R, y0P1, pml2, q, NZ, j, NY, dy, lambda_ex, lambda_hz, 1.0f);
-            }
-            if (k < NZ - 1) {
-                long long p_idx = ((long long)s * NX * (pml2 + 1) * (NZ - 1)) + i * (pml2 + 1) * (NZ - 1) + q * (NZ - 1) + k;
-                APPLY_E_PML(y0R, y0P2, pml2, q, NZ, j, NY, dy, lambda_ez, lambda_hx, -1.0f);
-            }
-        }
-        if (pml3 > 0 && j >= NY - 1 - pml3 && j < NY - 1) {
-            long long q = j - (NY - 1 - pml3);
-            if (i < NX - 1 && j > 0) {
-                long long p_idx = ((long long)s * (NX - 1) * (pml3 + 1) * NZ) + i * (pml3 + 1) * NZ + q * NZ + k;
-                APPLY_E_PML(ymR, ymP1, pml3, q, NZ, j, NY, dy, lambda_ex, lambda_hz, 1.0f);
-            }
-            if (k < NZ - 1 && j > 0) {
-                long long p_idx = ((long long)s * NX * (pml3 + 1) * (NZ - 1)) + i * (pml3 + 1) * (NZ - 1) + q * (NZ - 1) + k;
-                APPLY_E_PML(ymR, ymP2, pml3, q, NZ, j, NY, dy, lambda_ez, lambda_hx, -1.0f);
-            }
-        }
-        if (pml4 > 0 && k > 0 && k <= pml4) {
-            long long q = pml4 - k;
-            if (i < NX - 1) {
-                long long p_idx = ((long long)s * (NX - 1) * NY * (pml4 + 1)) + i * NY * (pml4 + 1) + j * (pml4 + 1) + q;
-                APPLY_E_PML(z0R, z0P1, pml4, q, 1, k, NZ, dz, lambda_ex, lambda_hy, -1.0f);
-            }
-            if (j < NY - 1) {
-                long long p_idx = ((long long)s * NX * (NY - 1) * (pml4 + 1)) + i * (NY - 1) * (pml4 + 1) + j * (pml4 + 1) + q;
-                APPLY_E_PML(z0R, z0P2, pml4, q, 1, k, NZ, dz, lambda_ey, lambda_hx, 1.0f);
-            }
-        }
-        if (pml5 > 0 && k >= NZ - 1 - pml5 && k < NZ - 1) {
-            long long q = k - (NZ - 1 - pml5);
-            if (i < NX - 1 && k > 0) {
-                long long p_idx = ((long long)s * (NX - 1) * NY * (pml5 + 1)) + i * NY * (pml5 + 1) + j * (pml5 + 1) + q;
-                APPLY_E_PML(zmR, zmP1, pml5, q, 1, k, NZ, dz, lambda_ex, lambda_hy, -1.0f);
-            }
-            if (j < NY - 1 && k > 0) {
-                long long p_idx = ((long long)s * NX * (NY - 1) * (pml5 + 1)) + i * (NY - 1) * (pml5 + 1) + j * (pml5 + 1) + q;
-                APPLY_E_PML(zmR, zmP2, pml5, q, 1, k, NZ, dz, lambda_ey, lambda_hx, 1.0f);
-            }
-        }
-#undef APPLY_E_PML
-    }
-}
 
 static void update_h_cpu(
     const float* RESTRICT ch_hist, const float* RESTRICT ch_curl,
@@ -874,129 +884,6 @@ static void update_h_cpu(
     }
 }
 
-/* Apply the exact transpose of the electric-field base update. */
-static void adjoint_e_cpu(
-    const float* RESTRICT ce_hist, const float* RESTRICT ce_curl,
-    float* RESTRICT lambda_ex, float* RESTRICT lambda_ey, float* RESTRICT lambda_ez,
-    float* RESTRICT lambda_hx, float* RESTRICT lambda_hy, float* RESTRICT lambda_hz,
-    int step, int NX, int NY, int NZ, float dx, float dy, float dz, int order)
-{
-    long long ny_nz = (long long)NY * NZ;
-    long long field_stride = (long long)NX * ny_nz;
-    long long total_work = (long long)step * field_stride;
-    long long work;
-
-    DEEPGPR_OMP_PARALLEL_FOR
-    for (work = 0; work < total_work; ++work) {
-        long long idx = work % field_stride;
-        long long i = idx / ny_nz;
-        long long rem = idx % ny_nz;
-        long long j = rem / NZ;
-        long long k = rem % NZ;
-        int do_ex = (((NY - 1) != 1 || (NZ - 1) != 1) && i < NX - 1 && j > 0 && j < NY - 1 && k > 0 && k < NZ - 1);
-        int do_ey = (((NX - 1) != 1 || (NZ - 1) != 1) && i > 0 && i < NX - 1 && j < NY - 1 && k > 0 && k < NZ - 1);
-        int do_ez = (((NX - 1) != 1 || (NY - 1) != 1) && i > 0 && i < NX - 1 && j > 0 && j < NY - 1 && k < NZ - 1);
-        float coeff = ce_curl[idx];
-        float coeff_y = dy == dx ? coeff : coeff * dx / dy;
-        float coeff_z = dz == dx ? coeff : coeff * dx / dz;
-
-        if (do_ex) {
-            float value = lambda_ex[work];
-            add_staggered_backward_adjoint_cpu(lambda_hz, work, NZ, j, NY, order, coeff_y * value);
-            add_staggered_backward_adjoint_cpu(lambda_hy, work, 1, k, NZ, order, -coeff_z * value);
-            lambda_ex[work] = ce_hist[idx] * value;
-        }
-        if (do_ey) {
-            float value = lambda_ey[work];
-            add_staggered_backward_adjoint_cpu(lambda_hx, work, 1, k, NZ, order, coeff_z * value);
-            add_staggered_backward_adjoint_cpu(lambda_hz, work, ny_nz, i, NX, order, -coeff * value);
-            lambda_ey[work] = ce_hist[idx] * value;
-        }
-        if (do_ez) {
-            float value = lambda_ez[work];
-            add_staggered_backward_adjoint_cpu(lambda_hy, work, ny_nz, i, NX, order, coeff * value);
-            add_staggered_backward_adjoint_cpu(lambda_hx, work, NZ, j, NY, order, -coeff_y * value);
-            lambda_ez[work] = ce_hist[idx] * value;
-        }
-    }
-}
-
-/* Apply the exact transpose of the magnetic-field base update. */
-static void adjoint_h_cpu(
-    const float* RESTRICT ch_hist, const float* RESTRICT ch_curl,
-    float* RESTRICT lambda_ex, float* RESTRICT lambda_ey, float* RESTRICT lambda_ez,
-    float* RESTRICT lambda_hx, float* RESTRICT lambda_hy, float* RESTRICT lambda_hz,
-    int step, int NX, int NY, int NZ, float dx, float dy, float dz, int order)
-{
-    long long ny_nz = (long long)NY * NZ;
-    long long field_stride = (long long)NX * ny_nz;
-    long long total_work = (long long)step * field_stride;
-    long long work;
-
-    DEEPGPR_OMP_PARALLEL_FOR
-    for (work = 0; work < total_work; ++work) {
-        long long idx = work % field_stride;
-        long long i = idx / ny_nz;
-        long long rem = idx % ny_nz;
-        long long j = rem / NZ;
-        long long k = rem % NZ;
-        int do_hx = ((NX - 1) != 1 && i > 0 && i < NX - 1 && j < NY - 1 && k < NZ - 1);
-        int do_hy = ((NY - 1) != 1 && i < NX - 1 && j > 0 && j < NY - 1 && k < NZ - 1);
-        int do_hz = ((NZ - 1) != 1 && i < NX - 1 && j < NY - 1 && k > 0 && k < NZ - 1);
-        float coeff = ch_curl[idx];
-        float coeff_y = dy == dx ? coeff : coeff * dx / dy;
-        float coeff_z = dz == dx ? coeff : coeff * dx / dz;
-
-        if (do_hx) {
-            float value = lambda_hx[work];
-            add_staggered_forward_adjoint_cpu(lambda_ez, work, NZ, j, NY, order, -coeff_y * value);
-            add_staggered_forward_adjoint_cpu(lambda_ey, work, 1, k, NZ, order, coeff_z * value);
-            lambda_hx[work] = ch_hist[idx] * value;
-        }
-        if (do_hy) {
-            float value = lambda_hy[work];
-            add_staggered_forward_adjoint_cpu(lambda_ex, work, 1, k, NZ, order, -coeff_z * value);
-            add_staggered_forward_adjoint_cpu(lambda_ez, work, ny_nz, i, NX, order, coeff * value);
-            lambda_hy[work] = ch_hist[idx] * value;
-        }
-        if (do_hz) {
-            float value = lambda_hz[work];
-            add_staggered_forward_adjoint_cpu(lambda_ey, work, ny_nz, i, NX, order, -coeff * value);
-            add_staggered_forward_adjoint_cpu(lambda_ex, work, NZ, j, NY, order, coeff_y * value);
-            lambda_hz[work] = ch_hist[idx] * value;
-        }
-    }
-}
-
-static void pml_backward_derivative_adjoint_cpu(
-    float lambda_field, float* RESTRICT lambda_source,
-    long long source_id, long long stride, long long coord, long long n, int order,
-    float inverse_spacing, float update_coeff, float sign,
-    float ra_minus_one, float rb, float re, float rf,
-    float* RESTRICT lambda_phi)
-{
-    float phi_new = *lambda_phi;
-    float derivative_weight =
-        (sign * update_coeff * ra_minus_one * lambda_field - rf * phi_new) * inverse_spacing;
-    add_staggered_backward_adjoint_cpu(
-        lambda_source, source_id, stride, coord, n, order, derivative_weight);
-    *lambda_phi = sign * update_coeff * rb * lambda_field + re * phi_new;
-}
-
-static void pml_forward_derivative_adjoint_cpu(
-    float lambda_field, float* RESTRICT lambda_source,
-    long long source_id, long long stride, long long coord, long long n, int order,
-    float inverse_spacing, float update_coeff, float sign,
-    float ra_minus_one, float rb, float re, float rf,
-    float* RESTRICT lambda_phi)
-{
-    float phi_new = *lambda_phi;
-    float derivative_weight =
-        (sign * update_coeff * ra_minus_one * lambda_field - rf * phi_new) * inverse_spacing;
-    add_staggered_forward_adjoint_cpu(
-        lambda_source, source_id, stride, coord, n, order, derivative_weight);
-    *lambda_phi = sign * update_coeff * rb * lambda_field + re * phi_new;
-}
 
 /*
  * Apply magnetic CPML boundary corrections after the base magnetic-field update.
@@ -1164,26 +1051,43 @@ static void cpml_h_cpu(
     }
 }
 
-/* Apply the exact transpose of the magnetic CPML correction. */
-static void adjoint_cpml_h_cpu(
+/*
+ * Exact transpose of one electric half step: the CPML correction followed by
+ * the base update E^(n+1) = ce_hist E^n + ce_curl curl(H).
+ *
+ * Pass 1 (per source point): CPML auxiliary cotangents are advanced, the
+ * transposed-curl weights are stored per channel and lambda_E is scaled by
+ * ce_hist. Pass 2 (per target point): lambda_H gathers the transposed
+ * backward-difference stencils. Channels: A = lambda_hz (x, y),
+ * B = lambda_hy (x, z), C = lambda_hx (y, z).
+ */
+static void adjoint_e_step_cpu(
+    const float* RESTRICT ce_hist, const float* RESTRICT ce_curl,
+    const float* RESTRICT update,
     float* RESTRICT lambda_ex, float* RESTRICT lambda_ey, float* RESTRICT lambda_ez,
     float* RESTRICT lambda_hx, float* RESTRICT lambda_hy, float* RESTRICT lambda_hz,
     float dx, float dy, float dz, int step, int NX, int NY, int NZ,
-    int pml0, int pml1, int pml2, int pml3, int pml4, int pml5,
+    int has_cpml, int pml0, int pml1, int pml2, int pml3, int pml4, int pml5,
     const float* RESTRICT x0R, const float* RESTRICT xmR,
     const float* RESTRICT y0R, const float* RESTRICT ymR,
     const float* RESTRICT z0R, const float* RESTRICT zmR,
-    const float* RESTRICT update,
     float* RESTRICT x0P1, float* RESTRICT x0P2,
     float* RESTRICT xmP1, float* RESTRICT xmP2,
     float* RESTRICT y0P1, float* RESTRICT y0P2,
     float* RESTRICT ymP1, float* RESTRICT ymP2,
     float* RESTRICT z0P1, float* RESTRICT z0P2,
-    float* RESTRICT zmP1, float* RESTRICT zmP2, int order)
+    float* RESTRICT zmP1, float* RESTRICT zmP2,
+    int order, float* RESTRICT weights)
 {
     long long ny_nz = (long long)NY * NZ;
     long long field_stride = (long long)NX * ny_nz;
     long long total_work = (long long)step * field_stride;
+    float* RESTRICT w_a_x = weights + CH_A_X * total_work;
+    float* RESTRICT w_a_y = weights + CH_A_Y * total_work;
+    float* RESTRICT w_b_x = weights + CH_B_X * total_work;
+    float* RESTRICT w_b_z = weights + CH_B_Z * total_work;
+    float* RESTRICT w_c_y = weights + CH_C_Y * total_work;
+    float* RESTRICT w_c_z = weights + CH_C_Z * total_work;
     long long work;
 
     DEEPGPR_OMP_PARALLEL_FOR
@@ -1194,101 +1098,334 @@ static void adjoint_cpml_h_cpu(
         long long rem = idx % ny_nz;
         long long j = rem / NZ;
         long long k = rem % NZ;
-        float upd = update[idx];
+        float lex = lambda_ex[work];
+        float ley = lambda_ey[work];
+        float lez = lambda_ez[work];
+        float hz_x = 0.0f, hz_y = 0.0f, hy_x = 0.0f, hy_z = 0.0f, hx_y = 0.0f, hx_z = 0.0f;
 
-#define APPLY_H_PML(R, P, p, q, stride, coord, n, spacing, field, source, sign) \
-        do { \
-            float ra = (R)[q] - 1.0f; \
-            float rb = (R)[(p) + (q)]; \
-            float re = (R)[2 * (p) + (q)]; \
-            float rf = (R)[3 * (p) + (q)]; \
-            pml_forward_derivative_adjoint_cpu( \
-                (field)[work], (source), work, (stride), (coord), (n), order, \
-                1.0f / (spacing), upd, (sign), ra, rb, re, rf, &(P)[p_idx]); \
-        } while (0)
+        if (has_cpml) {
+            float upd = update[idx];
+            long long p_idx;
+#define E_PML(R, P, p, q, spacing, field, channel, sign) \
+            do { \
+                (channel) += pml_adjoint_weight( \
+                    (field), 1.0f / (spacing), upd, (sign), (R)[q] - 1.0f, \
+                    (R)[(p) + (q)], (R)[2 * (p) + (q)], (R)[3 * (p) + (q)], &(P)[p_idx]); \
+            } while (0)
 
-        if (pml0 > 0 && i < pml0) {
-            long long q = pml0 - 1 - i;
-            if (k < NZ - 1) {
-                long long p_idx = ((long long)s * pml0 * NY * (NZ - 1)) + q * NY * (NZ - 1) + j * (NZ - 1) + k;
-                APPLY_H_PML(x0R, x0P1, pml0, q, ny_nz, i, NX, dx, lambda_hy, lambda_ez, 1.0f);
+            if (pml0 > 0 && i > 0 && i <= pml0) {
+                long long q = pml0 - i;
+                if (j < NY - 1) {
+                    p_idx = ((long long)s * (pml0 + 1) * (NY - 1) * NZ) + q * (NY - 1) * NZ + j * NZ + k;
+                    E_PML(x0R, x0P1, pml0, q, dx, ley, hz_x, -1.0f);
+                }
+                if (k < NZ - 1) {
+                    p_idx = ((long long)s * (pml0 + 1) * NY * (NZ - 1)) + q * NY * (NZ - 1) + j * (NZ - 1) + k;
+                    E_PML(x0R, x0P2, pml0, q, dx, lez, hy_x, 1.0f);
+                }
             }
-            if (j < NY - 1) {
-                long long p_idx = ((long long)s * pml0 * (NY - 1) * NZ) + q * (NY - 1) * NZ + j * NZ + k;
-                APPLY_H_PML(x0R, x0P2, pml0, q, ny_nz, i, NX, dx, lambda_hz, lambda_ey, -1.0f);
+            if (pml1 > 0 && i >= NX - 1 - pml1 && i < NX - 1) {
+                long long q = i - (NX - 1 - pml1);
+                if (j < NY - 1 && i > 0) {
+                    p_idx = ((long long)s * (pml1 + 1) * (NY - 1) * NZ) + q * (NY - 1) * NZ + j * NZ + k;
+                    E_PML(xmR, xmP1, pml1, q, dx, ley, hz_x, -1.0f);
+                }
+                if (k < NZ - 1 && i > 0) {
+                    p_idx = ((long long)s * (pml1 + 1) * NY * (NZ - 1)) + q * NY * (NZ - 1) + j * (NZ - 1) + k;
+                    E_PML(xmR, xmP2, pml1, q, dx, lez, hy_x, 1.0f);
+                }
+            }
+            if (pml2 > 0 && j > 0 && j <= pml2) {
+                long long q = pml2 - j;
+                if (i < NX - 1) {
+                    p_idx = ((long long)s * (NX - 1) * (pml2 + 1) * NZ) + i * (pml2 + 1) * NZ + q * NZ + k;
+                    E_PML(y0R, y0P1, pml2, q, dy, lex, hz_y, 1.0f);
+                }
+                if (k < NZ - 1) {
+                    p_idx = ((long long)s * NX * (pml2 + 1) * (NZ - 1)) + i * (pml2 + 1) * (NZ - 1) + q * (NZ - 1) + k;
+                    E_PML(y0R, y0P2, pml2, q, dy, lez, hx_y, -1.0f);
+                }
+            }
+            if (pml3 > 0 && j >= NY - 1 - pml3 && j < NY - 1) {
+                long long q = j - (NY - 1 - pml3);
+                if (i < NX - 1 && j > 0) {
+                    p_idx = ((long long)s * (NX - 1) * (pml3 + 1) * NZ) + i * (pml3 + 1) * NZ + q * NZ + k;
+                    E_PML(ymR, ymP1, pml3, q, dy, lex, hz_y, 1.0f);
+                }
+                if (k < NZ - 1 && j > 0) {
+                    p_idx = ((long long)s * NX * (pml3 + 1) * (NZ - 1)) + i * (pml3 + 1) * (NZ - 1) + q * (NZ - 1) + k;
+                    E_PML(ymR, ymP2, pml3, q, dy, lez, hx_y, -1.0f);
+                }
+            }
+            if (pml4 > 0 && k > 0 && k <= pml4) {
+                long long q = pml4 - k;
+                if (i < NX - 1) {
+                    p_idx = ((long long)s * (NX - 1) * NY * (pml4 + 1)) + i * NY * (pml4 + 1) + j * (pml4 + 1) + q;
+                    E_PML(z0R, z0P1, pml4, q, dz, lex, hy_z, -1.0f);
+                }
+                if (j < NY - 1) {
+                    p_idx = ((long long)s * NX * (NY - 1) * (pml4 + 1)) + i * (NY - 1) * (pml4 + 1) + j * (pml4 + 1) + q;
+                    E_PML(z0R, z0P2, pml4, q, dz, ley, hx_z, 1.0f);
+                }
+            }
+            if (pml5 > 0 && k >= NZ - 1 - pml5 && k < NZ - 1) {
+                long long q = k - (NZ - 1 - pml5);
+                if (i < NX - 1 && k > 0) {
+                    p_idx = ((long long)s * (NX - 1) * NY * (pml5 + 1)) + i * NY * (pml5 + 1) + j * (pml5 + 1) + q;
+                    E_PML(zmR, zmP1, pml5, q, dz, lex, hy_z, -1.0f);
+                }
+                if (j < NY - 1 && k > 0) {
+                    p_idx = ((long long)s * NX * (NY - 1) * (pml5 + 1)) + i * (NY - 1) * (pml5 + 1) + j * (pml5 + 1) + q;
+                    E_PML(zmR, zmP2, pml5, q, dz, ley, hx_z, 1.0f);
+                }
+            }
+#undef E_PML
+        }
+
+        {
+            int do_ex = (((NY - 1) != 1 || (NZ - 1) != 1) && i < NX - 1 && j > 0 && j < NY - 1 && k > 0 && k < NZ - 1);
+            int do_ey = (((NX - 1) != 1 || (NZ - 1) != 1) && i > 0 && i < NX - 1 && j < NY - 1 && k > 0 && k < NZ - 1);
+            int do_ez = (((NX - 1) != 1 || (NY - 1) != 1) && i > 0 && i < NX - 1 && j > 0 && j < NY - 1 && k < NZ - 1);
+            float coeff = ce_curl[idx];
+            float coeff_y = dy == dx ? coeff : coeff * dx / dy;
+            float coeff_z = dz == dx ? coeff : coeff * dx / dz;
+
+            if (do_ex) {
+                hz_y += coeff_y * lex;
+                hy_z += -coeff_z * lex;
+                lambda_ex[work] = ce_hist[idx] * lex;
+            }
+            if (do_ey) {
+                hx_z += coeff_z * ley;
+                hz_x += -coeff * ley;
+                lambda_ey[work] = ce_hist[idx] * ley;
+            }
+            if (do_ez) {
+                hy_x += coeff * lez;
+                hx_y += -coeff_y * lez;
+                lambda_ez[work] = ce_hist[idx] * lez;
             }
         }
-        if (pml1 > 0 && i >= NX - 1 - pml1 && i < NX - 1) {
-            long long q = i - (NX - 1 - pml1);
-            if (k < NZ - 1) {
-                long long p_idx = ((long long)s * pml1 * NY * (NZ - 1)) + q * NY * (NZ - 1) + j * (NZ - 1) + k;
-                APPLY_H_PML(xmR, xmP1, pml1, q, ny_nz, i, NX, dx, lambda_hy, lambda_ez, 1.0f);
-            }
-            if (j < NY - 1) {
-                long long p_idx = ((long long)s * pml1 * (NY - 1) * NZ) + q * (NY - 1) * NZ + j * NZ + k;
-                APPLY_H_PML(xmR, xmP2, pml1, q, ny_nz, i, NX, dx, lambda_hz, lambda_ey, -1.0f);
-            }
-        }
-        if (pml2 > 0 && j < pml2) {
-            long long q = pml2 - 1 - j;
-            if (k < NZ - 1) {
-                long long p_idx = ((long long)s * NX * pml2 * (NZ - 1)) + i * pml2 * (NZ - 1) + q * (NZ - 1) + k;
-                APPLY_H_PML(y0R, y0P1, pml2, q, NZ, j, NY, dy, lambda_hx, lambda_ez, -1.0f);
-            }
-            if (i < NX - 1) {
-                long long p_idx = ((long long)s * (NX - 1) * pml2 * NZ) + i * pml2 * NZ + q * NZ + k;
-                APPLY_H_PML(y0R, y0P2, pml2, q, NZ, j, NY, dy, lambda_hz, lambda_ex, 1.0f);
-            }
-        }
-        if (pml3 > 0 && j >= NY - 1 - pml3 && j < NY - 1) {
-            long long q = j - (NY - 1 - pml3);
-            if (k < NZ - 1) {
-                long long p_idx = ((long long)s * NX * pml3 * (NZ - 1)) + i * pml3 * (NZ - 1) + q * (NZ - 1) + k;
-                APPLY_H_PML(ymR, ymP1, pml3, q, NZ, j, NY, dy, lambda_hx, lambda_ez, -1.0f);
-            }
-            if (i < NX - 1) {
-                long long p_idx = ((long long)s * (NX - 1) * pml3 * NZ) + i * pml3 * NZ + q * NZ + k;
-                APPLY_H_PML(ymR, ymP2, pml3, q, NZ, j, NY, dy, lambda_hz, lambda_ex, 1.0f);
-            }
-        }
-        if (pml4 > 0 && k < pml4) {
-            long long q = pml4 - 1 - k;
-            if (j < NY - 1) {
-                long long p_idx = ((long long)s * NX * (NY - 1) * pml4) + i * (NY - 1) * pml4 + j * pml4 + q;
-                APPLY_H_PML(z0R, z0P1, pml4, q, 1, k, NZ, dz, lambda_hx, lambda_ey, 1.0f);
-            }
-            if (i < NX - 1) {
-                long long p_idx = ((long long)s * (NX - 1) * NY * pml4) + i * NY * pml4 + j * pml4 + q;
-                APPLY_H_PML(z0R, z0P2, pml4, q, 1, k, NZ, dz, lambda_hy, lambda_ex, -1.0f);
-            }
-        }
-        if (pml5 > 0 && k >= NZ - 1 - pml5 && k < NZ - 1) {
-            long long q = k - (NZ - 1 - pml5);
-            if (j < NY - 1) {
-                long long p_idx = ((long long)s * NX * (NY - 1) * pml5) + i * (NY - 1) * pml5 + j * pml5 + q;
-                APPLY_H_PML(zmR, zmP1, pml5, q, 1, k, NZ, dz, lambda_hx, lambda_ey, 1.0f);
-            }
-            if (i < NX - 1) {
-                long long p_idx = ((long long)s * (NX - 1) * NY * pml5) + i * NY * pml5 + j * pml5 + q;
-                APPLY_H_PML(zmR, zmP2, pml5, q, 1, k, NZ, dz, lambda_hy, lambda_ex, -1.0f);
-            }
-        }
-#undef APPLY_H_PML
+
+        w_a_x[work] = hz_x;
+        w_a_y[work] = hz_y;
+        w_b_x[work] = hy_x;
+        w_b_z[work] = hy_z;
+        w_c_y[work] = hx_y;
+        w_c_z[work] = hx_z;
+    }
+
+    DEEPGPR_OMP_PARALLEL_FOR
+    for (work = 0; work < total_work; ++work) {
+        long long idx = work % field_stride;
+        long long i = idx / ny_nz;
+        long long rem = idx % ny_nz;
+        long long j = rem / NZ;
+        long long k = rem % NZ;
+
+        lambda_hz[work] += gather_backward_transpose(w_a_x, work, ny_nz, i, NX, order);
+        lambda_hz[work] += gather_backward_transpose(w_a_y, work, NZ, j, NY, order);
+        lambda_hy[work] += gather_backward_transpose(w_b_x, work, ny_nz, i, NX, order);
+        lambda_hy[work] += gather_backward_transpose(w_b_z, work, 1, k, NZ, order);
+        lambda_hx[work] += gather_backward_transpose(w_c_y, work, NZ, j, NY, order);
+        lambda_hx[work] += gather_backward_transpose(w_c_z, work, 1, k, NZ, order);
     }
 }
 
 /*
- * Inject the adjoint source into one electric-field component.
+ * Exact transpose of one magnetic half step: the CPML correction followed by
+ * the base update H^(n+1/2) = ch_hist H + ch_curl curl(E).
+ *
+ * Channels: A = lambda_ez (x, y), B = lambda_ey (x, z), C = lambda_ex (y, z);
+ * lambda_E gathers the transposed forward-difference stencils.
+ */
+static void adjoint_h_step_cpu(
+    const float* RESTRICT ch_hist, const float* RESTRICT ch_curl,
+    const float* RESTRICT update,
+    float* RESTRICT lambda_ex, float* RESTRICT lambda_ey, float* RESTRICT lambda_ez,
+    float* RESTRICT lambda_hx, float* RESTRICT lambda_hy, float* RESTRICT lambda_hz,
+    float dx, float dy, float dz, int step, int NX, int NY, int NZ,
+    int has_cpml, int pml0, int pml1, int pml2, int pml3, int pml4, int pml5,
+    const float* RESTRICT x0R, const float* RESTRICT xmR,
+    const float* RESTRICT y0R, const float* RESTRICT ymR,
+    const float* RESTRICT z0R, const float* RESTRICT zmR,
+    float* RESTRICT x0P1, float* RESTRICT x0P2,
+    float* RESTRICT xmP1, float* RESTRICT xmP2,
+    float* RESTRICT y0P1, float* RESTRICT y0P2,
+    float* RESTRICT ymP1, float* RESTRICT ymP2,
+    float* RESTRICT z0P1, float* RESTRICT z0P2,
+    float* RESTRICT zmP1, float* RESTRICT zmP2,
+    int order, float* RESTRICT weights)
+{
+    long long ny_nz = (long long)NY * NZ;
+    long long field_stride = (long long)NX * ny_nz;
+    long long total_work = (long long)step * field_stride;
+    float* RESTRICT w_a_x = weights + CH_A_X * total_work;
+    float* RESTRICT w_a_y = weights + CH_A_Y * total_work;
+    float* RESTRICT w_b_x = weights + CH_B_X * total_work;
+    float* RESTRICT w_b_z = weights + CH_B_Z * total_work;
+    float* RESTRICT w_c_y = weights + CH_C_Y * total_work;
+    float* RESTRICT w_c_z = weights + CH_C_Z * total_work;
+    long long work;
+
+    DEEPGPR_OMP_PARALLEL_FOR
+    for (work = 0; work < total_work; ++work) {
+        int s = (int)(work / field_stride);
+        long long idx = work % field_stride;
+        long long i = idx / ny_nz;
+        long long rem = idx % ny_nz;
+        long long j = rem / NZ;
+        long long k = rem % NZ;
+        float lhx = lambda_hx[work];
+        float lhy = lambda_hy[work];
+        float lhz = lambda_hz[work];
+        float ez_x = 0.0f, ez_y = 0.0f, ey_x = 0.0f, ey_z = 0.0f, ex_y = 0.0f, ex_z = 0.0f;
+
+        if (has_cpml) {
+            float upd = update[idx];
+            long long p_idx;
+#define H_PML(R, P, p, q, spacing, field, channel, sign) \
+            do { \
+                (channel) += pml_adjoint_weight( \
+                    (field), 1.0f / (spacing), upd, (sign), (R)[q] - 1.0f, \
+                    (R)[(p) + (q)], (R)[2 * (p) + (q)], (R)[3 * (p) + (q)], &(P)[p_idx]); \
+            } while (0)
+
+            if (pml0 > 0 && i < pml0) {
+                long long q = pml0 - 1 - i;
+                if (k < NZ - 1) {
+                    p_idx = ((long long)s * pml0 * NY * (NZ - 1)) + q * NY * (NZ - 1) + j * (NZ - 1) + k;
+                    H_PML(x0R, x0P1, pml0, q, dx, lhy, ez_x, 1.0f);
+                }
+                if (j < NY - 1) {
+                    p_idx = ((long long)s * pml0 * (NY - 1) * NZ) + q * (NY - 1) * NZ + j * NZ + k;
+                    H_PML(x0R, x0P2, pml0, q, dx, lhz, ey_x, -1.0f);
+                }
+            }
+            if (pml1 > 0 && i >= NX - 1 - pml1 && i < NX - 1) {
+                long long q = i - (NX - 1 - pml1);
+                if (k < NZ - 1) {
+                    p_idx = ((long long)s * pml1 * NY * (NZ - 1)) + q * NY * (NZ - 1) + j * (NZ - 1) + k;
+                    H_PML(xmR, xmP1, pml1, q, dx, lhy, ez_x, 1.0f);
+                }
+                if (j < NY - 1) {
+                    p_idx = ((long long)s * pml1 * (NY - 1) * NZ) + q * (NY - 1) * NZ + j * NZ + k;
+                    H_PML(xmR, xmP2, pml1, q, dx, lhz, ey_x, -1.0f);
+                }
+            }
+            if (pml2 > 0 && j < pml2) {
+                long long q = pml2 - 1 - j;
+                if (k < NZ - 1) {
+                    p_idx = ((long long)s * NX * pml2 * (NZ - 1)) + i * pml2 * (NZ - 1) + q * (NZ - 1) + k;
+                    H_PML(y0R, y0P1, pml2, q, dy, lhx, ez_y, -1.0f);
+                }
+                if (i < NX - 1) {
+                    p_idx = ((long long)s * (NX - 1) * pml2 * NZ) + i * pml2 * NZ + q * NZ + k;
+                    H_PML(y0R, y0P2, pml2, q, dy, lhz, ex_y, 1.0f);
+                }
+            }
+            if (pml3 > 0 && j >= NY - 1 - pml3 && j < NY - 1) {
+                long long q = j - (NY - 1 - pml3);
+                if (k < NZ - 1) {
+                    p_idx = ((long long)s * NX * pml3 * (NZ - 1)) + i * pml3 * (NZ - 1) + q * (NZ - 1) + k;
+                    H_PML(ymR, ymP1, pml3, q, dy, lhx, ez_y, -1.0f);
+                }
+                if (i < NX - 1) {
+                    p_idx = ((long long)s * (NX - 1) * pml3 * NZ) + i * pml3 * NZ + q * NZ + k;
+                    H_PML(ymR, ymP2, pml3, q, dy, lhz, ex_y, 1.0f);
+                }
+            }
+            if (pml4 > 0 && k < pml4) {
+                long long q = pml4 - 1 - k;
+                if (j < NY - 1) {
+                    p_idx = ((long long)s * NX * (NY - 1) * pml4) + i * (NY - 1) * pml4 + j * pml4 + q;
+                    H_PML(z0R, z0P1, pml4, q, dz, lhx, ey_z, 1.0f);
+                }
+                if (i < NX - 1) {
+                    p_idx = ((long long)s * (NX - 1) * NY * pml4) + i * NY * pml4 + j * pml4 + q;
+                    H_PML(z0R, z0P2, pml4, q, dz, lhy, ex_z, -1.0f);
+                }
+            }
+            if (pml5 > 0 && k >= NZ - 1 - pml5 && k < NZ - 1) {
+                long long q = k - (NZ - 1 - pml5);
+                if (j < NY - 1) {
+                    p_idx = ((long long)s * NX * (NY - 1) * pml5) + i * (NY - 1) * pml5 + j * pml5 + q;
+                    H_PML(zmR, zmP1, pml5, q, dz, lhx, ey_z, 1.0f);
+                }
+                if (i < NX - 1) {
+                    p_idx = ((long long)s * (NX - 1) * NY * pml5) + i * NY * pml5 + j * pml5 + q;
+                    H_PML(zmR, zmP2, pml5, q, dz, lhy, ex_z, -1.0f);
+                }
+            }
+#undef H_PML
+        }
+
+        {
+            int do_hx = ((NX - 1) != 1 && i > 0 && i < NX - 1 && j < NY - 1 && k < NZ - 1);
+            int do_hy = ((NY - 1) != 1 && i < NX - 1 && j > 0 && j < NY - 1 && k < NZ - 1);
+            int do_hz = ((NZ - 1) != 1 && i < NX - 1 && j < NY - 1 && k > 0 && k < NZ - 1);
+            float coeff = ch_curl[idx];
+            float coeff_y = dy == dx ? coeff : coeff * dx / dy;
+            float coeff_z = dz == dx ? coeff : coeff * dx / dz;
+
+            if (do_hx) {
+                ez_y += -coeff_y * lhx;
+                ey_z += coeff_z * lhx;
+                lambda_hx[work] = ch_hist[idx] * lhx;
+            }
+            if (do_hy) {
+                ex_z += -coeff_z * lhy;
+                ez_x += coeff * lhy;
+                lambda_hy[work] = ch_hist[idx] * lhy;
+            }
+            if (do_hz) {
+                ey_x += -coeff * lhz;
+                ex_y += coeff_y * lhz;
+                lambda_hz[work] = ch_hist[idx] * lhz;
+            }
+        }
+
+        w_a_x[work] = ez_x;
+        w_a_y[work] = ez_y;
+        w_b_x[work] = ey_x;
+        w_b_z[work] = ey_z;
+        w_c_y[work] = ex_y;
+        w_c_z[work] = ex_z;
+    }
+
+    DEEPGPR_OMP_PARALLEL_FOR
+    for (work = 0; work < total_work; ++work) {
+        long long idx = work % field_stride;
+        long long i = idx / ny_nz;
+        long long rem = idx % ny_nz;
+        long long j = rem / NZ;
+        long long k = rem % NZ;
+
+        lambda_ez[work] += gather_forward_transpose(w_a_x, work, ny_nz, i, NX, order);
+        lambda_ez[work] += gather_forward_transpose(w_a_y, work, NZ, j, NY, order);
+        lambda_ey[work] += gather_forward_transpose(w_b_x, work, ny_nz, i, NX, order);
+        lambda_ey[work] += gather_forward_transpose(w_b_z, work, 1, k, NZ, order);
+        lambda_ex[work] += gather_forward_transpose(w_c_y, work, NZ, j, NY, order);
+        lambda_ex[work] += gather_forward_transpose(w_c_z, work, 1, k, NZ, order);
+    }
+}
+
+/*
+ * Adjoint of receiver sampling: add the receiver-data cotangent of the
+ * current time step to the sampled electric-field component.
+ *
+ * Shots run in parallel; the receivers of one shot are applied sequentially
+ * in index order, so coincident receivers accumulate deterministically.
  *
  * Parameters:
  *   step: Number of shots or simulations in the batch.
  *   iteration: Current reverse time-step index.
- *   sourcelocation: Adjoint source coordinates with shape (step, nsr, 3).
- *   srcwaveforms: Adjoint source waveform array.
+ *   sourcelocation: Receiver coordinates with shape (step, nsr, 3).
+ *   srcwaveforms: Receiver-data cotangent with shape (step, iterations, nsr).
  *   lambda_ex, lambda_ey, lambda_ez: Electric field component arrays to update.
  *   NX, NY, NZ: Padded field grid sizes.
- *   nsr: Number of adjoint sources per shot.
- *   polarisation: Source component, 0 for x, 1 for y, 2 for z.
+ *   nsr: Number of receivers per shot.
+ *   polarisation: Sampled component, 0 for x, 1 for y, 2 for z.
  *   iterations: Total number of time steps.
  */
 static void adjoint_receivers_cpu(
@@ -1298,36 +1435,28 @@ static void adjoint_receivers_cpu(
     int NX, int NY, int NZ, int nsr, int polarisation, int iterations)
 {
     long long field_stride = (long long)NX * NY * NZ;
-    long long total = (long long)step * nsr;
-    long long work;
+    float* RESTRICT field = polarisation == 0 ? lambda_ex : (polarisation == 1 ? lambda_ey : lambda_ez);
+    long long shot;
+
+    if (polarisation < 0 || polarisation > 2) return;
 
     DEEPGPR_OMP_PARALLEL_FOR
-    for (work = 0; work < total; ++work) {
-        int s = (int)(work / nsr);
-        long long src = work % nsr;
-        long long index = (long long)s * iterations * nsr + (long long)iteration * nsr + src;
-
-        long long i = sourcelocation[s * nsr * 3 + src * 3 + 0];
-        long long j = sourcelocation[s * nsr * 3 + src * 3 + 1];
-        long long k = sourcelocation[s * nsr * 3 + src * 3 + 2];
-
-        float waveform_value = srcwaveforms[index];
-        long long id4 = (long long)s * field_stride + i * NY * NZ + j * NZ + k;
-
-        if (polarisation == 0) {
-            DEEPGPR_OMP_ATOMIC_UPDATE
-            lambda_ex[id4] += waveform_value;
-        } else if (polarisation == 1) {
-            DEEPGPR_OMP_ATOMIC_UPDATE
-            lambda_ey[id4] += waveform_value;
-        } else if (polarisation == 2) {
-            DEEPGPR_OMP_ATOMIC_UPDATE
-            lambda_ez[id4] += waveform_value;
+    for (shot = 0; shot < step; ++shot) {
+        for (long long src = 0; src < nsr; ++src) {
+            long long index = shot * iterations * nsr + (long long)iteration * nsr + src;
+            const int* location = sourcelocation + (shot * nsr + src) * 3;
+            long long id4 = shot * field_stride + (long long)location[0] * NY * NZ
+                + (long long)location[1] * NZ + location[2];
+            field[id4] += srcwaveforms[index];
         }
     }
 }
 
-/* Accumulate the transpose of the forward source injection into its waveform. */
+/*
+ * Accumulate the transpose of the forward source injection into the source
+ * waveform gradient. Sources run in parallel; the shots contributing to one
+ * waveform sample are summed sequentially in shot order (deterministic).
+ */
 static void adjoint_source_injection_cpu(
     int step, int iteration, float dx, float dy, float dz,
     const int* RESTRICT source_location,
@@ -1337,26 +1466,22 @@ static void adjoint_source_injection_cpu(
     float* RESTRICT grad_source)
 {
     long long field_stride = (long long)NX * NY * NZ;
-    long long total = (long long)step * nsrc;
     float dipole_length = source_component == 0 ? dx : (source_component == 1 ? dy : dz);
     float geometric_scale = dipole_length / (dx * dy * dz);
-    long long work;
+    const float* RESTRICT lambda_e = source_component == 0 ? lambda_ex
+        : (source_component == 1 ? lambda_ey : lambda_ez);
+    long long src;
 
     DEEPGPR_OMP_PARALLEL_FOR
-    for (work = 0; work < total; ++work) {
-        int s = (int)(work / nsrc);
-        long long src = work % nsrc;
-        long long i = source_location[s * nsrc * 3 + src * 3 + 0];
-        long long j = source_location[s * nsrc * 3 + src * 3 + 1];
-        long long k = source_location[s * nsrc * 3 + src * 3 + 2];
-        long long material_idx = i * NY * NZ + j * NZ + k;
-        long long field_idx = (long long)s * field_stride + material_idx;
-        float lambda_e = source_component == 0 ? lambda_ex[field_idx]
-            : (source_component == 1 ? lambda_ey[field_idx] : lambda_ez[field_idx]);
-        float value = -ce_rhs[material_idx] * geometric_scale * lambda_e;
-
-        DEEPGPR_OMP_ATOMIC_UPDATE
-        grad_source[src * nt + iteration] += value;
+    for (src = 0; src < nsrc; ++src) {
+        for (long long shot = 0; shot < step; ++shot) {
+            const int* location = source_location + (shot * nsrc + src) * 3;
+            long long material_idx = (long long)location[0] * NY * NZ
+                + (long long)location[1] * NZ + location[2];
+            long long field_idx = shot * field_stride + material_idx;
+            float value = -ce_rhs[material_idx] * geometric_scale * lambda_e[field_idx];
+            grad_source[src * nt + iteration] += value;
+        }
     }
 }
 
@@ -1521,7 +1646,7 @@ static void accumulate_material_gradients_cpu(
                 float ca_value = ca[material_idx];
                 float cb_value = cb[material_idx];
 
-                if (sigma_pad[material_idx] <= 100.0f) {
+                if (sigma_pad[material_idx] <= DEEPGPR_PEC_SIGMA_THRESHOLD_F) {
                     if (eps_r_requires_grad == 1) {
                         float dca_der = E0 * (1.0f - ca_value) * cb_value / dt;
                         float dcb_der = -E0 * cb_value * cb_value / dt;
@@ -1618,8 +1743,23 @@ DEEPGPR_API void forward(const float* RESTRICT eps_r_pad, const float* RESTRICT 
     long long component_stride = (long long)nt_saved * snap_size;
     float* exact_Eold = NULL;
 
+    deepgpr_clear_last_error();
     if (save_wavefield_history && save_model_history && storage_type != WAVEFIELD_FLOAT32) {
-        exact_Eold = (float*)malloc((size_t)e_components * (size_t)snap_size * sizeof(float));
+        size_t bytes;
+        if (snap_size < 0 || (unsigned long long)snap_size > SIZE_MAX / ((size_t)e_components * sizeof(float))) {
+            deepgpr_set_error("deepgpr_cpu forward: snapshot size overflows the address space");
+            return;
+        }
+        bytes = (size_t)e_components * (size_t)snap_size * sizeof(float);
+        exact_Eold = (float*)malloc(bytes);
+        if (exact_Eold == NULL) {
+            /* Previously this silently degraded the R-history accuracy. */
+            deepgpr_set_error(
+                "deepgpr_cpu forward: could not allocate %llu bytes for the exact "
+                "E^n snapshot used with low-precision wavefield storage",
+                (unsigned long long)bytes);
+            return;
+        }
     }
 
     build_update_coeffs_cpu(eps_r_pad, sigma_pad, mu_r_pad, ce_hist, ce_curl, ce_rhs, ch_hist, ch_curl, ch_rhs, NX_FIELDS, NY_FIELDS, NZ_FIELDS, dt, dx);
@@ -1764,6 +1904,23 @@ DEEPGPR_API void backward(const float* RESTRICT eps_r_pad, const float* RESTRICT
     int fdtd_order = g_fdtd_order;
     int nt_saved = (nt + sampling_interval - 1) / sampling_interval;
     int has_cpml = pml0 || pml1 || pml2 || pml3 || pml4 || pml5;
+    long long total_work = (long long)step * NX_FIELDS * NY_FIELDS * NZ_FIELDS;
+    size_t weight_bytes;
+    float* adjoint_weights;
+
+    deepgpr_clear_last_error();
+    if (total_work < 0 || (unsigned long long)total_work > SIZE_MAX / (ADJOINT_CHANNELS * sizeof(float))) {
+        deepgpr_set_error("deepgpr_cpu backward: field size overflows the address space");
+        return;
+    }
+    weight_bytes = (size_t)ADJOINT_CHANNELS * (size_t)total_work * sizeof(float);
+    adjoint_weights = (float*)malloc(weight_bytes);
+    if (adjoint_weights == NULL) {
+        deepgpr_set_error(
+            "deepgpr_cpu backward: could not allocate %llu bytes for the adjoint "
+            "stencil weights", (unsigned long long)weight_bytes);
+        return;
+    }
 
     build_update_coeffs_cpu(eps_r_pad, sigma_pad, mu_r_pad, ce_hist, ce_curl, ce_rhs, ch_hist, ch_curl, ch_rhs, NX_FIELDS, NY_FIELDS, NZ_FIELDS, dt, dx);
 
@@ -1793,25 +1950,24 @@ DEEPGPR_API void backward(const float* RESTRICT eps_r_pad, const float* RESTRICT
                 nt_saved, fwi_mode, storage_type);
         }
 
-        /* Strict reverse-mode order for the executed forward time step. */
-        if (has_cpml) {
-            adjoint_cpml_e_cpu(
-                lambda_ex, lambda_ey, lambda_ez, lambda_hx, lambda_hy, lambda_hz, dx, dy, dz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
-                pml0, pml1, pml2, pml3, pml4, pml5, x0ER, xmER, y0ER, ymER, z0ER, zmER, ce_rhs,
-                x0EPhi1, x0EPhi2, xmEPhi1, xmEPhi2, y0EPhi1, y0EPhi2, ymEPhi1, ymEPhi2,
-                z0EPhi1, z0EPhi2, zmEPhi1, zmEPhi2, fdtd_order);
-        }
-        adjoint_e_cpu(ce_hist, ce_curl, lambda_ex, lambda_ey, lambda_ez, lambda_hx, lambda_hy, lambda_hz,
-            step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, dx, dy, dz, fdtd_order);
-        if (has_cpml) {
-            adjoint_cpml_h_cpu(
-                lambda_ex, lambda_ey, lambda_ez, lambda_hx, lambda_hy, lambda_hz, dx, dy, dz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
-                pml0, pml1, pml2, pml3, pml4, pml5, x0HR, xmHR, y0HR, ymHR, z0HR, zmHR, ch_rhs,
-                x0HPhi1, x0HPhi2, xmHPhi1, xmHPhi2, y0HPhi1, y0HPhi2, ymHPhi1, ymHPhi2,
-                z0HPhi1, z0HPhi2, zmHPhi1, zmHPhi2, fdtd_order);
-        }
-        adjoint_h_cpu(ch_hist, ch_curl, lambda_ex, lambda_ey, lambda_ez, lambda_hx, lambda_hy, lambda_hz,
-            step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, dx, dy, dz, fdtd_order);
+        /* Strict reverse-mode order for the executed forward time step:
+         * (E CPML + E update)^T, then (H CPML + H update)^T. */
+        adjoint_e_step_cpu(ce_hist, ce_curl, ce_rhs,
+            lambda_ex, lambda_ey, lambda_ez, lambda_hx, lambda_hy, lambda_hz,
+            dx, dy, dz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
+            has_cpml, pml0, pml1, pml2, pml3, pml4, pml5,
+            x0ER, xmER, y0ER, ymER, z0ER, zmER,
+            x0EPhi1, x0EPhi2, xmEPhi1, xmEPhi2, y0EPhi1, y0EPhi2, ymEPhi1, ymEPhi2,
+            z0EPhi1, z0EPhi2, zmEPhi1, zmEPhi2, fdtd_order, adjoint_weights);
+        adjoint_h_step_cpu(ch_hist, ch_curl, ch_rhs,
+            lambda_ex, lambda_ey, lambda_ez, lambda_hx, lambda_hy, lambda_hz,
+            dx, dy, dz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
+            has_cpml, pml0, pml1, pml2, pml3, pml4, pml5,
+            x0HR, xmHR, y0HR, ymHR, z0HR, zmHR,
+            x0HPhi1, x0HPhi2, xmHPhi1, xmHPhi2, y0HPhi1, y0HPhi2, ymHPhi1, ymHPhi2,
+            z0HPhi1, z0HPhi2, zmHPhi1, zmHPhi2, fdtd_order, adjoint_weights);
     }
     }
+
+    free(adjoint_weights);
 }

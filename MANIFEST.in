@@ -1,17 +1,20 @@
 include README.md
+include CHANGELOG.md
 include license
 include pyproject.toml
+include requirements.txt
 
-recursive-include src/DeepGPR *.py *.txt *.cu *.h *.c *.dll *.so *.dylib
+recursive-include src/DeepGPR *.py *.typed *.cu *.h *.c *.dll *.so *.dylib
 
-prune .agents
-prune .codex
-prune .github
+# Exclude local state and repository-only resources.
+prune .*
+prune validation
 prune Fig
 prune docs
 prune examples
 prune scripts
 prune tests
+prune tools
 prune website
 
 global-exclude .DS_Store

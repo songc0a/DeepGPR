@@ -1,414 +1,224 @@
 # DeepGPR
 
-**Official Website / Documentation:** [https://songc0a.github.io/DeepGPR/](https://songc0a.github.io/DeepGPR/)
+**Official website / documentation:** [https://songc0a.github.io/DeepGPR/](https://songc0a.github.io/DeepGPR/)
 
 DeepGPR provides a wave propagation module for PyTorch, designed for applications such as Ground Penetrating Radar (GPR) imaging and inversion. Its core concepts are derived from Deepwave. You can use it to perform both forward modeling and backpropagation—thereby enabling the simulation of wave propagation to generate synthetic data—as well as for Full Waveform Inversion (FWI). Furthermore, you can integrate this wave propagation functionality into a larger operational pipeline—incorporating various wavelets, loss functions, and other components—to achieve end-to-end forward and reverse propagation, powered by automatic differentiation and our high-performance operators.
 
-
 ## Features
 
-Supports 2D and 3D forward modeling of Maxwell's equations—via the Finite-Difference Time-Domain (FDTD) method—for both single and multiple excitation scenarios.
+- 2D and 3D forward modeling of Maxwell's equations with the Finite-Difference Time-Domain (FDTD) method, for single and multiple excitations.
+- Gradients of the receiver data with respect to relative permittivity, conductivity, the initial wavefield and the source amplitudes, computed by an exact discrete adjoint.
+- Automatic extension of the physical model into a CPML with an independent thickness on every face. Supply only air and the target region; material gradients keep the input model shape.
+- CUDA GPU backend and a C/OpenMP CPU backend (selected automatically with `device='cpu'`).
+- Spatial FDTD order 2, 4 or 8 (`fdtd_order`), and gradient mode 2 (Ez only) or 3 (Ex, Ey, Ez).
+- Large models: checkpointing, DDP, temporal sub-sampling, FP16/BF16 or GPU-native INT8 wavefield histories and asynchronous offload to host memory.
 
-Gradients of the output receiver data can be computed with respect to model parameters (relative permittivity, conductivity), the initial wavefield, and source amplitudes.
+## System requirements
 
-Automatically extends the physical model into CPML, with an independent thickness for each boundary. Supply only air and the target region; material gradients retain the input model shape.
+- **OS**: Linux, Windows and macOS for CPU execution; Linux and Windows for CUDA execution
+- **Python**: 3.8+
+- **Libraries**: `torch`, `numpy`, `matplotlib` (the examples additionally use `scikit-image`)
+- **Hardware**: an NVIDIA GPU with sufficient memory for CUDA execution; CPU execution works without a GPU
 
-The compute backend can run on CUDA GPUs or on CPU. The CPU backend is implemented in C and is selected automatically when `device='cpu'`.
+## Installation
 
-The FDTD spatial finite-difference order can be selected with `fdtd_order=2`, `4`, or `8` (default: `2`).
-
-The FWI gradient mode can be selected with `mode=2` or `mode=3`. `mode=2` keeps the previous Ez-only gradient behavior, while `mode=3` uses Ex, Ey, and Ez forward/adjoint electric-field contributions for relative permittivity and conductivity gradients.
-
-Supports techniques such as checkpointing, DDP, and the utilization of CPU memory to minimize GPU memory consumption, thereby enabling the execution of large-scale models.
-
-
-## System Requirements
-
-- **OS**: Linux, Windows, and macOS for CPU execution; Linux and Windows for CUDA execution
-- **Environment**: Python 3.8+, CUDA Toolkit for CUDA execution
-- **Libraries**: `torch`, `numpy`, `scipy`, `matplotlib`
-- **Hardware**: NVIDIA GPU with sufficient VRAM for CUDA execution; CPU execution works without a GPU.
-
-
-## Start
-
-Before CUDA use, you must ensure that you have an NVIDIA graphics card and have installed a CUDA-enabled version of PyTorch. For CPU use, install a CPU build of PyTorch and include a compiled `deepgpr_cpu` shared library in `src/DeepGPR/lib`.
-
-DeepGPR can then be installed using
+Install a PyTorch build for your platform first ([pytorch.org](https://pytorch.org/get-started/locally/)): a CUDA-enabled build for GPU use, or a CPU build. Then
 
 ```bash
-  pip install DeepGPR
+pip install DeepGPR                 # runtime
+pip install "DeepGPR[examples]"     # + scipy, scikit-image, jupyter for the notebooks
 ```
 
+For development from a clone:
 
+```bash
+pip install -r requirements-dev.txt
+pip install -e .
+```
 
-## A Small Forward Modeling Test
+The prebuilt native libraries ship in `src/DeepGPR/lib`. To rebuild them see [`docs/BUILDING.md`](docs/BUILDING.md).
+
+## Quick start: a small forward-modeling test
 
 ```python
 import torch
-import DeepGPR
 import matplotlib.pyplot as plt
+import DeepGPR
 
-# Set up the parameters and models
-device=torch.device("cuda" if torch.cuda.is_available() else "cpu")
-dx=0.02  # Or [dx, dy, dz], for example [0.02, 0.015, 0.01]
-dt=3e-11
-nt=2000
-er = torch.ones(100, 100,1) * 2  
-er[50:,:]=5
-se = torch.zeros_like(er)  
-er.requires_grad_()
-source_location=torch.tensor([[[10,10,0]]],device=device,dtype=torch.int)
-receiver_location=torch.tensor([[[10,90,0]]],device=device,dtype=torch.int)
-freq=2e8
-peak_time = 1 / freq
-source_amplitudes = torch.zeros((1,nt,1),device=device)
-source_amplitudes[0,:,0]=DeepGPR.wavelet.ricker(
-    freq, nt, dt, peak_time, device=device
-)
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+dx = 0.02                 # or [dx, dy, dz], for example [0.02, 0.015, 0.01]
+dt = 3e-11
+nt = 2000
 
+eps_r = torch.ones(100, 100, 1) * 2
+eps_r[50:, :] = 5
+sigma = torch.zeros_like(eps_r)
+eps_r.requires_grad_()
 
-#forward modeling
-r = DeepGPR.compute(
-    device=device, dx=dx, dt=dt, 
+source_location = torch.tensor([[[10, 10, 0]]], device=device, dtype=torch.int)
+receiver_location = torch.tensor([[[10, 90, 0]]], device=device, dtype=torch.int)
+freq = 2e8
+source_amplitudes = torch.zeros((1, nt, 1), device=device)
+source_amplitudes[0, :, 0] = DeepGPR.wavelet.ricker(freq, nt, dt, 1 / freq, device=device)
+
+E_saved, E, H, pml_state, receivers = DeepGPR.compute(
+    device=device, dx=dx, dt=dt,
     source_amplitudes=source_amplitudes,
-    source_location=source_location, 
-    receiver_location=receiver_location, 
-    er=er, se=se,
-    fdtd_order=2
+    source_location=source_location,
+    receiver_location=receiver_location,
+    eps_r=eps_r, sigma=sigma,
+    fdtd_order=2,
 )
 
-(r[-1]**2).sum().backward()
+receivers.square().sum().backward()
 
-_, ax = plt.subplots(1, 2, figsize=(10, 3))
-ax[0].plot(r[-1].detach().flatten().cpu().numpy())
-ax[0].set_title("Receiver data")
-ax[1].imshow(er.grad.detach())
-ax[1].set_title("Gradient")
+fig, ax = plt.subplots(1, 2, figsize=(10, 3))
+DeepGPR.visualization.plot_trace(receivers[0, :, 0], dt=dt, ax=ax[0], title="Receiver data")
+DeepGPR.visualization.plot_model(eps_r.grad, ax=ax[1], title="Gradient", cmap="seismic")
 plt.show()
 ```
 
-![result](./Fig/example.png)
+![result](Fig/example.png)
 
-There are more examples in the ./examples.
+More examples are in [`examples/`](examples) (forward modeling, 2D FWI, 3D FWI).
 
-## Source Wavelets
+## Source wavelets
 
-Wavelets are available from the `DeepGPR.wavelet` module. Every function
-returns a one-dimensional PyTorch tensor and accepts optional `dtype` and
-`device` arguments.
+Wavelets live in `DeepGPR.wavelet`. Every function returns a one-dimensional
+tensor and accepts optional `dtype` and `device` arguments.
 
 ```python
 ricker = DeepGPR.wavelet.ricker(freq, nt, dt, peak_time, device=device)
 gaussian = DeepGPR.wavelet.gaussian(freq, nt, dt, peak_time, device=device)
-derivative = DeepGPR.wavelet.gaussian_derivative(
-    freq, nt, dt, peak_time, device=device
-)
-morlet = DeepGPR.wavelet.morlet(
-    freq, nt, dt, peak_time, cycles=3.0, device=device
-)
-burst = DeepGPR.wavelet.sine_burst(
-    freq, nt, dt, peak_time, cycles=3.0, device=device
-)
+derivative = DeepGPR.wavelet.gaussian_derivative(freq, nt, dt, peak_time, device=device)
+morlet = DeepGPR.wavelet.morlet(freq, nt, dt, peak_time, cycles=3.0, device=device)
+burst = DeepGPR.wavelet.sine_burst(freq, nt, dt, peak_time, cycles=3.0, device=device)
 ```
 
 `DeepGPR.ricker(...)` remains available as a backward-compatible alias.
 
+## Full-waveform inversion results
 
+The figures show the true model, the initial model and the inverted result.
 
-The following figures present representative 2D and 3D full-waveform inversion (FWI) examples. For each case, the true model, initial model, and inverted result are shown to evaluate the reconstruction performance of the proposed method.
+### 2D FWI
 
-### 2D FWI Result
+| True model | Initial model | Inverted result |
+| --- | --- | --- |
+| ![2D true model](Fig/2dfwitrue.png) | ![2D initial model](Fig/2dfwiinit.png) | ![2D inverted result](Fig/2dfwipred.png) |
 
-The 2D example illustrates the inversion performance on a two-dimensional subsurface model. The comparison between the true model, initial model, and inverted result shows that the proposed method can effectively recover the main structural features from the initial model.
+### 3D FWI (central slice)
 
-| True Model | Initial Model | Inverted Result |
-|---|---|---|
-| ![2D true model](./Fig/2dfwitrue.png) | ![2D initial model](./Fig/2dfwiinit.png) | ![2D inverted result](./Fig/2dfwipred.png) |
+| Model | Central slice |
+| --- | --- |
+| True model | ![3D true model central slice](Fig/3dfwitrue.png) |
+| Initial model | ![3D initial model central slice](Fig/3dfwiinit.png) |
+| Inverted result | ![3D inverted result central slice](Fig/3dfwipred.png) |
 
-### 3D FWI Result
+## API overview
 
-The 3D example demonstrates the applicability of the proposed method to three-dimensional full-waveform inversion. For visualization, the figures below show the central slice of the 3D model, including the true model, the initial model, and the inverted result. The comparison indicates that the proposed method can reconstruct the dominant subsurface structures in the 3D case and improve the model consistency relative to the initial model.
+| Function | Purpose |
+| --- | --- |
+| `DeepGPR.compute(...)` | FDTD forward modeling with autograd (full reference: [`docs/API.md`](docs/API.md)) |
+| `DeepGPR.checkpoint_initial_field(...)` | zero E/H/CPML states for segment-wise (checkpointed) runs |
+| `DeepGPR.wavelet.*` | source wavelets |
+| `DeepGPR.TVRegularization` | total-variation penalty for εr and σ (`"anisotropic"`, `"isotropic"`) |
+| `DeepGPR.apply_filter`, `DeepGPR.hilbert_transform` | low-pass FIR and envelope for multi-scale FWI |
+| `DeepGPR.max_stable_time_step(...)` | largest CFL-stable `dt` for a grid, order and material |
+| `DeepGPR.estimate_compute_memory(...)` | memory estimate (also printed by `print_parameters=True`) |
+| `DeepGPR.decompress_wavefield_history(...)` | decode a packed INT8 history for diagnostics |
+| `DeepGPR.visualization.plot_*` | models, radargrams, traces, true/initial/inverted comparison |
+| `DeepGPR.configure_logging(level)` | enable DeepGPR log output |
 
-| Model Type | Central Slice of 3D Model |
-|---|---|
-| True Model | ![3D true model central slice](./Fig/3dfwitrue.png) |
-| Initial Model | ![3D initial model central slice](./Fig/3dfwiinit.png) |
-| Inverted Result | ![3D inverted result central slice](./Fig/3dfwipred.png) |
+### Logging and errors
 
-# `compute` Interface Documentation
-
-`compute` is a core function for 3D/2D Finite-Difference Time-Domain (FDTD) forward modeling, primarily designed for Ground Penetrating Radar (GPR) and electromagnetic wave propagation. It fully supports backpropagation (e.g., for Full Waveform Inversion, FWI) utilizing PyTorch's `autograd` engine.
-
-## 📝 Function Signature
-
-```python
-def compute(device, dx=None, dt=None, 
-            source_amplitudes=None,
-            source_location=None, 
-            receiver_location=None, 
-            er=None, se=None, mr=None, 
-            E=None, H=None, PML=None,
-            pmlthick=10, source_direction=2, reciever_direction=2,
-            model_gradient_sampling_interval=1,
-            wavefield_storage_dtype=torch.float32,
-            use_async_offload=False,
-            fdtd_order=2,
-            mode=2,
-            debug=False,
-            print_parameters=False,
-            save_forward_wavefield_path=None):
-```
-
-Set `print_parameters=True` on an ordinary call to print the normalized
-configuration and memory estimate immediately before the native solver starts:
+DeepGPR logs through the standard `logging` module under the `DeepGPR`
+logger and never configures the root logger. Enable console output with
 
 ```python
-result = DeepGPR.compute(
-    device="cuda:0",
-    # Other model, source, and acquisition arguments...
-    print_parameters=True,
-)
+DeepGPR.configure_logging("INFO")    # or "DEBUG" for per-call solver details
 ```
 
-## 📥 Input Parameters
-### 1. Basic Physics & Grid Parameters
+Errors raised by the package derive from `DeepGPR.DeepGPRError` **and** from the
+built-in type used before 0.1.0, e.g. `DeepGPR.CFLConditionError` is also a
+`ValueError` and `DeepGPR.NativeLibraryError` is also a `RuntimeError`.
+Failures inside the native CPU/CUDA code (allocation, CUDA API or launch
+errors) are raised as `NativeLibraryError` with the native message.
 
-| Parameter | Data Type | Description |
-| :--- | :--- | :--- |
-| **`device`** | `torch.device` / `str` | PyTorch computation device, e.g., `'cuda:0'` or `'cpu'`. CUDA loads `deepgpr.so/.dll`; CPU loads `deepgpr_cpu.so/.dll/.dylib`. |
-| **`dx`** | `float` / 3-value `list`, `tuple`, or `Tensor` | Grid spacing in meters. A scalar uses an isotropic grid ($dx = dy = dz$). Three values specify independent $(dx, dy, dz)$ spacings for the finite differences, CFL condition, CPML coefficients, and source scaling. |
-| **`dt`** | `float` | Time step size. It is checked against a material-aware CFL limit that includes the selected 2/4/8-order stencil. Typically in seconds (s). |
-| **`fdtd_order`** | `int` | Spatial finite-difference order used by the FDTD field updates. Supported values are `2`, `4`, and `8`; default is `2` for compatibility with earlier versions. |
-| **`mode`** | `int` | FWI gradient mode. `2` keeps the previous Ez-only model-gradient calculation. `3` uses Ex, Ey, and Ez electric-field contributions for relative permittivity and conductivity gradients. |
-| **`debug`** | `bool` | Runs expensive NaN/Inf and zero-field validation checks when `True`. Backward validation covers material, source, and initial-state gradients actually requested by autograd. The default `False` keeps these checks disabled for faster production runs. |
-| **`print_parameters`** | `bool` | Prints a preflight summary before native FDTD execution. The summary includes all simulation options and a tensor-payload memory estimate for model/state tensors, CPML, saved `E_saved`/`R_saved` wavefields, receiver buffers, gradients, low-precision snapshots, and CUDA offload buffers. CPU and CUDA estimates are reported separately with a 20% capacity margin. |
-| **`save_forward_wavefield_path`** | `str` / path-like / `None` | Directory used to save `E_saved` after a successful forward run. The default `None` performs no file I/O. Files use the local 24-hour start time, for example `forward_wavefield_14-35.pt`; a numeric suffix prevents overwriting when multiple runs start in the same minute. |
-### 2. Medium Model Parameters
+## Project structure
 
-Supply **only the physical model, including any air layer and the target region**. Do not include PML in `eps_r`, `sigma`, or `mu_r`. For 2D simulations use `(nx, ny)` or `(nx, ny, 1)`.
+```
+src/DeepGPR/
+├── __init__.py            public API
+├── _version.py            package version
+├── config/                physical constants, native ABI codes, API defaults
+├── native/                library loader, declarative C ABI table, ctypes bridge
+├── preprocessing/         input validation, grid/PML normalisation, CFL, wavelets
+├── solver/                CPML, field state, history storage, autograd bridge, compute()
+├── postprocessing/        FIR filter, envelope, forward-wavefield files
+├── inversion/             TV regularisation
+├── visualization/         matplotlib helpers
+├── utils/                 logging, exceptions, validators, diagnostics
+├── lib/                   deepgpr.cu, deepgpr_cpu.c, deepgpr.h and prebuilt binaries
+├── common.py, compute2.py, multiscale.py, wavelet.py   compatibility modules
+docs/                      API reference, build guide, code audit
+examples/                  forward, 2D FWI and 3D FWI notebooks
+tests/                     unit tests, verification notebooks, benchmarks
+tools/                     verify_equivalence.py
+```
 
-Every `compute` call replicates the current material values at each boundary outward by `pmlthick`. For `[px0, px1, py0, py1, pz0, pz1]`, the internal grid is `Nx = nx + px0 + px1`, `Ny = ny + py0 + py1`, `Nz = nz + pz0 + pz1`. In 2D, `Nz = 1`. Sources and receivers use zero-based **input model coordinates**; the solver adds `[px0, py0, pz0]` internally without modifying your tensors. PML thickness can exceed the physical model size.
+Data flow of one `compute` call:
+`preprocessing.model_setup.initialization` (validate, CFL, extend into CPML) →
+`solver.pml` (CPML coefficients and state) → `solver.autograd.DeepGPR`
+(native forward; native adjoint on `backward`) → receiver data, final states
+and the saved history.
 
-After `loss.backward()`, `eps_r.grad` and `sigma.grad` have exactly their respective input shapes, including air cells. Update these physical tensors with your external FWI optimizer; the next call regenerates PML from the updated model. If air must remain fixed, apply your physical air mask in the optimizer.
-
-**Migration:** remove old manually padded PML cells and subtract the old low-face padding from acquisition indices. Keep actual air layers. Existing states generated on a different computational grid must be regenerated.
-
-| Parameter | Data Type | Shape | Description |
-| :--- | :--- | :--- | :--- |
-| **`eps_r`** (`er`) | `Tensor` (float) | `(nx, ny, nz)` or `(nx, ny)` | Relative permittivity ($\epsilon_r$). Values must be $\ge 1$. `er` is the deprecated alias. |
-| **`sigma`** (`se`) | `Tensor` (float) | `(nx, ny, nz)` or `(nx, ny)` | Electrical conductivity ($\sigma$). Values must be non-negative. `se` is the deprecated alias. |
-| **`mu_r`** (`mr`) | `Tensor` (float) | `(nx, ny, nz)` or `(nx, ny)` | Relative permeability ($\mu_r$). Optional; defaults to 1 for the entire space. `mr` is the deprecated alias. |
-
-> **Dimension Key**: `nx`, `ny`, and `nz` represent the number of grid cells along the X, Y, and Z axes, respectively. 
-
-### 3. Source & Receiver Setup
-
-This section defines the geometric observation system (coordinates) and the excitation waveforms.
-
-| Parameter | Data Type | Shape | Description |
-| :--- | :--- | :--- | :--- |
-| **`source_amplitudes`** | `Tensor` (float) | `(num_waveforms, nt, 1)` | Source excitation waveforms. `nt` is the total number of time steps.<br>- If `num_waveforms == 1`: All sources share this single waveform.<br>- If `num_waveforms == nsr`: Each source uses its corresponding waveform. |
-| **`source_location`** | `Tensor` (int) | `(nstep, nsr, 3)` | Grid coordinate indices of the sources in the unextended physical model.<br>The last dimension corresponds to `[x_idx, y_idx, z_idx]`. |
-| **`receiver_location`** | `Tensor` (int) | `(nstep, nrx, 3)` | Grid coordinate indices of the receivers in the unextended physical model.<br>The last dimension corresponds to `[x_idx, y_idx, z_idx]`. |
-| **`source_direction`** | `int` | Scalar | Polarization direction/component of the source excitation.<br>`0` = X, `1` = Y, `2` = Z (e.g., exciting $E_z$). |
-| **`receiver_component`** (`reciever_direction`) | `int` | Scalar | The component recorded by the receivers.<br>`0` = $E_x$, `1` = $E_y$, `2` = $E_z$. The misspelled name remains as a deprecated alias. |
-
-> **Core Shape Definitions**:
-> *   `nstep`: Number of shots/batches (independent simulation tasks running in parallel).
-> *   `nsr`: Number of **sources** per single simulation.
-> *   `nrx`: Number of **receivers** per single simulation.
-> *   `nt`: Total number of time steps to simulate.
-
-### 4. Boundary Conditions & Optimization
-
-| Parameter | Data Type | Format | Description |
-| :--- | :--- | :--- | :--- |
-| **`pmlthick`** | `int` / `list` / `Tensor`| Scalar or list of 4/6 | External PML thickness in grid cells, added by edge replication.<br>- Integer `p`: All active boundaries have thickness `p` (no Z padding in 2D).<br>- `[x0, xm, y0, ym]`: X/Y faces with no Z PML.<br>- `[x0, xm, y0, ym, z0, zm]`: Six independent faces; Z values must be zero in 2D.<br>- Zero disables that face. |
-| **`model_gradient_sampling_interval`**| `int` | Scalar | Wavefield sampling interval during forward propagation (Default: 1).<br>A larger integer reduces VRAM use for `E_saved` and `R_saved`, but uses an explicitly approximate model gradient. The last incomplete sampling block is weighted by its actual length. |
-| **`save_wavefield_history`** | `bool` | Scalar | Independently controls allocation and native writes of the E/R histories used by adjoint model-gradient backward (Default: `True`). `False` still executes the complete FDTD, CPML, source-injection, and receiver-recording path, returns an empty `E_saved`, and raises a clear error if history-dependent backward is attempted. |
-| **`wavefield_storage_dtype`** | `torch.dtype` / `str` | `float32`, `float16`, or `bfloat16` | Storage format for saved `E_saved` and `R_saved` model-gradient wavefields. FDTD propagation remains float32. `float16` and `bfloat16` halve saved-wavefield memory at the cost of gradient accuracy; `bfloat16` has the safer dynamic range. String aliases such as `"fp16"` and `"bf16"` are accepted. |
-| **`wavefield_conversion_backend`** | `str` | `"auto"`, `"legacy"`, `"native_scalar"`, or `"native_vec2"` | CUDA FP16/BF16 history conversion. The audited default `"auto"` uses NVIDIA scalar intrinsics for CUDA FP16 and the legacy path otherwise. Explicit values retain the correctness/performance A/B paths; vec2 is not the default because it was slower on RTX 4090. |
-| **`wavefield_compression`** | `str` | `"none"`, `"int8"`, or `"zfp"` | `"int8"` enables CUDA-native per-block symmetric INT8 histories with FP32 scales and inline decode in the fused material-gradient kernel. `"none"` is the unchanged default. `"zfp"` is reserved for an optional fused CUDA decoder and is rejected by the current dependency-free build instead of silently materializing a decoded global-memory history. |
-| **`wavefield_compression_block_size`** | sequence / `None` | 2D or 3D spatial block | INT8 block shape; defaults to `(8, 8)` in 2D and `(4, 4, 4)` in 3D. The block volume must be a power of two no larger than 256. Partial boundary blocks are supported. |
-| **`int8_reduction_backend`** | `str` | `"auto"`, `"current"`, `"cub_block"`, or `"warp_shuffle"` | Tile maximum reduction. The audited default `"auto"` selects NVIDIA CUB `BlockReduce` for 64-voxel tiles and preserves the prior shared-memory tree for other valid tile sizes. Explicit values expose the retained A/B implementations. |
-| **`wavefield_compression_rate`** | scalar / `None` | Optional ZFP setting | Reserved for an optional ZFP backend. It is rejected unless that backend is selected and available. |
-| **`use_async_offload`** | `bool` | Scalar | CUDA-only VRAM optimization flag (Default: `False`).<br>If `True`, `E_saved` and `R_saved` are asynchronously offloaded to page-locked host memory (`pin_memory` CPU RAM). This reduces GPU VRAM consumption at the cost of PCIe transfers. On CPU this option is ignored. |
-
-### 4.1 FWI Gradient Mode
-
-`mode` only changes how the model gradients are accumulated during backpropagation:
-
-- `mode=2` (default): Saves Ez in `E_saved` and computes relative permittivity/conductivity gradients from Ez only.
-- `mode=3`: Saves Ex, Ey, and Ez in `E_saved` and computes relative permittivity/conductivity gradients from all three electric-field components. This is intended for complete 3D Maxwell FWI. The receiver component is not changed by this option.
-
-When `eps_r` or `sigma` requires gradients, `mode=2` is restricted to 2D Ez-TM modeling; use `mode=3` for 3D gradients. Source-waveform gradients are supported. Gradients with respect to `mu_r` are not currently implemented and are rejected explicitly.
-
-### 4.2 Discrete Adjoint Gradient
-
-The backward solver applies the exact reverse-mode transpose of each executed operation in reverse order: receiver sampling, source injection, electric CPML, electric update, magnetic CPML, and magnetic update. The derivative transpose is applied to the material-weighted field cotangent, so heterogeneous update coefficients and anisotropic grid spacing are handled by the executed discrete operator. Every electric and magnetic CPML auxiliary state has a separate cotangent recurrence on all six faces.
-
-CPML is treated as a fixed numerical boundary during backward. Boundary coefficient averages are detached, and gradients are cropped to the physical model; replicated PML sensitivities are not summed into model edges. All physical cells remain eligible for material gradients, including the first cell at a low face. PML materials and coefficients are rebuilt on the next forward call. Thus a finite-difference check must keep boundary values fixed (or freeze the extended PML and its coefficients explicitly); perturbing model edges and regenerating PML also changes a numerical boundary that this FWI gradient intentionally holds fixed.
-
-The material-gradient formulation in DeepGPR was informed in part by the differentiable FDTD implementation in [TIDE](https://github.com/Vcholerae1/tide-GPR), particularly its treatment of the discrete Maxwell electric-field update in gradient computation. We gratefully acknowledge the TIDE project and its authors for this work.
-
-Use `model_gradient_sampling_interval=1` and `wavefield_storage_dtype=torch.float32` for a directional derivative check in the physical model region. Temporal subsampling and lower-precision storage deliberately approximate the gradient. Run [the gradient-check notebook](tests/03_gradient_2d.ipynb) after rebuilding the native ABI 6 libraries with `deepgpr_supports_external_pml`. See `tests/test_external_pml.py` for physical edge and checkpoint regression checks.
-
-### 4.3 GPU-native block INT8 history
-
-Only the sampled forward state used by the material adjoint is compressed. The
-live Ex/Ey/Ez/Hx/Hy/Hz and CPML states remain float32. The executed discrete
-update requires `E^n` and `R^n`, where `E^(n+1) = ca E^n + cb R^n`; consequently
-`mode=2` stores compressed Ez/Rz and `mode=3` stores compressed Ex/Ey/Ez and all
-three corresponding RHS components. Magnetic histories are not stored.
-
-The packed tensor contains a contiguous signed-INT8 payload followed by a
-four-byte-aligned contiguous FP32 scale array. Backward maps one CUDA block to
-one compression tile, loads each E/R scale once into shared memory, decodes each
-value in a register, and immediately accumulates the epsilon/conductivity
-gradient. It does not allocate or write a reconstructed global-memory history.
-`use_async_offload=True`, CPU execution, and a non-float32
-`wavefield_storage_dtype` are explicitly incompatible with `"int8"`.
-
-The current shared-memory maximum reduction remains available as
-`int8_reduction_backend="current"`. The RTX 4090 audit selected CUB
-`BlockReduce` for the default 64-voxel tiles; `"auto"` falls back to the current
-tree for other supported power-of-two tile volumes.
-
-`E_saved` is an opaque one-dimensional `torch.int8` packed tensor in this mode.
-For diagnostics only, reconstruct it with
-`DeepGPR.decompress_wavefield_history(E_saved, original_shape, block_size)`.
-This helper materializes FP32 and is never called by autograd backward.
-
-## CUDA Backend Build
-
-Build the CUDA shared library from the repository root on Linux. `-lineinfo`
-preserves source correlation for Nsight; `-Xptxas=-v` prints registers and spill
-stores/loads for each kernel.
+## Tests and verification
 
 ```bash
-nvcc -std=c++14 -O3 -lineinfo -Xptxas=-v -arch=sm_89 --shared -Xcompiler -fPIC \
-  -o src/DeepGPR/lib/deepgpr.so src/DeepGPR/lib/deepgpr.cu
-```
-
-The command above is the audited RTX 4090 build path. Select the matching
-architecture when building for a different GPU; do not add `--use_fast_math`
-unless a separate numerical and gradient validation explicitly permits it.
-
-The new INT8 path deliberately keeps native ABI 6 because the forward/backward
-C signatures are unchanged. A capability symbol prevents an older ABI-6 CUDA
-library from accepting the packed storage code and corrupting memory. External PML also requires the `deepgpr_supports_external_pml` capability on CPU and CUDA, including the INT8 gradient path. Rebuild native libraries on each target platform; older binaries are rejected for PML runs rather than silently dropping physical edge gradients.
-
-## CPU Backend Build
-
-The CPU backend is a plain C shared library and is built with OpenMP by default. Build it into `src/DeepGPR/lib` before running with `device='cpu'`. You can control CPU thread count with `OMP_NUM_THREADS`.
-
-```bash
-# Linux
-cc -std=c99 -O3 -fopenmp -fPIC -shared -o src/DeepGPR/lib/deepgpr_cpu.so src/DeepGPR/lib/deepgpr_cpu.c
-
-# macOS
-brew install libomp
-LIBOMP_PREFIX="$(brew --prefix libomp)"
-LIBOMP_RUNTIME_NAME="/opt/llvm-openmp/lib/libomp.dylib"
-cc -std=c99 -O3 -Xpreprocessor -fopenmp -DDEEPGPR_USE_OPENMP -I"$LIBOMP_PREFIX/include" -L"$LIBOMP_PREFIX/lib" -fPIC -shared -o src/DeepGPR/lib/deepgpr_cpu.dylib src/DeepGPR/lib/deepgpr_cpu.c -lomp
-cp "$LIBOMP_PREFIX/lib/libomp.dylib" src/DeepGPR/lib/libomp.dylib
-install_name_tool -id "$LIBOMP_RUNTIME_NAME" src/DeepGPR/lib/libomp.dylib
-LIBOMP_DEP="$(otool -L src/DeepGPR/lib/deepgpr_cpu.dylib | awk '/libomp\.dylib/ {print $1; exit}')"
-install_name_tool -change "$LIBOMP_DEP" "$LIBOMP_RUNTIME_NAME" src/DeepGPR/lib/deepgpr_cpu.dylib
-codesign --force --sign - src/DeepGPR/lib/libomp.dylib
-codesign --force --sign - src/DeepGPR/lib/deepgpr_cpu.dylib
-```
-
-On Windows, build `src\DeepGPR\lib\deepgpr_cpu.dll` with MSVC:
-
-```powershell
-cl /LD /O2 /openmp /Fe:src\DeepGPR\lib\deepgpr_cpu.dll src\DeepGPR\lib\deepgpr_cpu.c
-```
-
-### 5. Field Variable States (Checkpoints / Initial Fields)
-
-For starting a forward simulation from scratch ($t=0$), these three parameters should be passed as `None` (the system will automatically initialize zero-tensors).
-
-| Parameter | Data Type | Shape | Description |
-| :--- | :--- | :--- | :--- |
-| **`E`** | `tuple` / `None` | 3 Tensors | Initial state of the electric field components `(Ex, Ey, Ez)`. Each tensor shape is `(nstep, Nx+1, Ny+1, Nz+1)`, including external PML and the Yee field halo. |
-| **`H`** | `tuple` / `None` | 3 Tensors | Initial state of the magnetic field components `(Hx, Hy, Hz)`. Shapes identical to `E`. |
-| **`PML`** | `tuple` / `None` | 24 Tensors | Auxiliary state variables ($\Phi$ fields) for the PML boundary updates. |
-
-`checkpoint_initial_field` accepts the same unextended physical model and PML settings and allocates matching full-grid states. Pass returned `E`, `H`, and all 24 `PML` tensors back unchanged in shape. The solver only extends materials; it never pads checkpoint states again. Continuation requires identical model geometry, PML settings, and shot ordering, with consistent materials, grid spacing, and time step for that trajectory.
-
-The native solver advances input states in place. When a state is retained for PyTorch checkpoint recomputation or reused in another branch, clone every tensor before passing it to `compute`:
-
-```python
-# Inside a checkpointed segment; boundary contains E, H, then all 24 PML states.
-work = tuple(t.clone() for t in boundary)
-result = DeepGPR.compute(
-    device=device, dx=dx, dt=dt,
-    eps_r=eps_r, sigma=sigma,  # physical model on every segment
-    source_amplitudes=segment_source,
-    source_location=source_location, receiver_location=receiver_location,
-    pmlthick=pmlthick, E=work[:3], H=work[3:6], PML=work[6:],
-)
-return (*result[1], *result[2], *result[3], result[-1])
-```
-
-Keep material values fixed throughout one segmented trajectory and its backward pass. After the FWI optimizer step, start the next forward simulation from zero or from an initial state appropriate to that new model. See [the checkpoint example](tests/checkpoint_example.ipynb).
-
----
-
-## 📤 Return Values
-
-The function returns a tuple of 5 elements. These are used to extract synthetic data, initiate the gradient flow for backpropagation, or serve as initial parameters (`E`, `H`, `PML`) for subsequent time-stepped calculations.
-
-```python
-return E_saved, (Ex, Ey, Ez), (Hx, Hy, Hz), (x0EPhi1...zmHPhi2), receiver_amplitudes
-```
-
-1.  **`E_saved`**: The pre-update electric field history `E^n` saved for gradient calculation and diagnostics. An internal `R_saved` tensor stores the corresponding discrete right-hand side `R^n`.
-    *   With `save_wavefield_history=False`, `E_saved` is a zero-length tensor and neither E nor R history storage/compression kernels are launched.
-    *   **Shape when `mode=2`**: `(nt_saved, nstep, Nx, Ny, Nz)`, storing Ez only.
-    *   **Shape when `mode=3`**: `(3, nt_saved, nstep, Nx, Ny, Nz)`, storing components in `[Ex, Ey, Ez]` order.
-    *   `Nx`, `Ny`, `Nz` include external PML. Histories, saved files, and full E/H/PML states keep that grid; only material gradients are cropped. To plot a physical history, slice spatial axes with `[px0:px0+nx, py0:py0+ny, pz0:pz0+nz]`. Memory estimates use the extended grid.
-    *   `nt_saved` depends on `nt` and `model_gradient_sampling_interval`.
-    *   Dtype is selected by `wavefield_storage_dtype` when compression is disabled. With `wavefield_compression="int8"`, this is an opaque packed one-dimensional `torch.int8` tensor containing values and FP32 scales.
-    *   Set `save_forward_wavefield_path="/path/to/output"` to save a CPU-loadable `.pt` file. Uncompressed modes save the tensor directly. INT8 mode saves a dictionary containing `wavefield`, `compression`, `block_size`, and `uncompressed_shape` so diagnostics can reconstruct it safely.
-2.  **`(Ex, Ey, Ez)`**: The 3D electric field state at the final time step. 
-3.  **`(Hx, Hy, Hz)`**: The 3D magnetic field state at the final time step.
-4.  **`(PML_Tuple)`**: A tuple of 24 Tensors recording the final time step state of the PML auxiliary $\Phi$ variables.
-5.  **`receiver_amplitudes`**: **The core output.** The waveform signals recorded by the receivers over the entire simulation time.
-    *   **Shape**: `(nstep, nt, nrx)`
-    *   **Meaning**: `[Shot Index, Time Step, Receiver Index]`. This output is sliced to the component specified by `receiver_component` (or its deprecated alias `reciever_direction`).
-
-
-## Tests and Verification
-
-Fast unit tests and the complete numerical verification notebooks are kept in
-the single [`tests`](tests) directory:
-
-```bash
-python -m unittest discover -s tests -p "test_*.py"
+python -m unittest discover -s tests -p "test_*.py"     # unit tests
+python -m unittest tests/test_native_abi.py             # ABI check, no PyTorch needed
 python tests/run_notebook.py tests/00_local_backend_and_contracts.ipynb
+python tools/verify_equivalence.py --reference-src /path/to/DeepGPR-0.0.20/src/DeepGPR
+bash tools/run_local_validation.sh /path/to/DeepGPR-0.0.20   # rebuild CPU+CUDA libs, run everything
 ```
 
-Run notebooks `00` through `09` in numeric order, followed by
+Run the notebooks `00` to `09` in numeric order, followed by
 `99_verification_summary.ipynb`. See [`tests/README.md`](tests/README.md) for
-the complete matrix and CUDA verification options.
+the complete matrix and CUDA options.
 
-# Cite information
-If you find our codes useful, please kindly cite this article. Thanks.
+**Reproducibility.** The CPU backend gives bitwise identical forward results
+and gradients for any `OMP_NUM_THREADS`. The CUDA adjoint accumulates with
+atomics and can differ in the last bits between runs.
 
+**Reproducing results from DeepGPR ≤ 0.0.20.** 0.1.0 corrects the FIR design
+for even filter lengths, the envelope for odd trace lengths and the isotropic
+TV (see [`CHANGELOG.md`](CHANGELOG.md)). Use `apply_filter(..., legacy=True)`,
+`design_fir_filter(..., legacy=True)`, `hilbert_transform(..., legacy=True)`
+and `TVRegularization(method="legacy_isotropic")` to reproduce earlier numbers.
+
+## Development
+
+- Code style: PEP 8, enforced with `ruff check src/DeepGPR tools` (configuration in `pyproject.toml`).
+- Type hints throughout; `mypy` configuration in `pyproject.toml`.
+- Changes are recorded in [`CHANGELOG.md`](CHANGELOG.md); known issues and recommended native work in [`docs/AUDIT.md`](docs/AUDIT.md).
+- Changes to `lib/deepgpr.h` must be mirrored in `src/DeepGPR/native/abi.py`; `tests/test_native_abi.py` enforces it.
+
+## Citation
+
+If you find our code useful, please cite:
+
+```bibtex
 @article{liu2026fast,
-
-  title={Fast ground penetrating radar dual-parameter full waveform inversion method accelerated by hybrid compilation of CUDA kernel function and PyTorch},
-
-  author={Liu, Lei and Song, Chao and He, Liangsheng and Wang, Silin and Feng, Xuan and Liu, Cai},
-  journal={Computers \& Geosciences},
-
-  pages={106101},
-
-  year={2026},
-
-  publisher={Elsevier}
-
+  title     = {Fast ground penetrating radar dual-parameter full waveform inversion method accelerated by hybrid compilation of CUDA kernel function and PyTorch},
+  author    = {Liu, Lei and Song, Chao and He, Liangsheng and Wang, Silin and Feng, Xuan and Liu, Cai},
+  journal   = {Computers \& Geosciences},
+  pages     = {106101},
+  year      = {2026},
+  publisher = {Elsevier}
 }
+```
+
+## License
+
+MIT — see [`license`](license).

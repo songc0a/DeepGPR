@@ -10,18 +10,15 @@ history, committed, merged with the latest `main`, rebuilt, tested, benchmarked,
 fast-forwarded into `main`, and pushed without force.
 
 The validated functional commit pushed to `origin/main` is
-`0e55cf68dd210b21c3149b88dbf66b18a0029e5f`. This report is delivered by a
-follow-up documentation-only fast-forward commit; that follow-up does not alter
-the validated source, binaries, tests, or benchmark results.
+`0e55cf68dd210b21c3149b88dbf66b18a0029e5f`. The results below refer to this
+commit.
 
 ## Required recovery and Git facts
 
-1. **Did the original directory have `.git`?** No usable Git metadata existed.
-   Before recovery, Git reported `fatal: not a git repository`. The desktop
-   environment later exposed an empty, read-only `.git` placeholder, but the
-   escalated host view and the backup contained no `.git` directory.
+1. **Original Git metadata:** The downloaded snapshot contained no usable Git
+   metadata. Before recovery, Git reported `fatal: not a git repository`.
 2. **File-level backup:**
-   `/home/ll/下载/DeepGPR-dev-before-git-20260827-153548` (152 MiB).
+   `DeepGPR-dev-before-git-20260827-153548` (152 MiB).
 3. **Official remote URL:** `git@github.com:songc0a/DeepGPR.git` for fetch and
    push.
 4. **Recovered local `dev` HEAD:**
@@ -30,9 +27,9 @@ the validated source, binaries, tests, or benchmark results.
    `f71ff24c52e7b23b26ebd5ec6512ab2551f8cbbc`; it exactly matched recovered
    `dev` HEAD before local changes were committed.
 6. **File identity before/after Git recovery:** Exact for project files.
-   `diff -qr` was empty after excluding `.git` and the app-injected empty
-   `.agents/.codex` placeholders. Git initialization and `reset --mixed` did
-   not alter any protected file.
+   A recursive comparison found no differences in project files after
+   excluding repository metadata and empty local configuration directories.
+   Git initialization and `reset --mixed` did not alter any protected file.
 7. **Changes relative to `origin/dev` before the first commit:**
    - Modified: `README.md`, `src/DeepGPR/__init__.py`,
      `src/DeepGPR/compute2.py`, `src/DeepGPR/lib/deepgpr.cu`,
@@ -118,7 +115,7 @@ the validated source, binaries, tests, or benchmark results.
 Both sides used `nx=512`, `ny=384`, `nt=1200`, four shots, 64 receivers,
 sampling interval 1, five warmups, 20 measured repeats, and CUDA Event timing.
 The loaded library was
-`/home/ll/下载/DeepGPR-dev/src/DeepGPR/lib/deepgpr.so`.
+`src/DeepGPR/lib/deepgpr.so`.
 
 19. **Before merge:**
 
@@ -165,15 +162,11 @@ FP32 remained exactly equal.
     no ordinary merge commit was created on main.
 26. **Validated main/dev SHA:** At the functional validation and first push,
     local `main`, local `dev`, and `origin/main` all equaled
-    `0e55cf68dd210b21c3149b88dbf66b18a0029e5f`. The report-only delivery commit
-    advances both local branches together; its exact SHA is reported by the
-    final `git rev-parse main dev` handoff output.
+    `0e55cf68dd210b21c3149b88dbf66b18a0029e5f`.
 27. **Push status:** Successful, normal non-force push:
     `de581f7..0e55cf6  main -> main`. No force or force-with-lease was used.
 28. **Final status at functional push:** Clean on main; raw profiler captures
-    are ignored and retained locally. After this document is committed, the
-    report-only follow-up is fast-forwarded to main and pushed normally, with
-    final status rechecked in the handoff.
+    are ignored and retained locally.
 
 The local `dev` branch and `backup/dev-before-main-merge-f7e42ce` branch are
 retained. The remote `dev` branch was not modified or deleted.

@@ -12,6 +12,18 @@ Run the fast terminal suite with:
 python -m unittest discover -s tests -p "test_*.py"
 ```
 
+`test_native_abi.py` parses `src/DeepGPR/lib/deepgpr.h` and checks that the
+Python ABI table (`DeepGPR/native/abi.py`) lists every exported function with
+identical parameter names, types and order; it also covers argument
+marshalling, the FDTD-order gate and CPU library configuration. It needs
+neither PyTorch nor a GPU.
+
+`test_cpu_determinism.py` runs the same forward/backward problems with 1, 2
+and 5 OpenMP threads in separate processes and requires bitwise identical
+results (the CPU adjoint has no atomics since 0.1.0).
+`test_signal_and_regularization.py` checks the FIR design, the analytic-signal
+envelope and the TV variants against independent NumPy implementations.
+
 `test_discrete_adjoint.py` contains the strict reverse-mode checks for weighted
 curl operators, native field updates, all-face CPML state transposes, source
 waveform gradients, material Taylor tests, incomplete temporal sampling, and

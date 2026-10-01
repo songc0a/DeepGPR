@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "DeepGPR"
-version = "0.0.20"
+dynamic = ["version"]
 authors = [
     { name = "Lei Liu", email = "liulei990222@gmail.com" }
 ]
@@ -13,36 +13,47 @@ readme = "README.md"
 license = "MIT"
 license-files = ["license"]
 requires-python = ">=3.8"
-
+keywords = ["ground penetrating radar", "GPR", "FDTD", "full waveform inversion", "PyTorch", "CUDA"]
 classifiers = [
     "Programming Language :: Python :: 3",
     "Operating System :: Microsoft :: Windows",
     "Operating System :: POSIX :: Linux",
     "Operating System :: MacOS :: MacOS X",
     "Topic :: Scientific/Engineering",
-    "Topic :: Scientific/Engineering :: Physics"
+    "Topic :: Scientific/Engineering :: Physics",
+    "Typing :: Typed",
 ]
-
 dependencies = [
     "numpy",
-    "scipy",
     "matplotlib",
-    "torch"
+    "torch",
 ]
+
+[project.optional-dependencies]
+# scipy was listed as a core dependency before 0.1.0 but is not imported by
+# the package; keep it installable for downstream scripts that relied on it.
+examples = ["scipy", "scikit-image", "jupyter"]
+dev = ["ruff>=0.5", "mypy>=1.8", "pytest>=7", "nbformat", "nbclient"]
 
 [project.urls]
 Homepage = "https://github.com/songc0a/DeepGPR"
 Repository = "https://github.com/songc0a/DeepGPR"
+Documentation = "https://songc0a.github.io/DeepGPR/"
+Changelog = "https://github.com/songc0a/DeepGPR/blob/main/CHANGELOG.md"
 
 [tool.setuptools]
 package-dir = { "" = "src" }
 include-package-data = true
+
+[tool.setuptools.dynamic]
+version = { attr = "DeepGPR._version.__version__" }
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
 DeepGPR = [
+    "py.typed",
     "lib/*.cu",
     "lib/*.cuh",
     "lib/*.h",
@@ -52,12 +63,46 @@ DeepGPR = [
     "lib/*.dll",
     "lib/*.so",
     "lib/*.dylib",
-    "lib/*.pyd"
+    "lib/*.pyd",
 ]
 
 [tool.setuptools.exclude-package-data]
 DeepGPR = [
     ".DS_Store",
     "__pycache__/*",
-    "*.pyc"
+    "*.pyc",
 ]
+
+# --------------------------------------------------------------------- tooling
+[tool.ruff]
+line-length = 100
+target-version = "py38"
+src = ["src", "tests", "tools"]
+extend-exclude = ["tests/*.ipynb", "examples", "website", "scripts"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "UP", "SIM", "C4"]
+ignore = [
+    "E501",   # long strings in error messages and tables
+    "UP006",  # keep typing.Dict/Tuple for Python 3.8
+    "UP007",
+    "UP035",
+    "UP045",
+    "C408",   # dict(...) keyword construction is clearer for option sets
+]
+
+[tool.ruff.lint.per-file-ignores]
+"src/DeepGPR/common.py" = ["N811"]
+"tests/*" = ["B", "SIM", "UP", "C4", "E402", "E731", "E741", "F401", "F841"]
+
+[tool.mypy]
+python_version = "3.9"
+files = ["src/DeepGPR"]
+ignore_missing_imports = true
+warn_unused_ignores = false
+no_implicit_optional = true
+check_untyped_defs = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
