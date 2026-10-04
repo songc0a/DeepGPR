@@ -278,3 +278,73 @@ agreement). Changed: `test_numerics.test_cuda_async_memory_estimate_splits_host_
 now expects the host peak to exclude the device-resident final frame
 (`saved_gradient_wavefields - final_e_frame`); exact equality is kept. Full
 suite: 125 tests, all passed (1 skipped, two-GPU test).
+
+## 3. Physical-region history (`wavefield_history_region`)
+
+**Default:** no (`"extended"` stays the default as requested); `"physical"` is
+opt-in.
+
+### Implementation
+
+- Native flag `WAVEFIELD_PHYSICAL_HISTORY` (`storage_type` bit 5) and probe
+  `deepgpr_supports_physical_history` (CPU and CUDA). All snapshot kernels
+  (E, R, vec2 variants, INT8 quantizers, the E-only final frame) and all
+  material-gradient kernels take a `HistoryBox` (origin and extent in compact
+  cell coordinates). The gradient kernels now launch over the history box and
+  map back to the extended material/gradient index; the CPML skip test is kept
+  for the extended box. Staging buffers, `exact_Eold`, async transfers and the
+  INT8 scale layout all use the box size.
+- INT8: tiles are formed on the box. A box starting at the physical origin
+  changes which cells share a tile (and its scale). That changed the 3D
+  benchmark INT8 gradient error from 7.1e-3 / 3.2e-2 to **7.6e-2 / 0.37**
+  (ε / σ, cosine 0.93), i.e. not the same order of magnitude. A PML sweep
+  showed this is the existing INT8 sensitivity to tile alignment, not a defect
+  of the physical box: with `pml % 4 == 0` the extended history has the same
+  tiling and the same 3.4e-2 / 0.21 error, with other offsets 4e-3 to 7e-3
+  (3D 32^3, source/receivers two to five cells below the top face). The
+  physical INT8 box is therefore widened to whole tiles of the full-grid
+  tiling (origin rounded down, end rounded up and clamped), so every tile and
+  scale is identical to the extended history; decoded physical values are
+  bitwise equal and gradients unchanged. Non-INT8 storage uses the exact
+  physical box.
+- Python: option, `SolverConfig.history_region`, `storage.history_box` /
+  `history_spatial_shape` (mirror of `history_box_host`), memory estimate
+  (`history_region`, `history_shape` entry), `print_parameters` line, saved file
+  metadata (`history_region`, `history_origin`, `pmlthick`,
+  `uncompressed_shape`; extended histories keep the old format).
+
+### Correctness
+
+| check | result |
+|---|---|
+| CPU fp32 (E-only and E+R), fp16, bf16 (E-only), 2D two shots / 3D, asymmetric CPML on every face | receiver data and ε/σ gradients **bitwise identical** to `"extended"`; physical `E_saved` equals the cropped extended `E_saved` bitwise |
+| CUDA same set, with and without async offload | data and `E_saved` crop bitwise; gradients within atomic noise (< 2e-6 relative bound; measured 1-5e-7) |
+| CUDA INT8, 2D/3D, E+R and E-only | decoded physical history equals the extended decode cropped to the box bitwise; gradients within atomic noise |
+| benchmark, physical vs baseline | 2D/3D receiver data bitwise for every mode; gradients 1.1-4.3e-7 (ε) and 1.3e-7 / 0.7-1.3e-5 (σ, 2D / 3D) relative, the same as baseline run-to-run noise |
+| history memory | 2D fp32 8571 → 3603 MiB (E-only x 512·384/552·424 = 0.420), fp16 4286 → 3600 (0.840), int8 2277 → 1983 (0.871, tile-widened box 520x392); 3D fp32 11444 → 2936 (0.257), fp16 5722 → 2930 (0.512), int8 3040 → 1802 (0.593, box 84^3) |
+
+### Performance (formal protocol, current tree with `wavefield_history_region="physical"` vs baseline, two interleaved rounds)
+
+Raw: `history_adjoint_ab/item3_*`. Changes are relative to the baseline, so
+the fp32 rows include item 2.
+
+| case | mode | total ms base → physical (b1; b2) | change |
+|---|---|---|---:|
+| 2D full | fp32 | 237.09 → 211.55; 237.32 → 214.72 | -10.8 % / -9.5 % |
+| 2D full | fp16 | 231.40 → 215.08; 230.37 → 224.11 | -7.1 % / -2.7 % |
+| 2D full | bf16 | 231.76 → 222.46; 229.71 → 225.57 | -4.0 % / -1.8 % |
+| 2D full | int8 | 252.47 → 240.10; 254.90 → 254.05 | -4.9 % / -0.3 % |
+| 3D full | fp32 | 335.18 → 132.70; 339.41 → 133.51 | -60.4 % / -60.7 % |
+| 3D full | fp16 | 170.57 → 145.50; 170.38 → 142.80 | -14.7 % / -16.2 % |
+| 3D full | bf16 | 169.78 → 146.42; 170.82 → 143.16 | -13.8 % / -16.2 % |
+| 3D full | int8 | 208.07 → 167.62; 209.08 → 162.18 | -19.4 % / -22.4 % |
+
+The 3D forward gains (fp16 -27 %, int8 -30 %) come mostly from the smaller
+history allocation and fewer snapshot/quantize cells; backward changes are
+within ±3 % except 3D INT8 (-3 %/-8 %), consistent with the gradient kernel
+covering 84^3 instead of 100^3 tiles.
+
+### Tests
+
+New `tests/test_history_region.py` (7 tests). Full suite: 132 tests, all
+passed (1 skipped).

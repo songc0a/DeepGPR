@@ -25,6 +25,7 @@ from ..config.defaults import (
     DEFAULT_RECEIVER_COMPONENT,
     DEFAULT_SOURCE_COMPONENT,
     DEFAULT_WAVEFIELD_COMPRESSION,
+    DEFAULT_WAVEFIELD_HISTORY_REGION,
     DEFAULT_WAVEFIELD_RHS_HISTORY,
 )
 from ..postprocessing.io import normalize_forward_wavefield_directory, save_forward_wavefield
@@ -40,10 +41,12 @@ from .pml import build_pml_coeffs, build_pml_phi
 from .sampling import AUTO_SAMPLING_INTERVAL, recommended_sampling_interval, source_max_frequency
 from .storage import (
     WavefieldStorageConfig,
+    history_box,
     normalize_compression_block_size,
     normalize_int8_reduction_backend,
     normalize_wavefield_compression,
     normalize_wavefield_conversion_backend,
+    normalize_wavefield_history_region,
     normalize_wavefield_rhs_history,
     normalize_wavefield_storage_dtype,
     resolve_rhs_reconstruction,
@@ -255,6 +258,7 @@ def compute(
     int8_reduction_backend=DEFAULT_INT8_REDUCTION_BACKEND,
     wavefield_compression_rate=None,
     wavefield_rhs_history=DEFAULT_WAVEFIELD_RHS_HISTORY,
+    wavefield_history_region=DEFAULT_WAVEFIELD_HISTORY_REGION,
 ):
     """Run 2D/3D FDTD forward modelling of Maxwell's equations with autograd.
 
@@ -322,6 +326,11 @@ def compute(
             histories keep the E+R pair. ``"stored"`` always keeps E+R;
             ``"reconstructed"`` requests the E-only history for any storage
             (sampling interval 1).
+        wavefield_history_region: ``"extended"`` (default) saves histories on
+            the whole grid including CPML; ``"physical"`` saves only the
+            physical model cells (``E_saved`` then has the physical spatial
+            shape). Material gradients never use CPML cells, so they are
+            unchanged (INT8 tiles start at the physical origin instead).
 
     Returns:
         ``(E_saved, (Ex, Ey, Ez), (Hx, Hy, Hz), PML, receiver_amplitudes)``
@@ -374,6 +383,7 @@ def compute(
         output_directory is not None,
     )
     wavefield_rhs_history = normalize_wavefield_rhs_history(wavefield_rhs_history)
+    wavefield_history_region = normalize_wavefield_history_region(wavefield_history_region)
     if source_direction not in FIELD_COMPONENTS or receiver_component not in FIELD_COMPONENTS:
         raise ValueError("source_direction and receiver_component must be 0, 1, or 2.")
     if getattr(mu_r, "requires_grad", False):
@@ -485,6 +495,7 @@ def compute(
                 wavefield_compression_block_size=compression_block_size,
                 save_wavefield_history=save_wavefield_history,
                 reconstruct_rhs=reconstruct_rhs,
+                history_region=wavefield_history_region,
                 use_async_offload=use_async_offload,
                 fdtd_order=fdtd_order,
                 mode=mode,
@@ -535,6 +546,7 @@ def compute(
         mode=mode,
         debug=bool(debug),
         reconstruct_rhs=reconstruct_rhs,
+        history_region=wavefield_history_region,
     )
     tensors = SolverTensors(
         mu_r_pad=mu_r_pad,
@@ -568,13 +580,27 @@ def compute(
 
     if output_directory is not None:
         metadata = None
+        nt_saved = saved_time_steps(nt, model_gradient_sampling_interval)
+        history_origin, history_cells = history_box(
+            nx, ny, nz, config.pml, wavefield_history_region, compression_block_size
+        )
+        uncompressed_shape = saved_history_shape(mode, nt_saved, nstep, *history_cells)
         if save_wavefield_history and wavefield_compression == "int8":
-            nt_saved = saved_time_steps(nt, model_gradient_sampling_interval)
             metadata = {
                 "compression": "int8",
                 "block_size": compression_block_size,
-                "uncompressed_shape": saved_history_shape(mode, nt_saved, nstep, nx, ny, nz),
+                "uncompressed_shape": uncompressed_shape,
             }
+        if wavefield_history_region == "physical":
+            # The bare-tensor format is kept for full-grid histories; physical
+            # histories record which cells they cover.
+            metadata = dict(metadata or {})
+            metadata.update(
+                history_region="physical",
+                history_origin=history_origin,
+                pmlthick=config.pml,
+                uncompressed_shape=uncompressed_shape,
+            )
         save_forward_wavefield(e_saved, output_directory, run_time, metadata=metadata)
 
     return (

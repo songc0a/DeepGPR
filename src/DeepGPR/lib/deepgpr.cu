@@ -73,6 +73,7 @@ enum {
 enum {
     WAVEFIELD_KIND_MASK = 0x0f,
     WAVEFIELD_RHS_FROM_E = 1 << 4,
+    WAVEFIELD_PHYSICAL_HISTORY = 1 << 5,
     INT8_BLOCK_X_SHIFT = 8,
     INT8_BLOCK_Y_SHIFT = 14,
     INT8_BLOCK_Z_SHIFT = 20,
@@ -293,6 +294,46 @@ __device__ __forceinline__ float2 load_wavefield_pair_native_device(
 }
 
 #define CEIL_DIV(x,y) (((x)+(y)-1)/(y))
+
+/*
+ * Cells covered by a saved history frame, in compact cell coordinates of the
+ * extended grid (0 .. N - 2 per axis): the whole grid, or only the physical
+ * model with WAVEFIELD_PHYSICAL_HISTORY. Frames store the box z-fastest.
+ * With INT8 tiles (bx, by, bz) the physical box is widened to whole tiles of
+ * the full-grid tiling, so every tile - including the CPML cells that enter
+ * its scale - is exactly the tile the extended history would have used.
+ */
+struct HistoryBox {
+    int x0, y0, z0;
+    int nx, ny, nz;
+};
+
+static void history_axis_host(int physical, int cells, int low, int high, int tile,
+                              int* origin, int* extent)
+{
+    if (!physical) {
+        *origin = 0;
+        *extent = cells;
+        return;
+    }
+    int begin = (low / tile) * tile;
+    int end = ((cells - high + tile - 1) / tile) * tile;
+    if (end > cells) end = cells;
+    *origin = begin;
+    *extent = end - begin;
+}
+
+static HistoryBox history_box_host(
+    int physical, int NX, int NY, int NZ,
+    int pml0, int pml1, int pml2, int pml3, int pml4, int pml5,
+    int bx, int by, int bz)
+{
+    HistoryBox box;
+    history_axis_host(physical, NX - 1, pml0, pml1, bx, &box.x0, &box.nx);
+    history_axis_host(physical, NY - 1, pml2, pml3, by, &box.y0, &box.ny);
+    history_axis_host(physical, NZ - 1, pml4, pml5, bz, &box.z0, &box.nz);
+    return box;
+}
 
 #define CUDA_CHECK(call) do { \
     cudaError_t err__ = (call); \
@@ -664,6 +705,15 @@ DEEPGPR_API int deepgpr_supports_int8_reduction_backends(void)
  * final E^nt frame is written to the R_saved buffer (one frame per component).
  */
 DEEPGPR_API int deepgpr_supports_rhs_reconstruction(void)
+{
+    return 1;
+}
+
+/*
+ * WAVEFIELD_PHYSICAL_HISTORY: E/R histories (and the final E frame) cover only
+ * the physical model cells, i.e. the extended grid without the CPML faces.
+ */
+DEEPGPR_API int deepgpr_supports_physical_history(void)
 {
     return 1;
 }
@@ -1879,20 +1929,20 @@ template<int STORAGE_TYPE, int CONVERSION_BACKEND>
 __global__ void save_e_snapshot_gpu(
     void* __restrict__ dst_ptr, int t_idx, const float* __restrict__ E,
     float* __restrict__ exact_Eold,
-    int step, int NX, int NY, int NZ)
+    int step, int NX, int NY, int NZ, HistoryBox box)
 {
-    long long nx1 = NX - 1, ny1 = NY - 1, nz1 = NZ - 1;
-    long long total = nx1 * ny1 * nz1;
+    long long ny1 = box.ny, nz1 = box.nz;
+    long long total = (long long)box.nx * ny1 * nz1;
     long long work = (long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (work >= (long long)step * total) return;
 
     int s = (int)(work / total);
     long long idx = work % total;
 
-    long long i = idx / (ny1 * nz1);
+    long long i = idx / (ny1 * nz1) + box.x0;
     long long rem = idx % (ny1 * nz1);
-    long long j = rem / nz1;
-    long long k = rem % nz1;
+    long long j = rem / nz1 + box.y0;
+    long long k = rem % nz1 + box.z0;
 
     long long field_stride = (long long)NX * NY * NZ;
     long long src_idx = (long long)s * field_stride + i * NY * NZ + j * NZ + k;
@@ -1912,19 +1962,19 @@ __global__ void save_rhs_snapshot_gpu(
     const float* __restrict__ E, const void* __restrict__ Eold_ptr,
     const float* __restrict__ exact_Eold,
     const float* __restrict__ ca, const float* __restrict__ cb,
-    int step, int NX, int NY, int NZ)
+    int step, int NX, int NY, int NZ, HistoryBox box)
 {
-    long long nx1 = NX - 1, ny1 = NY - 1, nz1 = NZ - 1;
-    long long total = nx1 * ny1 * nz1;
+    long long ny1 = box.ny, nz1 = box.nz;
+    long long total = (long long)box.nx * ny1 * nz1;
     long long work = (long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (work >= (long long)step * total) return;
 
     int s = (int)(work / total);
     long long idx = work % total;
-    long long i = idx / (ny1 * nz1);
+    long long i = idx / (ny1 * nz1) + box.x0;
     long long rem = idx % (ny1 * nz1);
-    long long j = rem / nz1;
-    long long k = rem % nz1;
+    long long j = rem / nz1 + box.y0;
+    long long k = rem % nz1 + box.z0;
     long long material_idx = i * NY * NZ + j * NZ + k;
     long long field_idx = (long long)s * NX * NY * NZ + material_idx;
     long long snap_stride = (long long)step * total;
@@ -1942,16 +1992,16 @@ __global__ void save_rhs_snapshot_gpu(
 
 
 __device__ __forceinline__ void compact_snapshot_indices(
-    long long work, long long total, int NX, int NY, int NZ,
+    long long work, long long total, int NX, int NY, int NZ, HistoryBox box,
     long long* field_idx, long long* material_idx)
 {
-    long long ny1 = NY - 1, nz1 = NZ - 1;
+    long long ny1 = box.ny, nz1 = box.nz;
     int shot = (int)(work / total);
     long long idx = work % total;
-    long long i = idx / (ny1 * nz1);
+    long long i = idx / (ny1 * nz1) + box.x0;
     long long remainder = idx % (ny1 * nz1);
-    long long j = remainder / nz1;
-    long long k = remainder % nz1;
+    long long j = remainder / nz1 + box.y0;
+    long long k = remainder % nz1 + box.z0;
     *material_idx = i * NY * NZ + j * NZ + k;
     *field_idx = (long long)shot * NX * NY * NZ + *material_idx;
 }
@@ -1961,22 +2011,22 @@ template<int STORAGE_TYPE>
 __global__ void save_e_snapshot_vec2_gpu(
     void* __restrict__ dst_ptr, int t_idx, const float* __restrict__ E,
     float* __restrict__ exact_Eold,
-    int step, int NX, int NY, int NZ)
+    int step, int NX, int NY, int NZ, HistoryBox box)
 {
-    long long total = (long long)(NX - 1) * (NY - 1) * (NZ - 1);
+    long long total = (long long)box.nx * box.ny * box.nz;
     long long count = (long long)step * total;
     long long work = 2LL * ((long long)blockIdx.x * blockDim.x + threadIdx.x);
     if (work >= count) return;
 
     long long field0, material0;
-    compact_snapshot_indices(work, total, NX, NY, NZ, &field0, &material0);
+    compact_snapshot_indices(work, total, NX, NY, NZ, box, &field0, &material0);
     float value0 = E[field0];
     if (exact_Eold != nullptr) exact_Eold[work] = value0;
     long long dst_idx = (long long)t_idx * count + work;
 
     if (work + 1 < count) {
         long long field1, material1;
-        compact_snapshot_indices(work + 1, total, NX, NY, NZ, &field1, &material1);
+        compact_snapshot_indices(work + 1, total, NX, NY, NZ, box, &field1, &material1);
         float value1 = E[field1];
         if (exact_Eold != nullptr) exact_Eold[work + 1] = value1;
         uintptr_t address = (uintptr_t)((unsigned short*)dst_ptr + dst_idx);
@@ -2002,15 +2052,15 @@ __global__ void save_rhs_snapshot_vec2_gpu(
     const float* __restrict__ E, const void* __restrict__,
     const float* __restrict__ exact_Eold,
     const float* __restrict__ ca, const float* __restrict__ cb,
-    int step, int NX, int NY, int NZ)
+    int step, int NX, int NY, int NZ, HistoryBox box)
 {
-    long long total = (long long)(NX - 1) * (NY - 1) * (NZ - 1);
+    long long total = (long long)box.nx * box.ny * box.nz;
     long long count = (long long)step * total;
     long long work = 2LL * ((long long)blockIdx.x * blockDim.x + threadIdx.x);
     if (work >= count) return;
 
     long long field0, material0;
-    compact_snapshot_indices(work, total, NX, NY, NZ, &field0, &material0);
+    compact_snapshot_indices(work, total, NX, NY, NZ, box, &field0, &material0);
     float cb0 = cb[material0];
     float value0 = cb0 != 0.0f
         ? (E[field0] - ca[material0] * exact_Eold[work]) / cb0
@@ -2019,7 +2069,7 @@ __global__ void save_rhs_snapshot_vec2_gpu(
 
     if (work + 1 < count) {
         long long field1, material1;
-        compact_snapshot_indices(work + 1, total, NX, NY, NZ, &field1, &material1);
+        compact_snapshot_indices(work + 1, total, NX, NY, NZ, box, &field1, &material1);
         float cb1 = cb[material1];
         float value1 = cb1 != 0.0f
             ? (E[field1] - ca[material1] * exact_Eold[work + 1]) / cb1
@@ -2110,10 +2160,10 @@ __global__ void quantize_e_int8_snapshot_gpu(
     void* __restrict__ packed, int t_idx, int component,
     const float* __restrict__ E, float* __restrict__ exact_Eold,
     int step, int NX, int NY, int NZ, int nt_saved, int components,
-    int bx, int by, int bz)
+    int bx, int by, int bz, HistoryBox box)
 {
     extern __shared__ float reduction[];
-    long long sx = NX - 1, sy = NY - 1, sz = NZ - 1;
+    long long sx = box.nx, sy = box.ny, sz = box.nz;
     long long total_cells = sx * sy * sz;
     long long snap_stride = (long long)step * total_cells;
     long long component_stride = (long long)nt_saved * snap_stride;
@@ -2141,7 +2191,8 @@ __global__ void quantize_e_int8_snapshot_gpu(
 
     long long idx = valid ? ix * sy * sz + iy * sz + iz : 0;
     long long field_idx = valid
-        ? (long long)shot * NX * NY * NZ + ix * NY * NZ + iy * NZ + iz
+        ? (long long)shot * NX * NY * NZ + (ix + box.x0) * NY * NZ
+            + (iy + box.y0) * NZ + (iz + box.z0)
         : 0;
     float value = valid ? E[field_idx] : 0.0f;
     if (valid && exact_Eold != nullptr) {
@@ -2181,10 +2232,10 @@ __global__ void quantize_rhs_int8_snapshot_gpu(
     const float* __restrict__ E, const float* __restrict__ exact_Eold,
     const float* __restrict__ ca, const float* __restrict__ cb,
     int step, int NX, int NY, int NZ, int nt_saved, int components,
-    int bx, int by, int bz)
+    int bx, int by, int bz, HistoryBox box)
 {
     extern __shared__ float reduction[];
-    long long sx = NX - 1, sy = NY - 1, sz = NZ - 1;
+    long long sx = box.nx, sy = box.ny, sz = box.nz;
     long long total_cells = sx * sy * sz;
     long long snap_stride = (long long)step * total_cells;
     long long component_stride = (long long)nt_saved * snap_stride;
@@ -2211,7 +2262,8 @@ __global__ void quantize_rhs_int8_snapshot_gpu(
     bool valid = shot < step && ix < sx && iy < sy && iz < sz;
 
     long long idx = valid ? ix * sy * sz + iy * sz + iz : 0;
-    long long material_idx = valid ? ix * NY * NZ + iy * NZ + iz : 0;
+    long long material_idx = valid
+        ? (ix + box.x0) * NY * NZ + (iy + box.y0) * NZ + (iz + box.z0) : 0;
     long long field_idx = valid
         ? (long long)shot * NX * NY * NZ + material_idx
         : 0;
@@ -2285,19 +2337,21 @@ __global__ void accumulate_material_gradients_gpu(
     int step, int NX, int NY, int NZ,
     int pml0, int pml1, int pml2, int pml3, int pml4, int pml5,
     float dt, int eps_r_requires_grad, int sigma_requires_grad,
-    int sample_weight, int fwi_mode
+    int sample_weight, int fwi_mode, HistoryBox box
 ) {
     long long sx = (NX - 1), sy = (NY - 1), sz = (NZ - 1);
-    long long total_cells = sx * sy * sz;
+    long long hy = box.ny, hz = box.nz;
+    long long total_cells = (long long)box.nx * hy * hz;
     int components = (fwi_mode == 3) ? 3 : 1;
-    long long idx = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    long long history_idx = (long long)blockIdx.x * blockDim.x + threadIdx.x;
 
-    if (idx >= total_cells) return;
+    if (history_idx >= total_cells) return;
 
-    long long ix = idx / (sy * sz);
-    long long rem = idx % (sy * sz);
-    long long iy = rem / sz;
-    long long iz = rem % sz;
+    long long ix = history_idx / (hy * hz) + box.x0;
+    long long rem = history_idx % (hy * hz);
+    long long iy = rem / hz + box.y0;
+    long long iz = rem % hz + box.z0;
+    long long idx = ix * sy * sz + iy * sz + iz;
 
     /* CPML is a numerical boundary, not part of the invertible model. */
     if ((pml0 > 0 && ix < pml0) ||
@@ -2320,7 +2374,7 @@ __global__ void accumulate_material_gradients_gpu(
 
     for (int s = 0; s < step; ++s) {
         long long idx_E = (long long)s * e_stride + material_idx;
-        long long base_idx = (long long)s * total_cells + idx;
+        long long base_idx = (long long)s * total_cells + history_idx;
         float adjoint_values[3];
         adjoint_values[0] = lambda_ex[idx_E];
         adjoint_values[1] = lambda_ey[idx_E];
@@ -2394,15 +2448,16 @@ __global__ void accumulate_material_gradients_int8_gpu(
     int pml0, int pml1, int pml2, int pml3, int pml4, int pml5,
     float dt, int eps_r_requires_grad, int sigma_requires_grad,
     int sample_weight, int fwi_mode,
-    int bx, int by, int bz)
+    int bx, int by, int bz, HistoryBox box)
 {
     __shared__ float shared_scales[2];
     long long sx = NX - 1, sy = NY - 1, sz = NZ - 1;
-    long long total_cells = sx * sy * sz;
+    long long hx = box.nx, hy = box.ny, hz = box.nz;
+    long long total_cells = hx * hy * hz;
     int components = fwi_mode == 3 ? 3 : 1;
-    long long nbx = CEIL_DIV(sx, bx);
-    long long nby = CEIL_DIV(sy, by);
-    long long nbz = CEIL_DIV(sz, bz);
+    long long nbx = CEIL_DIV(hx, bx);
+    long long nby = CEIL_DIV(hy, by);
+    long long nbz = CEIL_DIV(hz, bz);
     long long blocks_per_shot = nbx * nby * nbz;
     long long spatial_block = blockIdx.x;
     long long block_x = spatial_block / (nby * nbz);
@@ -2415,10 +2470,12 @@ __global__ void accumulate_material_gradients_int8_gpu(
     int local_rem = local % (by * bz);
     int local_y = local_rem / bz;
     int local_z = local_rem % bz;
-    long long ix = block_x * bx + local_x;
-    long long iy = block_y * by + local_y;
-    long long iz = block_z * bz + local_z;
-    bool valid = ix < sx && iy < sy && iz < sz;
+    long long hix = block_x * bx + local_x;
+    long long hiy = block_y * by + local_y;
+    long long hiz = block_z * bz + local_z;
+    bool valid = hix < hx && hiy < hy && hiz < hz;
+    long long history_idx = valid ? hix * hy * hz + hiy * hz + hiz : 0;
+    long long ix = hix + box.x0, iy = hiy + box.y0, iz = hiz + box.z0;
     long long idx = valid ? ix * sy * sz + iy * sz + iz : 0;
     long long material_idx = valid ? ix * NY * NZ + iy * NZ + iz : 0;
 
@@ -2437,7 +2494,7 @@ __global__ void accumulate_material_gradients_int8_gpu(
     long long field_stride = (long long)NX * NY * NZ;
 
     for (int shot = 0; shot < step; ++shot) {
-        long long history_voxel = (long long)shot * total_cells + idx;
+        long long history_voxel = (long long)shot * total_cells + history_idx;
         long long adjoint_idx = (long long)shot * field_stride + material_idx;
         long long tile = (long long)shot * blocks_per_shot + spatial_block;
         for (int component = 0; component < components; ++component) {
@@ -2616,6 +2673,9 @@ DEEPGPR_API void forward(const float* __restrict__ eps_r_pad, const float* __res
         return;
     }
     int store_rhs = save_model_history && !rhs_from_e;
+    HistoryBox history = history_box_host(
+        (storage_type & WAVEFIELD_PHYSICAL_HISTORY) != 0, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
+        pml0, pml1, pml2, pml3, pml4, pml5, int8_bx, int8_by, int8_bz);
     int fdtd_order = g_fdtd_order;
     int e_components = (fwi_mode == 3) ? 3 : 1;
     int has_cpml = pml0 || pml1 || pml2 || pml3 || pml4 || pml5;
@@ -2625,7 +2685,7 @@ DEEPGPR_API void forward(const float* __restrict__ eps_r_pad, const float* __res
     unsigned char*& d_E_buf = resources.d_E_buf;
     unsigned char*& d_R_buf = resources.d_R_buf;
     float*& d_exact_Eold = resources.d_exact_Eold;
-    long long snap_size = (long long)step * (NX_FIELDS - 1) * (NY_FIELDS - 1) * (NZ_FIELDS - 1);
+    long long snap_size = (long long)step * history.nx * history.ny * history.nz;
     long long component_stride = (long long)nt_saved * snap_size;
     size_t storage_size = wavefield_element_size_host(storage_type);
     
@@ -2675,13 +2735,13 @@ DEEPGPR_API void forward(const float* __restrict__ eps_r_pad, const float* __res
     build_update_coeffs_gpu<<<grid_material, blockSize, 0, stream_comp>>>(eps_r_pad, sigma_pad, mu_r_pad, ce_hist, ce_curl, ce_rhs, ch_hist, ch_curl, ch_rhs, NX_FIELDS, NY_FIELDS, NZ_FIELDS, dt, dx);
     CUDA_CHECK_LAST();
   
-    long long total_copy = (long long)(NX_FIELDS - 1) * (NY_FIELDS - 1) * (NZ_FIELDS - 1); 
+    long long total_copy = (long long)history.nx * history.ny * history.nz;
     dim3 grid_copy(CEIL_DIV((long long)step * total_copy, blockSize));
     dim3 grid_copy_vec2(CEIL_DIV((long long)step * total_copy, 2LL * blockSize));
     long long int8_blocks_per_shot = use_int8
-        ? (long long)CEIL_DIV(NX_FIELDS - 1, int8_bx)
-            * CEIL_DIV(NY_FIELDS - 1, int8_by)
-            * CEIL_DIV(NZ_FIELDS - 1, int8_bz)
+        ? (long long)CEIL_DIV(history.nx, int8_bx)
+            * CEIL_DIV(history.ny, int8_by)
+            * CEIL_DIV(history.nz, int8_bz)
         : 0;
     dim3 grid_int8(use_int8 ? (unsigned int)(step * int8_blocks_per_shot) : 1);
     size_t int8_shared_bytes = use_int8
@@ -2697,25 +2757,25 @@ DEEPGPR_API void forward(const float* __restrict__ eps_r_pad, const float* __res
                         grid_int8, int8_threads, int8_shared_bytes, stream_comp, int8_reduction_backend,
                         E_saved, t_saved, 0, Ex, d_exact_Eold,
                         step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, nt_saved, e_components,
-                        int8_bx, int8_by, int8_bz);
+                        int8_bx, int8_by, int8_bz, history);
                     LAUNCH_INT8_QUANT_KERNEL(quantize_e_int8_snapshot_gpu,
                         grid_int8, int8_threads, int8_shared_bytes, stream_comp, int8_reduction_backend,
                         E_saved, t_saved, 1, Ey,
                         d_exact_Eold != nullptr ? d_exact_Eold + snap_size : nullptr,
                         step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, nt_saved, e_components,
-                        int8_bx, int8_by, int8_bz);
+                        int8_bx, int8_by, int8_bz, history);
                     LAUNCH_INT8_QUANT_KERNEL(quantize_e_int8_snapshot_gpu,
                         grid_int8, int8_threads, int8_shared_bytes, stream_comp, int8_reduction_backend,
                         E_saved, t_saved, 2, Ez,
                         d_exact_Eold != nullptr ? d_exact_Eold + 2 * snap_size : nullptr,
                         step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, nt_saved, e_components,
-                        int8_bx, int8_by, int8_bz);
+                        int8_bx, int8_by, int8_bz, history);
                 } else {
                     LAUNCH_INT8_QUANT_KERNEL(quantize_e_int8_snapshot_gpu,
                         grid_int8, int8_threads, int8_shared_bytes, stream_comp, int8_reduction_backend,
                         E_saved, t_saved, 0, Ez, d_exact_Eold,
                         step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, nt_saved, e_components,
-                        int8_bx, int8_by, int8_bz);
+                        int8_bx, int8_by, int8_bz, history);
                 }
                 CUDA_CHECK_LAST();
             } else if (use_async) {
@@ -2727,31 +2787,31 @@ DEEPGPR_API void forward(const float* __restrict__ eps_r_pad, const float* __res
                 }
                 if (fwi_mode == 3) {
                     LAUNCH_SAVE_KERNEL(save_e_snapshot_gpu, save_e_snapshot_vec2_gpu, grid_copy, grid_copy_vec2, blockSize, stream_comp, storage_type,
-                        buffer, 0, Ex, d_exact_Eold, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
+                        buffer, 0, Ex, d_exact_Eold, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, history);
                     LAUNCH_SAVE_KERNEL(save_e_snapshot_gpu, save_e_snapshot_vec2_gpu, grid_copy, grid_copy_vec2, blockSize, stream_comp, storage_type,
                         buffer + snap_size * storage_size, 0, Ey,
-                        d_exact_Eold != nullptr ? d_exact_Eold + snap_size : nullptr, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
+                        d_exact_Eold != nullptr ? d_exact_Eold + snap_size : nullptr, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, history);
                     LAUNCH_SAVE_KERNEL(save_e_snapshot_gpu, save_e_snapshot_vec2_gpu, grid_copy, grid_copy_vec2, blockSize, stream_comp, storage_type,
                         buffer + 2 * snap_size * storage_size, 0, Ez,
-                        d_exact_Eold != nullptr ? d_exact_Eold + 2 * snap_size : nullptr, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
+                        d_exact_Eold != nullptr ? d_exact_Eold + 2 * snap_size : nullptr, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, history);
                 } else {
                     LAUNCH_SAVE_KERNEL(save_e_snapshot_gpu, save_e_snapshot_vec2_gpu, grid_copy, grid_copy_vec2, blockSize, stream_comp, storage_type,
-                        buffer, 0, Ez, d_exact_Eold, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
+                        buffer, 0, Ez, d_exact_Eold, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, history);
                 }
                 CUDA_CHECK_LAST();
             } else if (fwi_mode == 3) {
                 LAUNCH_SAVE_KERNEL(save_e_snapshot_gpu, save_e_snapshot_vec2_gpu, grid_copy, grid_copy_vec2, blockSize, stream_comp, storage_type,
-                    E_saved, t_saved, Ex, d_exact_Eold, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
+                    E_saved, t_saved, Ex, d_exact_Eold, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, history);
                 LAUNCH_SAVE_KERNEL(save_e_snapshot_gpu, save_e_snapshot_vec2_gpu, grid_copy, grid_copy_vec2, blockSize, stream_comp, storage_type,
                     wavefield_offset_host(E_saved, component_stride, storage_type), t_saved, Ey,
-                    d_exact_Eold != nullptr ? d_exact_Eold + snap_size : nullptr, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
+                    d_exact_Eold != nullptr ? d_exact_Eold + snap_size : nullptr, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, history);
                 LAUNCH_SAVE_KERNEL(save_e_snapshot_gpu, save_e_snapshot_vec2_gpu, grid_copy, grid_copy_vec2, blockSize, stream_comp, storage_type,
                     wavefield_offset_host(E_saved, 2 * component_stride, storage_type), t_saved, Ez,
-                    d_exact_Eold != nullptr ? d_exact_Eold + 2 * snap_size : nullptr, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
+                    d_exact_Eold != nullptr ? d_exact_Eold + 2 * snap_size : nullptr, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, history);
                 CUDA_CHECK_LAST();
             } else {
                 LAUNCH_SAVE_KERNEL(save_e_snapshot_gpu, save_e_snapshot_vec2_gpu, grid_copy, grid_copy_vec2, blockSize, stream_comp, storage_type,
-                    E_saved, t_saved, Ez, d_exact_Eold, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
+                    E_saved, t_saved, Ez, d_exact_Eold, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, history);
                 CUDA_CHECK_LAST();
             }
         }
@@ -2829,23 +2889,23 @@ DEEPGPR_API void forward(const float* __restrict__ eps_r_pad, const float* __res
                         grid_int8, int8_threads, int8_shared_bytes, stream_comp, int8_reduction_backend,
                         R_saved, t_saved, 0, Ex, d_exact_Eold, ce_hist, ce_rhs,
                         step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, nt_saved, e_components,
-                        int8_bx, int8_by, int8_bz);
+                        int8_bx, int8_by, int8_bz, history);
                     LAUNCH_INT8_QUANT_KERNEL(quantize_rhs_int8_snapshot_gpu,
                         grid_int8, int8_threads, int8_shared_bytes, stream_comp, int8_reduction_backend,
                         R_saved, t_saved, 1, Ey, d_exact_Eold + snap_size, ce_hist, ce_rhs,
                         step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, nt_saved, e_components,
-                        int8_bx, int8_by, int8_bz);
+                        int8_bx, int8_by, int8_bz, history);
                     LAUNCH_INT8_QUANT_KERNEL(quantize_rhs_int8_snapshot_gpu,
                         grid_int8, int8_threads, int8_shared_bytes, stream_comp, int8_reduction_backend,
                         R_saved, t_saved, 2, Ez, d_exact_Eold + 2 * snap_size, ce_hist, ce_rhs,
                         step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, nt_saved, e_components,
-                        int8_bx, int8_by, int8_bz);
+                        int8_bx, int8_by, int8_bz, history);
                 } else if (store_rhs) {
                     LAUNCH_INT8_QUANT_KERNEL(quantize_rhs_int8_snapshot_gpu,
                         grid_int8, int8_threads, int8_shared_bytes, stream_comp, int8_reduction_backend,
                         R_saved, t_saved, 0, Ez, d_exact_Eold, ce_hist, ce_rhs,
                         step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, nt_saved, e_components,
-                        int8_bx, int8_by, int8_bz);
+                        int8_bx, int8_by, int8_bz, history);
                 }
                 CUDA_CHECK_LAST();
             } else if (use_async) {
@@ -2857,19 +2917,19 @@ DEEPGPR_API void forward(const float* __restrict__ eps_r_pad, const float* __res
                 if (store_rhs && fwi_mode == 3) {
                     LAUNCH_SAVE_KERNEL(save_rhs_snapshot_gpu, save_rhs_snapshot_vec2_gpu, grid_copy, grid_copy_vec2, blockSize, stream_comp, storage_type,
                         r_buffer, 0, Ex, e_buffer, d_exact_Eold,
-                        ce_hist, ce_rhs, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
+                        ce_hist, ce_rhs, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, history);
                     LAUNCH_SAVE_KERNEL(save_rhs_snapshot_gpu, save_rhs_snapshot_vec2_gpu, grid_copy, grid_copy_vec2, blockSize, stream_comp, storage_type,
                         r_buffer + snap_size * storage_size, 0, Ey,
                         e_buffer + snap_size * storage_size, d_exact_Eold != nullptr ? d_exact_Eold + snap_size : nullptr,
-                        ce_hist, ce_rhs, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
+                        ce_hist, ce_rhs, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, history);
                     LAUNCH_SAVE_KERNEL(save_rhs_snapshot_gpu, save_rhs_snapshot_vec2_gpu, grid_copy, grid_copy_vec2, blockSize, stream_comp, storage_type,
                         r_buffer + 2 * snap_size * storage_size, 0, Ez,
                         e_buffer + 2 * snap_size * storage_size, d_exact_Eold != nullptr ? d_exact_Eold + 2 * snap_size : nullptr,
-                        ce_hist, ce_rhs, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
+                        ce_hist, ce_rhs, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, history);
                 } else if (store_rhs) {
                     LAUNCH_SAVE_KERNEL(save_rhs_snapshot_gpu, save_rhs_snapshot_vec2_gpu, grid_copy, grid_copy_vec2, blockSize, stream_comp, storage_type,
                         r_buffer, 0, Ez, e_buffer, d_exact_Eold,
-                        ce_hist, ce_rhs, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
+                        ce_hist, ce_rhs, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, history);
                 }
                 CUDA_CHECK_LAST();
                 CUDA_CHECK(cudaEventRecord(event_comp, stream_comp));
@@ -2895,19 +2955,19 @@ DEEPGPR_API void forward(const float* __restrict__ eps_r_pad, const float* __res
                 if (store_rhs && fwi_mode == 3) {
                     LAUNCH_SAVE_KERNEL(save_rhs_snapshot_gpu, save_rhs_snapshot_vec2_gpu, grid_copy, grid_copy_vec2, blockSize, stream_comp, storage_type,
                         R_saved, t_saved, Ex, E_saved, d_exact_Eold,
-                        ce_hist, ce_rhs, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
+                        ce_hist, ce_rhs, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, history);
                     LAUNCH_SAVE_KERNEL(save_rhs_snapshot_gpu, save_rhs_snapshot_vec2_gpu, grid_copy, grid_copy_vec2, blockSize, stream_comp, storage_type,
                         wavefield_offset_host(R_saved, component_stride, storage_type), t_saved, Ey,
                         wavefield_const_offset_host(E_saved, component_stride, storage_type), d_exact_Eold != nullptr ? d_exact_Eold + snap_size : nullptr,
-                        ce_hist, ce_rhs, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
+                        ce_hist, ce_rhs, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, history);
                     LAUNCH_SAVE_KERNEL(save_rhs_snapshot_gpu, save_rhs_snapshot_vec2_gpu, grid_copy, grid_copy_vec2, blockSize, stream_comp, storage_type,
                         wavefield_offset_host(R_saved, 2 * component_stride, storage_type), t_saved, Ez,
                         wavefield_const_offset_host(E_saved, 2 * component_stride, storage_type), d_exact_Eold != nullptr ? d_exact_Eold + 2 * snap_size : nullptr,
-                        ce_hist, ce_rhs, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
+                        ce_hist, ce_rhs, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, history);
                 } else if (store_rhs) {
                     LAUNCH_SAVE_KERNEL(save_rhs_snapshot_gpu, save_rhs_snapshot_vec2_gpu, grid_copy, grid_copy_vec2, blockSize, stream_comp, storage_type,
                         R_saved, t_saved, Ez, E_saved, d_exact_Eold,
-                        ce_hist, ce_rhs, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
+                        ce_hist, ce_rhs, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, history);
                 }
                 CUDA_CHECK_LAST();
             }
@@ -2925,18 +2985,18 @@ DEEPGPR_API void forward(const float* __restrict__ eps_r_pad, const float* __res
                     grid_int8, int8_threads, int8_shared_bytes, stream_comp, int8_reduction_backend,
                     R_saved, 0, c, fwi_mode == 3 ? final_fields[c] : Ez, nullptr,
                     step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, 1, e_components,
-                    int8_bx, int8_by, int8_bz);
+                    int8_bx, int8_by, int8_bz, history);
             }
         } else if (fwi_mode == 3) {
             LAUNCH_SAVE_KERNEL(save_e_snapshot_gpu, save_e_snapshot_vec2_gpu, grid_copy, grid_copy_vec2, blockSize, stream_comp, storage_type,
-                R_saved, 0, Ex, nullptr, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
+                R_saved, 0, Ex, nullptr, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, history);
             LAUNCH_SAVE_KERNEL(save_e_snapshot_gpu, save_e_snapshot_vec2_gpu, grid_copy, grid_copy_vec2, blockSize, stream_comp, storage_type,
-                wavefield_offset_host(R_saved, snap_size, storage_type), 0, Ey, nullptr, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
+                wavefield_offset_host(R_saved, snap_size, storage_type), 0, Ey, nullptr, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, history);
             LAUNCH_SAVE_KERNEL(save_e_snapshot_gpu, save_e_snapshot_vec2_gpu, grid_copy, grid_copy_vec2, blockSize, stream_comp, storage_type,
-                wavefield_offset_host(R_saved, 2 * snap_size, storage_type), 0, Ez, nullptr, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
+                wavefield_offset_host(R_saved, 2 * snap_size, storage_type), 0, Ez, nullptr, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, history);
         } else {
             LAUNCH_SAVE_KERNEL(save_e_snapshot_gpu, save_e_snapshot_vec2_gpu, grid_copy, grid_copy_vec2, blockSize, stream_comp, storage_type,
-                R_saved, 0, Ez, nullptr, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
+                R_saved, 0, Ez, nullptr, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, history);
         }
         CUDA_CHECK_LAST();
     }
@@ -3043,11 +3103,14 @@ DEEPGPR_API void backward(const float* __restrict__ eps_r_pad, const float* __re
     int fdtd_order = g_fdtd_order;
     int e_components = (fwi_mode == 3) ? 3 : 1;
     int has_cpml = pml0 || pml1 || pml2 || pml3 || pml4 || pml5;
+    HistoryBox history = history_box_host(
+        (storage_type & WAVEFIELD_PHYSICAL_HISTORY) != 0, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
+        pml0, pml1, pml2, pml3, pml4, pml5, int8_bx, int8_by, int8_bz);
 
     CudaCallResources resources;
     unsigned char*& d_E_buf = resources.d_E_buf;
     unsigned char*& d_R_buf = resources.d_R_buf;
-    long long snap_size = (long long)step * (NX_FIELDS - 1) * (NY_FIELDS - 1) * (NZ_FIELDS - 1);
+    long long snap_size = (long long)step * history.nx * history.ny * history.nz;
     size_t storage_size = wavefield_element_size_host(storage_type);
     
     cudaStream_t& stream_comp = resources.streams[0];
@@ -3098,12 +3161,12 @@ DEEPGPR_API void backward(const float* __restrict__ eps_r_pad, const float* __re
     long long total_source = (long long)step * nsource;
     dim3 grid_source(CEIL_DIV(total_source, blockSize));
 
-    long long total_grad = (long long)(NX_FIELDS-1) * (NY_FIELDS-1) * (NZ_FIELDS-1);
+    long long total_grad = (long long)history.nx * history.ny * history.nz;
     dim3 grid_grad(CEIL_DIV(total_grad, blockSize));
     long long int8_blocks = use_int8
-        ? (long long)CEIL_DIV(NX_FIELDS - 1, int8_bx)
-            * CEIL_DIV(NY_FIELDS - 1, int8_by)
-            * CEIL_DIV(NZ_FIELDS - 1, int8_bz)
+        ? (long long)CEIL_DIV(history.nx, int8_bx)
+            * CEIL_DIV(history.ny, int8_by)
+            * CEIL_DIV(history.nz, int8_bz)
         : 0;
     dim3 grid_grad_int8(use_int8 ? (unsigned int)int8_blocks : 1);
   
@@ -3200,7 +3263,7 @@ DEEPGPR_API void backward(const float* __restrict__ eps_r_pad, const float* __re
                         step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
                         pml0, pml1, pml2, pml3, pml4, pml5, dt,
                         eps_r_requires_grad, sigma_requires_grad,
-                        sample_weight, fwi_mode, int8_bx, int8_by, int8_bz);
+                        sample_weight, fwi_mode, int8_bx, int8_by, int8_bz, history);
                 } else {
                     accumulate_material_gradients_int8_gpu<0><<<grid_grad_int8, int8_threads, 0, stream_comp>>>(
                         lambda_ex, lambda_ey, lambda_ez,
@@ -3210,20 +3273,20 @@ DEEPGPR_API void backward(const float* __restrict__ eps_r_pad, const float* __re
                         step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
                         pml0, pml1, pml2, pml3, pml4, pml5, dt,
                         eps_r_requires_grad, sigma_requires_grad,
-                        sample_weight, fwi_mode, int8_bx, int8_by, int8_bz);
+                        sample_weight, fwi_mode, int8_bx, int8_by, int8_bz, history);
                 }
             } else if (rhs_from_e) {
                 LAUNCH_GRADIENT_KERNEL(1, grid_grad, blockSize, stream_comp, storage_type,
                     lambda_ex, lambda_ey, lambda_ez, e_frame, e_stride, second_frame, second_stride,
                     ce_hist, ce_rhs, sigma_pad, grad_eps_r, grad_sigma, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
                     pml0, pml1, pml2, pml3, pml4, pml5, dt,
-                    eps_r_requires_grad, sigma_requires_grad, sample_weight, fwi_mode);
+                    eps_r_requires_grad, sigma_requires_grad, sample_weight, fwi_mode, history);
             } else {
                 LAUNCH_GRADIENT_KERNEL(0, grid_grad, blockSize, stream_comp, storage_type,
                     lambda_ex, lambda_ey, lambda_ez, e_frame, e_stride, second_frame, second_stride,
                     ce_hist, ce_rhs, sigma_pad, grad_eps_r, grad_sigma, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
                     pml0, pml1, pml2, pml3, pml4, pml5, dt,
-                    eps_r_requires_grad, sigma_requires_grad, sample_weight, fwi_mode);
+                    eps_r_requires_grad, sigma_requires_grad, sample_weight, fwi_mode, history);
             }
             CUDA_CHECK_LAST();
             if (use_async) {

@@ -139,6 +139,13 @@ WAVEFIELD_STORAGE_KIND_MASK: Final[int] = 0x0F
 #: Only set when the library reports ``deepgpr_supports_rhs_reconstruction``.
 WAVEFIELD_RHS_FROM_E: Final[int] = 1 << 4
 
+#: History flag: E/R frames cover only the physical model cells (no CPML).
+#: Only set when the library reports ``deepgpr_supports_physical_history``.
+WAVEFIELD_PHYSICAL_HISTORY: Final[int] = 1 << 5
+
+#: Accepted values of ``wavefield_history_region``.
+WAVEFIELD_HISTORY_REGIONS: Final[Tuple[str, ...]] = ("extended", "physical")
+
 #: Accepted values of ``wavefield_rhs_history``.
 WAVEFIELD_RHS_HISTORY_MODES: Final[Tuple[str, ...]] = ("auto", "stored", "reconstructed")
 
@@ -251,6 +258,8 @@ __all__ = [
     "WAVEFIELD_CONVERSION_BACKENDS",
     "WAVEFIELD_CONVERSION_SHIFT",
     "WAVEFIELD_HISTORY_DISABLED",
+    "WAVEFIELD_HISTORY_REGIONS",
+    "WAVEFIELD_PHYSICAL_HISTORY",
     "WAVEFIELD_RHS_FROM_E",
     "WAVEFIELD_RHS_HISTORY_MODES",
     "WAVEFIELD_STORAGE_BFLOAT16",

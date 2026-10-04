@@ -29,7 +29,8 @@ def compute(device, dx=None, dt=None,
             wavefield_conversion_backend="auto",
             int8_reduction_backend="auto",
             wavefield_compression_rate=None,
-            wavefield_rhs_history="auto"):
+            wavefield_rhs_history="auto",
+            wavefield_history_region="extended"):
 ```
 
 `eps_r`, `sigma`, `mu_r` and `receiver_component` are the canonical names;
@@ -110,6 +111,7 @@ This section defines the geometric observation system (coordinates) and the exci
 | **`wavefield_compression_block_size`** | sequence / `None` | 2D or 3D spatial block | INT8 block shape; defaults to `(8, 8)` in 2D and `(4, 4, 4)` in 3D. The block volume must be a power of two no larger than 256. Partial boundary blocks are supported. |
 | **`int8_reduction_backend`** | `str` | `"auto"`, `"current"`, `"cub_block"`, or `"warp_shuffle"` | Tile maximum reduction. The audited default `"auto"` selects NVIDIA CUB `BlockReduce` for 64-voxel tiles and preserves the prior shared-memory tree for other valid tile sizes. Explicit values expose the retained A/B implementations. |
 | **`wavefield_compression_rate`** | scalar / `None` | Optional ZFP setting | Reserved for an optional ZFP backend. It is rejected unless that backend is selected and available. |
+| **`wavefield_history_region`** | `str` | `"extended"` or `"physical"` | Cells covered by the saved history (see [4.6](#46-physical-region-history)). `"extended"` (default) stores the whole grid including the external PML. `"physical"` stores only the physical model cells; material gradients are unchanged because CPML cells never receive one, and history memory falls in proportion to the cell count. |
 | **`wavefield_rhs_history`** | `str` | `"auto"`, `"stored"`, or `"reconstructed"` | Storage of the right-hand-side history `R^n` used by the material gradient (see [4.5](#45-e-only-history-at-sampling-interval-1)). `"auto"` (default) stores only `E^n` for uncompressed `float32` histories with `model_gradient_sampling_interval=1` and rebuilds `R^n` in the adjoint, halving history memory with unchanged gradients; other storage modes keep `E^n` and `R^n`. `"stored"` always keeps both (reproduces earlier results bit for bit); `"reconstructed"` requests the E-only history for any storage mode and requires interval 1. |
 | **`use_async_offload`** | `bool` | Scalar | CUDA-only VRAM optimization flag (Default: `False`).<br>If `True`, `E_saved` and `R_saved` are asynchronously offloaded to page-locked host memory (`pin_memory` CPU RAM). This reduces GPU VRAM consumption at the cost of PCIe transfers. On CPU this option is ignored. |
 
@@ -237,6 +239,32 @@ in every mode. Native libraries without the
 Windows/macOS binaries) fall back to E+R under `"auto"` and reject
 `"reconstructed"`.
 
+### 4.6 Physical-region history
+
+Material gradients are never accumulated in CPML cells, so their history is
+only needed by diagnostics. `wavefield_history_region="physical"` restricts
+`E_saved` (and the internal R history or final E frame) to the physical model
+cells `[px0, Nx - px1) x [py0, Ny - py1) x [pz0, Nz - pz1)` of the extended grid:
+
+- `E_saved` has the physical spatial shape `(nx, ny, nz)` instead of
+  `(Nx, Ny, Nz)`; its values are exactly the corresponding slice of the
+  extended history.
+- float32, float16 and bfloat16 gradients are identical to `"extended"` (bitwise
+  on CPU; on CUDA up to the atomic adjoint scatter).
+- INT8: the block INT8 scale of a tile depends on every value in that tile.
+  The physical box is therefore widened to whole tiles of the full-grid tiling
+  (origin rounded down, end rounded up to a tile boundary of the extended
+  grid), so every tile, scale and decoded value of the physical cells equals
+  the extended history and the gradients are unchanged. The packed
+  uncompressed shape is that widened box; `save_forward_wavefield_path` records
+  it as `uncompressed_shape` together with `history_origin`.
+- Files saved with `save_forward_wavefield_path` contain a dictionary with
+  `wavefield`, `history_region="physical"`, `history_origin`, `pmlthick` and
+  `uncompressed_shape` (plus the INT8 entries). `"extended"` histories keep the
+  previous format (a bare tensor, or the INT8 dictionary).
+- Requires native libraries with `deepgpr_supports_physical_history`; older
+  libraries are rejected for `"physical"`.
+
 ### 5. Field Variable States (Checkpoints / Initial Fields)
 
 For starting a forward simulation from scratch ($t=0$), these three parameters should be passed as `None` (the system will automatically initialize zero-tensors).
@@ -280,7 +308,7 @@ return E_saved, (Ex, Ey, Ez), (Hx, Hy, Hz), (x0EPhi1...zmHPhi2), receiver_amplit
     *   With `save_wavefield_history=False`, `E_saved` is a zero-length tensor and neither E nor R history storage/compression kernels are launched.
     *   **Shape when `mode=2`**: `(nt_saved, nstep, Nx, Ny, Nz)`, storing Ez only.
     *   **Shape when `mode=3`**: `(3, nt_saved, nstep, Nx, Ny, Nz)`, storing components in `[Ex, Ey, Ez]` order.
-    *   `Nx`, `Ny`, `Nz` include external PML. Histories, saved files, and full E/H/PML states keep that grid; only material gradients are cropped. To plot a physical history, slice spatial axes with `[px0:px0+nx, py0:py0+ny, pz0:pz0+nz]`. Memory estimates use the extended grid.
+    *   `Nx`, `Ny`, `Nz` include external PML. Histories, saved files, and full E/H/PML states keep that grid; only material gradients are cropped. To plot a physical history, slice spatial axes with `[px0:px0+nx, py0:py0+ny, pz0:pz0+nz]`. With `wavefield_history_region="physical"` the spatial axes are already `(nx, ny, nz)` (§4.6).
     *   `nt_saved` depends on `nt` and `model_gradient_sampling_interval`.
     *   Dtype is selected by `wavefield_storage_dtype` when compression is disabled. With `wavefield_compression="int8"`, this is an opaque packed one-dimensional `torch.int8` tensor containing values and FP32 scales.
     *   Set `save_forward_wavefield_path="/path/to/output"` to save a CPU-loadable `.pt` file. Uncompressed modes save the tensor directly. INT8 mode saves a dictionary containing `wavefield`, `compression`, `block_size`, and `uncompressed_shape` so diagnostics can reconstruct it safely.

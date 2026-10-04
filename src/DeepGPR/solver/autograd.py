@@ -23,6 +23,7 @@ from .storage import (
     WavefieldStorageConfig,
     decompress_wavefield_history,
     encode_storage_type,
+    history_spatial_shape,
     int8_history_layout,
     saved_history_shape,
     saved_time_steps,
@@ -79,6 +80,8 @@ class SolverConfig:
             from consecutive E frames in the adjoint; requested by
             ``wavefield_rhs_history`` and applied only when a material
             gradient uses the history.
+        history_region: ``"extended"`` (whole grid) or ``"physical"`` (saved
+            frames cover only the physical model cells).
     """
 
     device: torch.device
@@ -103,11 +106,20 @@ class SolverConfig:
     mode: int
     debug: bool
     reconstruct_rhs: bool = False
+    history_region: str = "extended"
 
     @property
     def pml(self) -> List[int]:
         """Face thicknesses as Python ints ``[x0, xm, y0, ym, z0, zm]``."""
         return [int(self.pmlthick[i]) for i in range(6)]
+
+    @property
+    def history_cells(self) -> Tuple[int, int, int]:
+        """Spatial cells ``(hx, hy, hz)`` of one saved history frame."""
+        block = self.storage.block_size if self.storage.compression == "int8" else None
+        return history_spatial_shape(
+            self.nx, self.ny, self.nz, self.pml, self.history_region, block
+        )
 
 
 @dataclass(frozen=True)
@@ -320,6 +332,13 @@ def _check_forward_capabilities(c_lib: Any, config: SolverConfig) -> None:
             "Rebuild the CPU/CUDA shared libraries from the current sources.",
         )
     storage = config.storage
+    if config.history_region == "physical":
+        require_capability(
+            c_lib,
+            "deepgpr_supports_physical_history",
+            "The loaded native library cannot restrict histories to the physical "
+            "model. Rebuild the CPU/CUDA shared libraries from the current sources.",
+        )
     if config.reconstruct_rhs:
         require_capability(
             c_lib,
@@ -358,7 +377,7 @@ def _allocate_final_frame(config: SolverConfig) -> torch.Tensor:
     advance in place) and stays on the device even with async offload.
     """
     storage = config.storage
-    shape = saved_history_shape(config.mode, 1, config.nstep, config.nx, config.ny, config.nz)
+    shape = saved_history_shape(config.mode, 1, config.nstep, *config.history_cells)
     if storage.compression == "int8":
         assert storage.block_size is not None
         packed_bytes = int8_history_layout(shape, storage.block_size)["packed_bytes"]
@@ -381,9 +400,7 @@ def _allocate_histories(
     device = config.device
     storage = config.storage
     nt_saved = saved_time_steps(config.nt, config.sampling_interval)
-    shape = saved_history_shape(
-        config.mode, nt_saved, config.nstep, config.nx, config.ny, config.nz
-    )
+    shape = saved_history_shape(config.mode, nt_saved, config.nstep, *config.history_cells)
 
     if not config.save_wavefield_history:
         empty = torch.empty(0, device=device, dtype=storage.dtype)
@@ -496,7 +513,10 @@ class DeepGPR(torch.autograd.Function):
             config.reconstruct_rhs and config.save_wavefield_history and needs_model_gradient
         )
         storage_type = encode_storage_type(
-            config.storage, config.save_wavefield_history, rhs_from_e=reconstruct_rhs
+            config.storage,
+            config.save_wavefield_history,
+            rhs_from_e=reconstruct_rhs,
+            physical_history=config.history_region == "physical",
         )
 
         if config.save_wavefield_history:
@@ -558,7 +578,7 @@ class DeepGPR(torch.autograd.Function):
                 else e_saved
             )
             r_shape = (
-                saved_history_shape(config.mode, 1, config.nstep, config.nx, config.ny, config.nz)
+                saved_history_shape(config.mode, 1, config.nstep, *config.history_cells)
                 if reconstruct_rhs
                 else history_shape
             )

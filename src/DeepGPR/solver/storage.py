@@ -28,6 +28,8 @@ from ..config.constants import (
     WAVEFIELD_CONVERSION_BACKENDS,
     WAVEFIELD_CONVERSION_SHIFT,
     WAVEFIELD_HISTORY_DISABLED,
+    WAVEFIELD_HISTORY_REGIONS,
+    WAVEFIELD_PHYSICAL_HISTORY,
     WAVEFIELD_RHS_FROM_E,
     WAVEFIELD_RHS_HISTORY_MODES,
     WAVEFIELD_STORAGE_BFLOAT16,
@@ -144,6 +146,66 @@ def normalize_wavefield_rhs_history(value: Any) -> str:
     return value
 
 
+def normalize_wavefield_history_region(value: Any) -> str:
+    """Normalise ``wavefield_history_region`` (``"extended"`` or ``"physical"``)."""
+    message = "wavefield_history_region must be 'extended' or 'physical'."
+    if not isinstance(value, str):
+        raise TypeError(message)
+    value = value.lower()
+    if value not in WAVEFIELD_HISTORY_REGIONS:
+        raise ValueError(message)
+    return value
+
+
+def history_box(
+    nx: int,
+    ny: int,
+    nz: int,
+    pml: Sequence[int],
+    region: str,
+    block_size: Optional[Sequence[int]] = None,
+) -> Tuple[Tuple[int, int, int], Tuple[int, int, int]]:
+    """Origin and extent of the cells covered by one saved history frame.
+
+    ``"extended"`` covers the whole grid. ``"physical"`` covers the physical
+    model only; with an INT8 ``block_size`` the box is widened to whole tiles
+    of the full-grid tiling (mirrors ``history_box_host`` in ``deepgpr.cu``),
+    so every tile and its scale are identical to the extended history.
+
+    Args:
+        nx, ny, nz: Extended grid cells (including CPML).
+        pml: Six face thicknesses ``[x0, xm, y0, ym, z0, zm]``.
+        region: ``"extended"`` or ``"physical"``.
+        block_size: INT8 tile ``(bx, by, bz)``; ``None`` for uncompressed.
+
+    Returns:
+        ``((x0, y0, z0), (hx, hy, hz))`` in extended-grid cell coordinates.
+    """
+    if region != "physical":
+        return (0, 0, 0), (nx, ny, nz)
+    tiles = tuple(block_size) if block_size is not None else (1, 1, 1)
+    origin = []
+    extent = []
+    for cells, low, high, tile in zip((nx, ny, nz), pml[0::2], pml[1::2], tiles):
+        begin = (int(low) // tile) * tile
+        end = min(cells, -(-(cells - int(high)) // tile) * tile)
+        origin.append(begin)
+        extent.append(end - begin)
+    return tuple(origin), tuple(extent)  # type: ignore[return-value]
+
+
+def history_spatial_shape(
+    nx: int,
+    ny: int,
+    nz: int,
+    pml: Sequence[int],
+    region: str,
+    block_size: Optional[Sequence[int]] = None,
+) -> Tuple[int, int, int]:
+    """Spatial cells ``(hx, hy, hz)`` of one saved history frame (see :func:`history_box`)."""
+    return history_box(nx, ny, nz, pml, region, block_size)[1]
+
+
 def resolve_rhs_reconstruction(
     requested: str,
     *,
@@ -257,7 +319,10 @@ def encode_int8_storage_type(block_size: BlockSize, reduction_backend: str = "cu
 
 
 def encode_storage_type(
-    config: WavefieldStorageConfig, save_wavefield_history: bool, rhs_from_e: bool = False
+    config: WavefieldStorageConfig,
+    save_wavefield_history: bool,
+    rhs_from_e: bool = False,
+    physical_history: bool = False,
 ) -> int:
     """Return the complete native ``storage_type`` argument.
 
@@ -266,6 +331,8 @@ def encode_storage_type(
         save_wavefield_history: ``False`` sets the history-disabled flag.
         rhs_from_e: Store only E and rebuild R^n in the adjoint
             (:data:`WAVEFIELD_RHS_FROM_E`).
+        physical_history: Restrict histories to the physical model cells
+            (:data:`WAVEFIELD_PHYSICAL_HISTORY`).
     """
     if config.compression == "int8":
         assert config.block_size is not None
@@ -276,8 +343,11 @@ def encode_storage_type(
         )
     if not save_wavefield_history:
         storage_type |= WAVEFIELD_HISTORY_DISABLED
-    elif rhs_from_e:
-        storage_type |= WAVEFIELD_RHS_FROM_E
+    else:
+        if rhs_from_e:
+            storage_type |= WAVEFIELD_RHS_FROM_E
+        if physical_history:
+            storage_type |= WAVEFIELD_PHYSICAL_HISTORY
     return storage_type
 
 
@@ -394,11 +464,14 @@ __all__ = [
     "default_compression_block_size",
     "encode_int8_storage_type",
     "encode_storage_type",
+    "history_box",
+    "history_spatial_shape",
     "int8_history_layout",
     "normalize_compression_block_size",
     "normalize_int8_reduction_backend",
     "normalize_wavefield_compression",
     "normalize_wavefield_conversion_backend",
+    "normalize_wavefield_history_region",
     "normalize_wavefield_rhs_history",
     "normalize_wavefield_storage_dtype",
     "resolve_rhs_reconstruction",

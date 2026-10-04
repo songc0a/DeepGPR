@@ -43,6 +43,13 @@ and 3D, bitwise equality of a stored `R^n` with its rebuild from `E^n`/`E^(n+1)`
 independence from in-place changes of the returned states, low-precision and
 INT8 rebuilds (CPU and CUDA, with async offload), and CPU/CUDA agreement.
 
+`test_history_region.py` covers `wavefield_history_region="physical"`: the
+(tile-aligned) history box, option validation and stale-library rejection, the
+memory estimate, the saved-file metadata, bitwise-identical CPU gradients and
+`E_saved` equal to the cropped extended history (fp32/fp16/bf16, E+R and
+E-only, 2D/3D with asymmetric CPML), the same on CUDA with async offload, and
+INT8 histories whose decoded physical cells equal the extended history.
+
 `test_external_pml.py` verifies automatic edge replication against an explicitly
 extended native-grid reference in 2D and 3D, asymmetric and disabled faces,
 orders 2/4/8, model-edge gradients, physical coordinate validation, and state

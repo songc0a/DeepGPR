@@ -34,6 +34,9 @@ DEFAULT_WAVEFIELD_COMPRESSION: Final[str] = "none"
 #: consecutive E frames when the sampling interval is 1).
 DEFAULT_WAVEFIELD_RHS_HISTORY: Final[str] = "auto"
 
+#: Cells covered by the saved E/R history ("extended": whole grid incl. CPML).
+DEFAULT_WAVEFIELD_HISTORY_REGION: Final[str] = "extended"
+
 #: CUDA FP16/BF16 conversion backend selector.
 DEFAULT_CONVERSION_BACKEND: Final[str] = "auto"
 
@@ -71,6 +74,7 @@ __all__ = [
     "DEFAULT_TV_WEIGHT_CONDUCTIVITY",
     "DEFAULT_TV_WEIGHT_PERMITTIVITY",
     "DEFAULT_WAVEFIELD_COMPRESSION",
+    "DEFAULT_WAVEFIELD_HISTORY_REGION",
     "DEFAULT_WAVEFIELD_RHS_HISTORY",
     "DEFAULT_WAVELET_CYCLES",
     "FIR_TAPS_PER_PERIOD",

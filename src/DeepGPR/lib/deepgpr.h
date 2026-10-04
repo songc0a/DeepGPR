@@ -63,6 +63,12 @@ DEEPGPR_API int deepgpr_supports_int8_reduction_backends(void);
  * the adjoint rebuilds R^n = (E^(n+1) - ca E^n) / cb.
  */
 DEEPGPR_API int deepgpr_supports_rhs_reconstruction(void);
+/*
+ * 1 when storage_type may carry WAVEFIELD_PHYSICAL_HISTORY (bit 5): saved
+ * E/R frames cover only the physical model cells (the extended grid without
+ * the CPML faces), ordered z-fastest like the full-grid frames.
+ */
+DEEPGPR_API int deepgpr_supports_physical_history(void);
 DEEPGPR_API void deepgpr_test_wavefield_conversion(
     const float* input, void* encoded, float* decoded, long long count,
     int storage_kind, int conversion_backend);

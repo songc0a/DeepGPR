@@ -28,6 +28,12 @@ Measurements, protocol and per-item decisions:
   accurate in some cases) and can opt in with `"reconstructed"`. New native
   capability probe `deepgpr_supports_rhs_reconstruction` (ABI 6 unchanged);
   older libraries fall back to E+R.
+- `wavefield_history_region` (`"extended"` default, `"physical"`). `"physical"`
+  stores E/R histories only on the physical model cells (CPML cells never get
+  a material gradient), so history memory falls with the cell count and
+  gradients are unchanged. INT8 histories widen the box to whole tiles of the
+  full-grid tiling so tiles and scales are identical to `"extended"`. New probe
+  `deepgpr_supports_physical_history`; saved files record the region.
 
 ### Changed
 

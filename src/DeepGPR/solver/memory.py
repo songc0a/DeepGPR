@@ -12,6 +12,7 @@ from .pml import pml_phi_element_count
 from .storage import (
     BlockSize,
     default_compression_block_size,
+    history_spatial_shape,
     int8_history_layout,
     saved_history_shape,
     saved_time_steps,
@@ -48,6 +49,7 @@ def estimate_compute_memory(
     wavefield_compression: str = "none",
     compression_block_size: Optional[BlockSize] = None,
     reconstruct_rhs: Optional[bool] = None,
+    history_region: str = "extended",
 ) -> Dict[str, Any]:
     """Estimate the tensor payload of one :func:`compute` call.
 
@@ -70,6 +72,7 @@ def estimate_compute_memory(
             is used. ``None`` assumes the default ``"auto"`` with current native
             libraries: E-only for uncompressed float32 storage at
             ``sampling_interval == 1``.
+        history_region: ``"extended"`` or ``"physical"`` history frames.
 
     Returns:
         Byte counts per category plus peaks, recommended capacities (with a
@@ -81,7 +84,13 @@ def estimate_compute_memory(
     storage_bytes = _element_size(storage_dtype)
     model_cells = nx * ny * nz
     field_cells = (nx + 1) * (ny + 1) * (nz + 1)
-    snapshot_cells = nstep * model_cells
+    int8_block = (
+        (compression_block_size or default_compression_block_size(2 if nz == 1 else 3))
+        if wavefield_compression == "int8"
+        else None
+    )
+    history_cells = history_spatial_shape(nx, ny, nz, pml, history_region, int8_block)
+    snapshot_cells = nstep * history_cells[0] * history_cells[1] * history_cells[2]
     components = 3 if mode == 3 else 1
     nt_saved = saved_time_steps(nt, sampling_interval)
 
@@ -116,11 +125,11 @@ def estimate_compute_memory(
     elif wavefield_compression == "int8":
         block_size = compression_block_size or default_compression_block_size(2 if nz == 1 else 3)
         history_mode = 3 if components == 3 else 2
-        history_shape = saved_history_shape(history_mode, nt_saved, nstep, nx, ny, nz)
+        history_shape = saved_history_shape(history_mode, nt_saved, nstep, *history_cells)
         packed_history_bytes = int8_history_layout(history_shape, block_size)["packed_bytes"]
         if reconstruct_rhs:
             final_frame_bytes = int8_history_layout(
-                saved_history_shape(history_mode, 1, nstep, nx, ny, nz), block_size
+                saved_history_shape(history_mode, 1, nstep, *history_cells), block_size
             )["packed_bytes"]
             saved_wavefield_bytes = packed_history_bytes + final_frame_bytes
         else:
@@ -231,6 +240,7 @@ def estimate_compute_memory(
         "recommended_host_capacity": int(host_peak_bytes * MEMORY_SAFETY_MARGIN),
         "nt_saved": nt_saved,
         "components_saved": components,
+        "history_shape": history_cells,
         "reconstruct_rhs": reconstruct_rhs,
         "effective_async_offload": effective_async,
     }
@@ -290,6 +300,7 @@ def format_compute_preview(
     debug: bool,
     save_forward_wavefield_path: Any,
     reconstruct_rhs: bool = False,
+    history_region: str = "extended",
     E: Any,
     H: Any,
     PML: Any,
@@ -321,6 +332,7 @@ def format_compute_preview(
         er_requires_grad=er.requires_grad,
         se_requires_grad=se.requires_grad,
         reconstruct_rhs=reconstruct_rhs,
+        history_region=history_region,
     )
     er_min = float(er.detach().amin().item())
     er_max = float(er.detach().amax().item())
@@ -361,6 +373,7 @@ def format_compute_preview(
         "  gradient sampling interval / saved time steps: "
         f"{model_gradient_sampling_interval} / {estimate['nt_saved']}",
         f"  saved components / compression: {estimate['components_saved']} / {wavefield_compression}",
+        f"  history region / frame cells: {history_region} / {estimate['history_shape']}",
         "  R history: "
         + (
             "rebuilt from consecutive E frames (E-only history)"
