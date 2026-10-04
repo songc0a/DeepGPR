@@ -20,7 +20,14 @@ neither PyTorch nor a GPU.
 
 `test_cpu_determinism.py` runs the same forward/backward problems with 1, 2
 and 5 OpenMP threads in separate processes and requires bitwise identical
-results (the CPU adjoint has no atomics since 0.1.0).
+results (the CPU adjoint has no atomics since 0.1.0). The CUDA 2D TM gather
+adjoint has no atomics either:
+`test_discrete_adjoint.test_cuda_2d_tm_adjoint_is_bitwise_reproducible` repeats
+2D mode 2 and mode 3 gradients (including coincident sources and receivers)
+and requires bitwise equality, and
+`test_cuda_asymmetric_cpml_dot_products_orders_2_4_8` adds asymmetric and
+partly disabled CPML faces to the CUDA dot-product tests (3D scatter and 2D
+gather).
 `test_signal_and_regularization.py` checks the FIR design, the analytic-signal
 envelope and the TV variants against independent NumPy implementations.
 

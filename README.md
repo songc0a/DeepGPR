@@ -188,8 +188,10 @@ Run the notebooks `00` to `09` in numeric order, followed by
 the complete matrix and CUDA options.
 
 **Reproducibility.** The CPU backend gives bitwise identical forward results
-and gradients for any `OMP_NUM_THREADS`. The CUDA adjoint accumulates with
-atomics and can differ in the last bits between runs.
+and gradients for any `OMP_NUM_THREADS`. On CUDA, 2D Ez-TM runs (the 2D fast
+path) gather their adjoint without atomics and are bitwise reproducible; the
+general (3D) CUDA adjoint accumulates with atomics and can differ in the last
+bits between runs.
 
 **Reproducing results from DeepGPR ≤ 0.0.20.** 0.1.0 corrects the FIR design
 for even filter lengths, the envelope for odd trace lengths and the isotropic

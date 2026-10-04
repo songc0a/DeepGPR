@@ -68,7 +68,7 @@ def _locations(shape):
 
 
 def _state_problem(order, pml, device="cpu"):
-    torch.manual_seed(1100 + order + pml)
+    torch.manual_seed(1100 + order + (pml if isinstance(pml, int) else sum(pml)))
     device = torch.device(device)
     shape = (9, 10, 8)
     nx, ny, nz = shape
@@ -149,7 +149,7 @@ def _state_problem_2d_tm(order, pml, device="cpu"):
     the 2D TM fast path is selected. Their input perturbations are zero and
     their cotangents must come back as zero; all outputs get random duals.
     """
-    torch.manual_seed(3100 + order + pml)
+    torch.manual_seed(3100 + order + (pml if isinstance(pml, int) else sum(pml)))
     device = torch.device(device)
     nx, ny = 11, 12
     x = torch.linspace(0.0, 1.0, nx, device=device)[:, None]
@@ -347,6 +347,66 @@ class DiscreteAdjointTests(unittest.TestCase):
                     _state_problem(order=order, pml=2, device="cuda"),
                     2.0e-4,
                 )
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is not available")
+    def test_cuda_asymmetric_cpml_dot_products_orders_2_4_8(self):
+        for order in (2, 4, 8):
+            for pml in ([1, 2, 3, 1, 2, 3], [3, 0, 1, 2, 0, 2]):
+                with self.subTest(order=order, pml=pml, dimensions=3):
+                    self.assertLess(_state_problem(order, pml, "cuda"), 2.0e-4)
+            with self.subTest(order=order, pml=[3, 1, 0, 2], dimensions=2):
+                error, tm2d, inactive_gradient = _state_problem_2d_tm(order, [3, 1, 0, 2], "cuda")
+                self.assertTrue(tm2d)
+                self.assertLess(error, 2.0e-4)
+                self.assertEqual(inactive_gradient, 0.0)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is not available")
+    def test_cuda_2d_tm_adjoint_is_bitwise_reproducible(self):
+        # The 2D TM fast path gathers its adjoint without atomics, and the
+        # receiver/source adjoints add coincident points in index order.
+        device = torch.device("cuda")
+
+        def run(shape, mode, source_location, receiver_location, pml):
+            torch.manual_seed(5)
+            nt = 50
+            eps_r = (4.0 + torch.rand(shape, device=device)).requires_grad_(True)
+            sigma = (1.0e-4 + 1.0e-4 * torch.rand(shape, device=device)).requires_grad_(True)
+            source = torch.randn((source_location.shape[1], nt, 1), device=device)
+            source.requires_grad_(True)
+            state_e, state_h, state_pml = DeepGPR.checkpoint_initial_field(
+                device=device, dx=0.02, dt=1.0e-11, source_amplitudes=source.detach(),
+                source_location=source_location, receiver_location=receiver_location,
+                er=eps_r.detach(), se=sigma.detach(), pmlthick=pml, fdtd_order=4,
+            )
+            states = [t.clone().requires_grad_(True) for t in (*state_e, *state_h, *state_pml)]
+            result = DeepGPR.compute(
+                device=device, dx=0.02, dt=1.0e-11, source_amplitudes=source,
+                source_location=source_location, receiver_location=receiver_location,
+                eps_r=eps_r, sigma=sigma, pmlthick=pml, fdtd_order=4, mode=mode,
+                E=tuple(states[:3]), H=tuple(states[3:6]), PML=tuple(states[6:]),
+            )
+            self.assertTrue(result[-1].grad_fn.config.tm2d_fast_path)
+            loss = result[-1].square().sum() + sum(t.square().sum() for t in (*result[1], *result[2]))
+            loss.backward()
+            return [eps_r.grad, sigma.grad, source.grad] + [t.grad for t in states]
+
+        coincident = torch.tensor(
+            [[[6, 5, 0], [6, 5, 0]], [[8, 7, 0], [8, 7, 0]]], dtype=torch.int32, device=device
+        )
+        receivers_2d = torch.tensor(
+            [[[6, 9, 0], [6, 9, 0], [7, 11, 0]], [[8, 10, 0], [8, 10, 0], [5, 12, 0]]],
+            dtype=torch.int32, device=device,
+        )
+        cases = [
+            ((14, 16), 2, coincident, receivers_2d, [2, 3, 1, 2]),
+            ((14, 16), 3, coincident, receivers_2d, [3, 0, 2, 1]),
+        ]
+        for shape, mode, sources, receivers, pml in cases:
+            first = run(shape, mode, sources, receivers, pml)
+            second = run(shape, mode, sources, receivers, pml)
+            with self.subTest(mode=mode):
+                for a, b in zip(first, second):
+                    self.assertTrue(torch.equal(a, b))
 
     @unittest.skipUnless(
         torch.cuda.is_available() and torch.cuda.device_count() >= 2,

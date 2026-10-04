@@ -443,3 +443,99 @@ Nsight, 2D fp32 full iteration, average µs per launch (item 3 → item 4):
 `adjoint_cpml_e` 9.35 → 4.37, `adjoint_cpml_h` 8.98 → 4.53.
 
 Full suite: 136 tests, all passed (1 skipped).
+
+## 5. CUDA: adjoint as a gather
+
+**Default:** yes on the 2D TM fast path (2D models with an Ez source and zero
+Ex/Ey/Hz, i.e. the common 2D FWI case); **no** for the general (3D) path,
+which keeps the atomic scatter because every gather variant measured slower
+there. `deepgpr_deterministic_adjoint()` therefore stays 0.
+
+### Implementation (2D TM path)
+
+Per reverse step, after the receiver/source adjoints and the material
+gradient:
+
+1. `adjoint_cpml_e_weights_tm2d_gpu` (x/y faces, k = 0): for every Ez CPML
+   entry compute the derivative weight
+   `(sign upd (RA - 1) lambda_Ez - RF lambda_phi) / spacing` into phi-sized
+   scratch, then advance `lambda_phi` (it needs the old value, so the weight
+   is stored first).
+2. `adjoint_e_gather_tm2d_gpu`: each H point gathers
+   `sign * c(src) * lambda_Ez(src)` (only where the forward Ez update ran) plus
+   the stored weights, with the stencil radius and coefficient of the source
+   (`gather_backward_transpose_gpu`, same form as the CPU
+   `gather_*_transpose`). It first applies the deferred
+   `lambda_H <- ch_hist lambda_H` of the previous reverse step at the points
+   the forward H update touched.
+3. `adjoint_cpml_h_weights_tm2d_gpu`: same for the Hy/Hx CPML entries.
+4. `adjoint_h_gather_tm2d_gpu`: each Ez point applies `ce_hist` to its own
+   cotangent (deferred from step 2, where neighbours still read it; only
+   where the forward update ran) and gathers the transposed forward
+   differences of `ch_curl lambda_H` plus the magnetic weights.
+5. After the loop `scale_magnetic_adjoint_tm2d_gpu` applies the last deferred
+   `ch_hist` scaling.
+
+No kernel on this path uses atomics. The receiver adjoint (one thread per
+receiver; the first receiver at a location adds all coincident ones in index
+order), the source-waveform gradient (one block per source, fixed-order tree
+over shots) and the forward source injection (one thread per shot, sources in
+order, `__fadd_rn` so the result is bitwise the old `atomicAdd`) are
+deterministic on every path. A first version with one thread per shot looping
+over the receivers cost 12.5 µs/step (64 receivers, serial global RMW) and was
+replaced.
+
+### Correctness
+
+| check | result |
+|---|---|
+| existing dot-product (3D all faces; CPU and CUDA), Taylor (CPU and CUDA), CPU/CUDA consistency, coincident sources/receivers | pass at the original thresholds |
+| new `test_cuda_asymmetric_cpml_dot_products_orders_2_4_8` (3D `[1,2,3,1,2,3]`, `[3,0,1,2,0,2]`; 2D TM `[3,1,0,2]`) | pass (< 2e-4); measured 0 to 7e-6, the same range as the scatter adjoint |
+| new `test_cuda_2d_tm_adjoint_is_bitwise_reproducible` (2D mode 2 and 3, two coincident sources and receivers per shot, all gradients incl. states) | bitwise identical repeats |
+| benchmark 2D, current b1 vs b2 | data and gradients bitwise identical for every storage mode |
+| vs item 4 / vs baseline | data bitwise; 2D gradients 1.1-1.7e-7 relative; 3D (unchanged scatter) 2-9e-7 / 4-10e-6, as base-vs-base noise |
+| 2D orders 2/4/8 x PML 0 / `[3,5,4,2]` vs baseline | data bitwise, gradients 1-3e-7 |
+
+### Performance (formal protocol, current vs item 4 vs baseline)
+
+Raw: `history_adjoint_ab/item5h_{cur,prev,base}_b{1,2}`.
+
+| case | mode | backward ms item 4 (b1 / b2) | gather (b1 / b2) | vs item 4 | total vs baseline |
+|---|---|---:|---:|---:|---:|
+| 2D | fp32 | 96.57 / 95.82 | 67.73 / 67.73 | -29.9 % / -29.3 % | -41.6 % / -41.4 % |
+| 2D | fp16 | 95.45 / 96.10 | 67.67 / 67.24 | -29.1 % / -30.0 % | -34.6 % / -33.7 % |
+| 2D | bf16 | 93.55 / 94.29 | 65.16 / 65.14 | -30.3 % / -30.9 % | -35.5 % / -34.9 % |
+| 2D | int8 | 95.64 / 96.29 | 67.36 / 67.30 | -29.6 % / -30.1 % | -31.1 % / -30.9 % |
+| 3D | fp32 / fp16 / bf16 / int8 | (scatter, unchanged) | | -1.6 % to +1.5 % | |
+
+### General-path gather: variants measured and rejected
+
+All variants passed the dot-product, Taylor and determinism tests
+(`.worktrees`-local builds; 3D 80^3 mode 3 and 2D 512x384, fp32 full
+iteration, `--keep-allocator-cache`, 3 warmups + 10 repeats, backward median):
+
+| variant | 3D backward ms | 2D backward ms |
+|---|---:|---:|
+| atomic scatter (item 4) | 79.6-82.0 | 95.7-96.1 |
+| gather, one thread per cell (6 channels), phi-sized weight scratch | 96.8-97.1 | 76.6-77.0 |
+| same + `__launch_bounds__(256, 4)` (64 registers) | 96.2 | 78.5 |
+| CPML weights recomputed in the gather (no scratch, no weight kernels) | 111.2 | 80.2 |
+| scratch + interior fast path (bitwise equal to the general path) | 106.2 | 76.8 |
+| scratch + one thread per (cell, component) | 99.1 | 82.3 |
+| recomputed weights + per component + launch bounds | 89.6 | 79.5 |
+| same + parallel receiver adjoint | 86.4-89.2 | 70.8-71.4 |
+| scratch + parallel receiver adjoint | 96.5 | 68.5 |
+| **adopted: 2D TM gather (scratch), 3D scatter** | **78.9** | **67.2** |
+
+Order 4 (3D 80^3, nt 300): scatter 73.2 ms, best gather 77.1 ms (+5 %). A
+larger 3D case (140x140x100 + PML 10, nt 300): scatter 242.8 ms, best gather
+278.3 ms (+15 %). Nsight (best gather, 3D): the two gather kernels take
+82 + 75 µs per step against 42 + 41 + 24 + 25 µs for the scatter adjoint and
+its CPML kernels. In 3D each target re-reads 2R source coefficients and
+cotangents per channel (six channels), whereas the scatter issues mostly
+uncontended `RED` atomics that the 4090 L2 absorbs well; the 3D scratch
+version also pays ~20 MB/step of extra DRAM traffic for the weights. Making
+the 3D gather competitive would need shared-memory tiling of the source
+lines; that is left as a follow-up.
+
+Full suite: 138 tests, all passed (1 skipped).

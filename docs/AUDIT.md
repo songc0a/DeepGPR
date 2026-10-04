@@ -49,7 +49,7 @@ robustness or hygiene.
 | N-4 | Low | CPU forward | `malloc` failure silently degrades fp16/bf16 R-history accuracy | Fixed |
 | N-5 | Low | native | PEC threshold `100.0f` duplicated as a literal in 5 places | Fixed |
 | N-6 | Perf | CPU kernels | Per-cell 64-bit division/modulo index decode in every update loop | Recommended |
-| N-7 | Perf | CPU/CUDA | Atomic scatter in the adjoint curl transpose | Fixed on CPU; CUDA recommended |
+| N-7 | Perf | CPU/CUDA | Atomic scatter in the adjoint curl transpose | Fixed on CPU; CUDA 2D TM path fixed, 3D kept (measured) |
 | N-8 | Perf | CUDA | Streams/events/buffers created and destroyed on every call | Recommended |
 
 ## Python package
@@ -211,8 +211,9 @@ parallel and sources/receivers in index order. There are no OpenMP atomics
 left; results are bitwise identical for 1–8 threads, the dot-product test
 confirms the exact transpose, and forward + backward is 17–43 % faster.
 The gradients differ from 0.0.20 at rounding level only. Memory: six
-field-sized buffers per shot during backward. The CUDA adjoint still uses
-`atomicAdd` (reported by `deepgpr_deterministic_adjoint() == 0`).
+field-sized buffers per shot during backward. The general CUDA adjoint still
+uses `atomicAdd` (`deepgpr_deterministic_adjoint() == 0`); the CUDA 2D TM fast
+path gathers without atomics since the unreleased N-7 work.
 
 ### N-2 CUDA errors are swallowed (High, Fixed)
 `CUDA_CHECK` / `CUDA_CHECK_LAST` print to `std::cerr` and `return` from a
@@ -252,12 +253,27 @@ iterates over a flattened index and recovers `(s, i, j, k)` with four 64-bit
 Nested loops with `collapse(2)` and hoisted ratios typically give a
 measurable speed-up on the memory-bound CPU path.
 
-### N-7 Atomic scatter in the adjoint (Performance, Fixed on CPU)
+### N-7 Atomic scatter in the adjoint (Performance, Fixed on CPU and CUDA)
 Besides determinism (N-1), the atomic scatter of the transposed curl was the
 main serialisation point of the CPU adjoint. The CPU gather formulation
-removed it (see N-1 for timings). The same restructuring would make the CUDA
-adjoint deterministic and likely faster; it needs GPU profiling and is left
-for a later release.
+removed it (see N-1 for timings).
+
+**CUDA (unreleased):** an experiment that only skipped the four 2D
+z-transpose `atomicAdd` per cell cut the 2D backward by 16 % (~18 µs/step),
+confirming the atomics as the dominant adjoint cost. On the 2D TM fast path
+the adjoint is now a gather: the CPML transposes first store their
+derivative weights in phi-sized scratch (before overwriting the auxiliary
+cotangent), then one kernel per half step gathers `c(src) * lambda(src)` plus
+those weights onto each target point with the radius and coefficient of the
+source; `lambda_E <- ce_hist lambda_E` and `lambda_H <- ch_hist lambda_H` are
+deferred to the next kernel that writes the field. Receiver and source-waveform
+adjoints add coincident points in a fixed order. This path is bitwise
+reproducible and 2D backward is 30 % faster. A general 3D gather with the same
+structure (several variants: phi-sized scratch, on-the-fly CPML weights,
+per-component threads, interior fast path) was correct but 5-25 % slower than
+the atomic scatter on the RTX 4090, so the general path keeps the scatter and
+`deepgpr_deterministic_adjoint()` stays 0. Measurements:
+`tests/profiling_results/history_adjoint_gpu_report.md` §5.
 
 ### N-8 Per-call CUDA resources (Performance, Recommended)
 The async-offload path creates two streams, four events and staging buffers

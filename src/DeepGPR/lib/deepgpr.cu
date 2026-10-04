@@ -50,7 +50,11 @@ DEEPGPR_API void deepgpr_clear_last_error(void)
     g_last_error[0] = '\0';
 }
 
-/* The CUDA adjoint accumulates with atomicAdd: not bitwise reproducible. */
+/*
+ * The general CUDA adjoint scatters its transposed stencils with atomicAdd and
+ * is therefore not bitwise reproducible. (The 2D TM fast path gathers without
+ * atomics and is reproducible, but the probe describes every call.)
+ */
 DEEPGPR_API int deepgpr_deterministic_adjoint(void)
 {
     return 0;
@@ -357,6 +361,7 @@ struct CudaCallResources {
     unsigned char* d_E_buf = nullptr;
     unsigned char* d_R_buf = nullptr;
     float* d_exact_Eold = nullptr;
+    float* d_cpml_weights = nullptr;
     cudaStream_t streams[2] = {nullptr, nullptr};
     cudaEvent_t events[4] = {nullptr, nullptr, nullptr, nullptr};
 
@@ -368,6 +373,7 @@ struct CudaCallResources {
             if (stream != nullptr) cudaStreamSynchronize(stream);
         }
         if (d_exact_Eold != nullptr) cudaFree(d_exact_Eold);
+        if (d_cpml_weights != nullptr) cudaFree(d_cpml_weights);
         if (d_R_buf != nullptr) cudaFree(d_R_buf);
         if (d_E_buf != nullptr) cudaFree(d_E_buf);
         for (cudaEvent_t event : events) {
@@ -602,6 +608,17 @@ __device__ __forceinline__ bool cell_of_thread(
     *id4 = (long long)blockIdx.y * grid.cells + flat;
     return true;
 }
+
+/*
+ * Twelve CPML arrays of one field type (x0, xm, y0, ym, z0, zm faces; phi1 and
+ * phi2), e.g. the derivative weights of the gather adjoint. Pointers of
+ * zero-thickness faces are never dereferenced.
+ */
+struct CpmlArrays {
+    float* x0P1; float* x0P2; float* xmP1; float* xmP2;
+    float* y0P1; float* y0P2; float* ymP1; float* ymP2;
+    float* z0P1; float* z0P2; float* zmP1; float* zmP2;
+};
 
 /* Compile each stencil order independently to unroll adjoint curl loops. */
 #define LAUNCH_ORDER_KERNEL(kernel, grid, block, stream, order, ...) do { \
@@ -1066,6 +1083,154 @@ __device__ __forceinline__ void pml_forward_derivative_adjoint(
 }
 
 /*
+ * Gather form of the transposed staggered differences (deterministic, no
+ * atomics). Each target point b collects the stencil contributions of every
+ * source point a whose difference reads it, with the radius and coefficient
+ * evaluated at the source (as the forward operator did). `weight(a)` returns
+ * the source's material-weighted cotangent (zero where the forward did not
+ * evaluate the difference). Matches gather_*_transpose in deepgpr_cpu.c.
+ */
+template<int ORDER, typename SourceWeight>
+__device__ __forceinline__ float gather_backward_transpose_gpu(
+    long long b, long long n, const SourceWeight& weight)
+{
+    const int R = FdtdStaticRadius<ORDER>::value;
+    float acc = 0.0f;
+#pragma unroll
+    for (int r = 1; r <= R; ++r) {
+        long long plus_source = b - (r - 1);
+        if (plus_source >= 0) {
+            int radius = R == 1 ? 1 : usable_backward_radius(plus_source, n, R);
+            if (r <= radius) acc += fdtd_coeff(radius, r) * weight(plus_source);
+        }
+        long long minus_source = b + r;
+        if (minus_source < n) {
+            int radius = R == 1 ? 1 : usable_backward_radius(minus_source, n, R);
+            if (r <= radius) acc -= fdtd_coeff(radius, r) * weight(minus_source);
+        }
+    }
+    return acc;
+}
+
+template<int ORDER, typename SourceWeight>
+__device__ __forceinline__ float gather_forward_transpose_gpu(
+    long long b, long long n, const SourceWeight& weight)
+{
+    const int R = FdtdStaticRadius<ORDER>::value;
+    float acc = 0.0f;
+#pragma unroll
+    for (int r = 1; r <= R; ++r) {
+        long long plus_source = b - r;
+        if (plus_source >= 0) {
+            int radius = R == 1 ? 1 : usable_forward_radius(plus_source, n, R);
+            if (r <= radius) acc += fdtd_coeff(radius, r) * weight(plus_source);
+        }
+        long long minus_source = b + (r - 1);
+        if (minus_source < n) {
+            int radius = R == 1 ? 1 : usable_forward_radius(minus_source, n, R);
+            if (r <= radius) acc -= fdtd_coeff(radius, r) * weight(minus_source);
+        }
+    }
+    return acc;
+}
+
+/*
+ * Source weight along one grid line for one transposed-curl channel: the base
+ * update term sign * c(a) * lambda(a) where the forward update ran at source
+ * a, plus the CPML derivative weights of the low/high faces of that axis.
+ */
+struct CurlLine {
+    const float* lambda;     /* source cotangent component (field index) */
+    const float* coeff;      /* ce_curl or ch_curl (material index) */
+    long long field0;        /* field index of the line at axis coordinate 0 */
+    long long mat0;          /* material index of the line at axis coordinate 0 */
+    long long stride;        /* index stride along the axis */
+    float sign;
+    int scaled;              /* coefficient * spacing_x / spacing_axis */
+    float spacing_x, spacing_axis;
+    int active_begin, active_end;  /* forward update ran for begin <= a < end */
+    const float* low;        /* CPML weights of the low face or nullptr */
+    long long low_index0, low_step;
+    int low_first, low_last, low_q0;   /* index = low_index0 + (low_q0 - a) * low_step */
+    const float* high;       /* CPML weights of the high face or nullptr */
+    long long high_index0, high_step;
+    int high_first, high_last, high_origin;  /* index = high_index0 + (a - high_origin) * high_step */
+
+    __device__ __forceinline__ float operator()(long long a) const
+    {
+        float w = 0.0f;
+        if (a >= active_begin && a < active_end) {
+            float c = coeff[mat0 + a * stride];
+            float c_axis = scaled ? c * spacing_x / spacing_axis : c;
+            w = (sign * c_axis) * lambda[field0 + a * stride];
+        }
+        if (low != nullptr && a >= low_first && a <= low_last) {
+            w += low[low_index0 + (low_q0 - a) * low_step];
+        }
+        if (high != nullptr && a >= high_first && a <= high_last) {
+            w += high[high_index0 + (a - high_origin) * high_step];
+        }
+        return w;
+    }
+};
+
+__device__ __forceinline__ CurlLine curl_line(
+    const float* lambda, const float* coeff, long long field0, long long mat0,
+    long long stride, float sign, float spacing_x, float spacing_axis,
+    bool line_active, int active_begin, int active_end)
+{
+    CurlLine line;
+    line.lambda = lambda;
+    line.coeff = coeff;
+    line.field0 = field0;
+    line.mat0 = mat0;
+    line.stride = stride;
+    line.sign = sign;
+    line.scaled = spacing_axis != spacing_x;
+    line.spacing_x = spacing_x;
+    line.spacing_axis = spacing_axis;
+    line.active_begin = line_active ? active_begin : 0;
+    line.active_end = line_active ? active_end : 0;
+    line.low = nullptr;
+    line.high = nullptr;
+    line.low_index0 = line.low_step = line.high_index0 = line.high_step = 0;
+    line.low_first = line.high_first = 1;
+    line.low_last = line.high_last = 0;
+    line.low_q0 = line.high_origin = 0;
+    return line;
+}
+
+/*
+ * Attach the CPML weights of one axis. Electric faces cover 1..pml (low) and
+ * n-1-pml..n-2 (high, excluding 0); magnetic faces 0..pml-1 and n-1-pml..n-2.
+ */
+__device__ __forceinline__ void attach_cpml(
+    CurlLine* line, int electric, int n, bool condition,
+    const float* low, int pml_low, long long low_index0, long long low_step,
+    const float* high, int pml_high, long long high_index0, long long high_step)
+{
+    if (!condition) return;
+    if (pml_low > 0) {
+        line->low = low;
+        line->low_index0 = low_index0;
+        line->low_step = low_step;
+        line->low_first = electric ? 1 : 0;
+        line->low_last = electric ? pml_low : pml_low - 1;
+        line->low_q0 = electric ? pml_low : pml_low - 1;
+    }
+    if (pml_high > 0) {
+        line->high = high;
+        line->high_index0 = high_index0;
+        line->high_step = high_step;
+        line->high_origin = n - 1 - pml_high;
+        line->high_first = line->high_origin;
+        if (electric && line->high_first < 1) line->high_first = 1;
+        if (line->high_first < 0) line->high_first = 0;
+        line->high_last = n - 2;
+    }
+}
+
+/*
  * Build forward-update coefficients for electric and magnetic fields.
  *
  * Parameters:
@@ -1209,22 +1374,22 @@ __global__ void inject_sources_and_sample_gpu(
     float* __restrict__ receiver_data, int receiver_component)
 {
     long long field_stride = (long long)NX * NY * NZ;
-    long long total_sources = (long long)step * nsrc;
-    for (long long work = threadIdx.x; work < total_sources; work += blockDim.x) {
-        int s = (int)(work / nsrc);
-        long long src = work % nsrc;
-        long long i = sourcelocation[s * nsrc * 3 + src * 3 + 0];
-        long long j = sourcelocation[s * nsrc * 3 + src * 3 + 1];
-        long long k = sourcelocation[s * nsrc * 3 + src * 3 + 2];
-        long long material_idx = i * NY * NZ + j * NZ + k;
-        long long field_idx = (long long)s * field_stride + material_idx;
-        float dipole_length = source_component == 0 ? dx : (source_component == 1 ? dy : dz);
-        float scale = srcwaveforms[src * nt + iteration] * dipole_length / (dx * dy * dz);
-        float value = ce_rhs[material_idx] * scale;
-
-        if (source_component == 0) atomicAdd(&Ex[field_idx], -value);
-        else if (source_component == 1) atomicAdd(&Ey[field_idx], -value);
-        else atomicAdd(&Ez[field_idx], -value);
+    float* field_e = source_component == 0 ? Ex : (source_component == 1 ? Ey : Ez);
+    /* One thread per shot adds its sources in index order: coincident sources
+     * accumulate in a fixed order (bitwise reproducible), shots never alias. */
+    for (int s = threadIdx.x; s < step; s += blockDim.x) {
+        for (long long src = 0; src < nsrc; ++src) {
+            long long i = sourcelocation[s * nsrc * 3 + src * 3 + 0];
+            long long j = sourcelocation[s * nsrc * 3 + src * 3 + 1];
+            long long k = sourcelocation[s * nsrc * 3 + src * 3 + 2];
+            long long material_idx = i * NY * NZ + j * NZ + k;
+            long long field_idx = (long long)s * field_stride + material_idx;
+            float dipole_length = source_component == 0 ? dx : (source_component == 1 ? dy : dz);
+            float scale = srcwaveforms[src * nt + iteration] * dipole_length / (dx * dy * dz);
+            float value = ce_rhs[material_idx] * scale;
+            /* __fadd_rn keeps the rounding of the former atomicAdd(field, -value). */
+            field_e[field_idx] = __fadd_rn(field_e[field_idx], -value);
+        }
     }
 
     __syncthreads();
@@ -1941,6 +2106,219 @@ __global__ void adjoint_cpml_h_gpu(
 }
 
 /*
+ * 2D TM fast path adjoint as a gather (deterministic, no atomics). Only the
+ * Ez/Hx/Hy subsystem is transposed (see SOLVER_TM2D). Each reverse step runs
+ *   adjoint_cpml_e_weights_tm2d_gpu  CPML transpose of the Ez correction: stores
+ *                                    the derivative weight (phi-sized scratch)
+ *                                    before advancing lambda_phi,
+ *   adjoint_e_gather_tm2d_gpu        gathers c(src) lambda_Ez(src) plus those
+ *                                    weights onto lambda_Hx, lambda_Hy,
+ *   adjoint_cpml_h_weights_tm2d_gpu  same for the Hx/Hy corrections,
+ *   adjoint_h_gather_tm2d_gpu        gathers onto lambda_Ez.
+ * Every thread writes only its own point, so a field's own scaling cannot
+ * happen while neighbours still read it: lambda_Ez <- ce_hist lambda_Ez is
+ * applied in adjoint_h_gather_tm2d_gpu and lambda_H <- ch_hist lambda_H in the
+ * next step's adjoint_e_gather_tm2d_gpu (scale_h) or scale_magnetic_adjoint_tm2d_gpu,
+ * in both cases only where the forward update ran.
+ */
+template<int ORDER>
+__global__ void adjoint_cpml_e_weights_tm2d_gpu(
+    const float* __restrict__ lambda_ez, int step, int NX, int NY, int NZ,
+    int pml0, int pml1, int pml2, int pml3, float dx, float dy,
+    const float* __restrict__ x0R, const float* __restrict__ xmR,
+    const float* __restrict__ y0R, const float* __restrict__ ymR,
+    const float* __restrict__ update,
+    float* x0P2, float* xmP2, float* y0P2, float* ymP2, CpmlArrays weights)
+{
+    long long ny_nz = (long long)NY * NZ;
+    long long field_stride = (long long)NX * ny_nz;
+    long long region_work = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    int region = (int)blockIdx.y;
+    int s = (int)blockIdx.z;
+    long long i, j, k;
+    if (s >= step || !map_cpml_region_work<1>(region, region_work,
+        NX, NY, 1, pml0, pml1, pml2, pml3, 0, 0, &i, &j, &k)) return;
+    long long idx = i * ny_nz + j * NZ + k;
+    float upd = update[idx];
+    float lambda_field = lambda_ez[(long long)s * field_stride + idx];
+
+#define WEIGHT_TM2D(R, P, W, p, q, spacing, sign) \
+    do { \
+        float lambda_phi__ = (P)[p_idx]; \
+        (W)[p_idx] = ((sign) * upd * ((R)[q] - 1.0f) * lambda_field \
+            - (R)[3 * (p) + (q)] * lambda_phi__) * (1.0f / (spacing)); \
+        (P)[p_idx] = (sign) * upd * (R)[(p) + (q)] * lambda_field \
+            + (R)[2 * (p) + (q)] * lambda_phi__; \
+    } while (0)
+
+    if (pml0 > 0 && i > 0 && i <= pml0) {
+        long long q = pml0 - i;
+        long long p_idx = ((long long)s * (pml0 + 1) * NY * (NZ - 1)) + q * NY * (NZ - 1) + j * (NZ - 1) + k;
+        WEIGHT_TM2D(x0R, x0P2, weights.x0P2, pml0, q, dx, 1.0f);
+    }
+    if (pml1 > 0 && i >= NX - 1 - pml1 && i < NX - 1 && i > 0) {
+        long long q = i - (NX - 1 - pml1);
+        long long p_idx = ((long long)s * (pml1 + 1) * NY * (NZ - 1)) + q * NY * (NZ - 1) + j * (NZ - 1) + k;
+        WEIGHT_TM2D(xmR, xmP2, weights.xmP2, pml1, q, dx, 1.0f);
+    }
+    if (pml2 > 0 && j > 0 && j <= pml2) {
+        long long q = pml2 - j;
+        long long p_idx = ((long long)s * NX * (pml2 + 1) * (NZ - 1)) + i * (pml2 + 1) * (NZ - 1) + q * (NZ - 1) + k;
+        WEIGHT_TM2D(y0R, y0P2, weights.y0P2, pml2, q, dy, -1.0f);
+    }
+    if (pml3 > 0 && j >= NY - 1 - pml3 && j < NY - 1 && j > 0) {
+        long long q = j - (NY - 1 - pml3);
+        long long p_idx = ((long long)s * NX * (pml3 + 1) * (NZ - 1)) + i * (pml3 + 1) * (NZ - 1) + q * (NZ - 1) + k;
+        WEIGHT_TM2D(ymR, ymP2, weights.ymP2, pml3, q, dy, -1.0f);
+    }
+}
+
+template<int ORDER>
+__global__ void adjoint_cpml_h_weights_tm2d_gpu(
+    const float* __restrict__ lambda_hx, const float* __restrict__ lambda_hy,
+    int step, int NX, int NY, int NZ,
+    int pml0, int pml1, int pml2, int pml3, float dx, float dy,
+    const float* __restrict__ x0R, const float* __restrict__ xmR,
+    const float* __restrict__ y0R, const float* __restrict__ ymR,
+    const float* __restrict__ update,
+    float* x0P1, float* xmP1, float* y0P1, float* ymP1, CpmlArrays weights)
+{
+    long long ny_nz = (long long)NY * NZ;
+    long long field_stride = (long long)NX * ny_nz;
+    long long region_work = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    int region = (int)blockIdx.y;
+    int s = (int)blockIdx.z;
+    long long i, j, k;
+    if (s >= step || !map_cpml_region_work<0>(region, region_work,
+        NX, NY, 1, pml0, pml1, pml2, pml3, 0, 0, &i, &j, &k)) return;
+    long long idx = i * ny_nz + j * NZ + k;
+    long long work = (long long)s * field_stride + idx;
+    float upd = update[idx];
+
+    if (pml0 > 0 && i < pml0) {
+        long long q = pml0 - 1 - i;
+        long long p_idx = ((long long)s * pml0 * NY * (NZ - 1)) + q * NY * (NZ - 1) + j * (NZ - 1) + k;
+        float lambda_field = lambda_hy[work];
+        WEIGHT_TM2D(x0R, x0P1, weights.x0P1, pml0, q, dx, 1.0f);
+    }
+    if (pml1 > 0 && i >= NX - 1 - pml1 && i < NX - 1) {
+        long long q = i - (NX - 1 - pml1);
+        long long p_idx = ((long long)s * pml1 * NY * (NZ - 1)) + q * NY * (NZ - 1) + j * (NZ - 1) + k;
+        float lambda_field = lambda_hy[work];
+        WEIGHT_TM2D(xmR, xmP1, weights.xmP1, pml1, q, dx, 1.0f);
+    }
+    if (pml2 > 0 && j < pml2) {
+        long long q = pml2 - 1 - j;
+        long long p_idx = ((long long)s * NX * pml2 * (NZ - 1)) + i * pml2 * (NZ - 1) + q * (NZ - 1) + k;
+        float lambda_field = lambda_hx[work];
+        WEIGHT_TM2D(y0R, y0P1, weights.y0P1, pml2, q, dy, -1.0f);
+    }
+    if (pml3 > 0 && j >= NY - 1 - pml3 && j < NY - 1) {
+        long long q = j - (NY - 1 - pml3);
+        long long p_idx = ((long long)s * NX * pml3 * (NZ - 1)) + i * pml3 * (NZ - 1) + q * (NZ - 1) + k;
+        float lambda_field = lambda_hx[work];
+        WEIGHT_TM2D(ymR, ymP1, weights.ymP1, pml3, q, dy, -1.0f);
+    }
+#undef WEIGHT_TM2D
+}
+
+/* (E update + E CPML)^T of the 2D TM path gathered onto lambda_Hx, lambda_Hy (k = 0). */
+template<int ORDER>
+__global__ void adjoint_e_gather_tm2d_gpu(
+    const float* __restrict__ ce_curl, const float* __restrict__ ch_hist,
+    const float* __restrict__ lambda_ez, float* __restrict__ lambda_hx, float* __restrict__ lambda_hy,
+    CpmlArrays w, CellGrid cells, int NX, int NY, int NZ,
+    int pml0, int pml1, int pml2, int pml3, float dx, float dy, int scale_h)
+{
+    long long ny_nz = (long long)NY * NZ;
+    long long work, idx, i, j, k;
+    if (!cell_of_thread<1>(cells, NY, NZ, &work, &idx, &i, &j, &k)) return;
+    long long s = blockIdx.y;
+    long long shot_field = work - idx;
+    bool ez_2d = (NX - 1) != 1 || (NY - 1) != 1;
+
+    /* lambda_Hx: transpose of d/dy (Ez sources). */
+    {
+        float value = lambda_hx[work];
+        bool do_hx = ((NX - 1) != 1 && i > 0 && i < NX - 1 && j < NY - 1 && k < NZ - 1);
+        if (scale_h && do_hx) value = ch_hist[idx] * value;
+        long long base = i * ny_nz + k;
+        CurlLine line = curl_line(lambda_ez, ce_curl, shot_field + base, base, NZ, -1.0f, dx, dy,
+            ez_2d && i > 0 && i < NX - 1 && k < NZ - 1, 1, NY - 1);
+        attach_cpml(&line, 1, NY, k < NZ - 1,
+            w.y0P2, pml2, s * NX * (pml2 + 1) * (NZ - 1) + i * (pml2 + 1) * (NZ - 1) + k, NZ - 1,
+            w.ymP2, pml3, s * NX * (pml3 + 1) * (NZ - 1) + i * (pml3 + 1) * (NZ - 1) + k, NZ - 1);
+        value += gather_backward_transpose_gpu<ORDER>(j, NY, line);
+        lambda_hx[work] = value;
+    }
+    /* lambda_Hy: transpose of d/dx (Ez sources). */
+    {
+        float value = lambda_hy[work];
+        bool do_hy = ((NY - 1) != 1 && i < NX - 1 && j > 0 && j < NY - 1 && k < NZ - 1);
+        if (scale_h && do_hy) value = ch_hist[idx] * value;
+        long long base = j * NZ + k;
+        CurlLine line = curl_line(lambda_ez, ce_curl, shot_field + base, base, ny_nz, 1.0f, dx, dx,
+            ez_2d && j > 0 && j < NY - 1 && k < NZ - 1, 1, NX - 1);
+        attach_cpml(&line, 1, NX, k < NZ - 1,
+            w.x0P2, pml0, s * (pml0 + 1) * NY * (NZ - 1) + j * (NZ - 1) + k, (long long)NY * (NZ - 1),
+            w.xmP2, pml1, s * (pml1 + 1) * NY * (NZ - 1) + j * (NZ - 1) + k, (long long)NY * (NZ - 1));
+        value += gather_backward_transpose_gpu<ORDER>(i, NX, line);
+        lambda_hy[work] = value;
+    }
+}
+
+/* (H update + H CPML)^T of the 2D TM path gathered onto lambda_Ez (k = 0). */
+template<int ORDER>
+__global__ void adjoint_h_gather_tm2d_gpu(
+    const float* __restrict__ ce_hist, const float* __restrict__ ch_curl,
+    float* __restrict__ lambda_ez, const float* __restrict__ lambda_hx, const float* __restrict__ lambda_hy,
+    CpmlArrays w, CellGrid cells, int NX, int NY, int NZ,
+    int pml0, int pml1, int pml2, int pml3, float dx, float dy)
+{
+    long long ny_nz = (long long)NY * NZ;
+    long long work, idx, i, j, k;
+    if (!cell_of_thread<1>(cells, NY, NZ, &work, &idx, &i, &j, &k)) return;
+    long long s = blockIdx.y;
+    long long shot_field = work - idx;
+
+    float value = lambda_ez[work];
+    bool do_ez = (((NX - 1) != 1 || (NY - 1) != 1) && i > 0 && i < NX - 1 && j > 0 && j < NY - 1 && k < NZ - 1);
+    if (do_ez) value = ce_hist[idx] * value;
+    {
+        /* transpose of d/dy (Hx sources) */
+        long long base = i * ny_nz + k;
+        CurlLine line = curl_line(lambda_hx, ch_curl, shot_field + base, base, NZ, -1.0f, dx, dy,
+            (NX - 1) != 1 && i > 0 && i < NX - 1 && k < NZ - 1, 0, NY - 1);
+        attach_cpml(&line, 0, NY, k < NZ - 1,
+            w.y0P1, pml2, s * NX * pml2 * (NZ - 1) + i * pml2 * (NZ - 1) + k, NZ - 1,
+            w.ymP1, pml3, s * NX * pml3 * (NZ - 1) + i * pml3 * (NZ - 1) + k, NZ - 1);
+        value += gather_forward_transpose_gpu<ORDER>(j, NY, line);
+    }
+    {
+        /* transpose of d/dx (Hy sources) */
+        long long base = j * NZ + k;
+        CurlLine line = curl_line(lambda_hy, ch_curl, shot_field + base, base, ny_nz, 1.0f, dx, dx,
+            (NY - 1) != 1 && j > 0 && j < NY - 1 && k < NZ - 1, 0, NX - 1);
+        attach_cpml(&line, 0, NX, k < NZ - 1,
+            w.x0P1, pml0, s * pml0 * NY * (NZ - 1) + j * (NZ - 1) + k, (long long)NY * (NZ - 1),
+            w.xmP1, pml1, s * pml1 * NY * (NZ - 1) + j * (NZ - 1) + k, (long long)NY * (NZ - 1));
+        value += gather_forward_transpose_gpu<ORDER>(i, NX, line);
+    }
+    lambda_ez[work] = value;
+}
+
+/* Deferred lambda_H <- ch_hist lambda_H of the last reverse step (2D TM path). */
+__global__ void scale_magnetic_adjoint_tm2d_gpu(
+    const float* __restrict__ ch_hist, float* __restrict__ lambda_hx, float* __restrict__ lambda_hy,
+    CellGrid cells, int NX, int NY, int NZ)
+{
+    long long work, idx, i, j, k;
+    if (!cell_of_thread<1>(cells, NY, NZ, &work, &idx, &i, &j, &k)) return;
+    if ((NX - 1) != 1 && i > 0 && i < NX - 1 && j < NY - 1 && k < NZ - 1) lambda_hx[work] = ch_hist[idx] * lambda_hx[work];
+    if ((NY - 1) != 1 && i < NX - 1 && j > 0 && j < NY - 1 && k < NZ - 1) lambda_hy[work] = ch_hist[idx] * lambda_hy[work];
+}
+
+/*
  * Inject the adjoint source into one electric-field component.
  *
  * Parameters:
@@ -1963,27 +2341,38 @@ __global__ void adjoint_receivers_gpu(
 ){
     long long field_stride = (long long)NX * NY * NZ;
     long long work = (long long)blockIdx.x * blockDim.x + threadIdx.x;
-    long long total = (long long)step * nsr;
-    if (work >= total) return;
-
+    if (work >= (long long)step * nsr || polarisation < 0 || polarisation > 2) return;
     int s = (int)(work / nsr);
     long long src = work % nsr;
+    const int* shot_location = sourcelocation + (long long)s * nsr * 3;
+    int i = shot_location[src * 3 + 0];
+    int j = shot_location[src * 3 + 1];
+    int k = shot_location[src * 3 + 2];
 
-    long long i = sourcelocation[s * nsr * 3 + src * 3 + 0];
-    long long j = sourcelocation[s * nsr * 3 + src * 3 + 1];
-    long long k = sourcelocation[s * nsr * 3 + src * 3 + 2];
-
-    long long index = (long long)s * iterations * nsr + (long long)iteration * nsr + src;
-    float waveform_value = srcwaveforms[index];
-    long long id4 = (long long)s * field_stride + i * NY * NZ + j * NZ + k;
-
-    if (polarisation == 0) atomicAdd(&lambda_ex[id4], waveform_value);
-    else if (polarisation == 1) atomicAdd(&lambda_ey[id4], waveform_value);
-    else if (polarisation == 2) atomicAdd(&lambda_ez[id4], waveform_value);
+    /* Deterministic for coincident receivers: the first receiver at a location
+     * adds the cotangents of all receivers there in index order. */
+    for (long long other = 0; other < src; ++other) {
+        if (shot_location[other * 3 + 0] == i && shot_location[other * 3 + 1] == j
+            && shot_location[other * 3 + 2] == k) return;
+    }
+    float* lambda_e = polarisation == 0 ? lambda_ex : (polarisation == 1 ? lambda_ey : lambda_ez);
+    long long id4 = (long long)s * field_stride + (long long)i * NY * NZ + (long long)j * NZ + k;
+    const float* shot_data = srcwaveforms + (long long)s * iterations * nsr + (long long)iteration * nsr;
+    float value = lambda_e[id4];
+    for (long long other = src; other < nsr; ++other) {
+        if (shot_location[other * 3 + 0] == i && shot_location[other * 3 + 1] == j
+            && shot_location[other * 3 + 2] == k) {
+            value = __fadd_rn(value, shot_data[other]);
+        }
+    }
+    lambda_e[id4] = value;
 }
 
 
-/* Accumulate the transpose of the forward source injection into its waveform. */
+/*
+ * Accumulate the transpose of the forward source injection into its waveform.
+ * One block per source sums the shots with a fixed-order tree (deterministic).
+ */
 __global__ void adjoint_source_injection_gpu(
     int step, int iteration, float dx, float dy, float dz,
     const int* __restrict__ source_location,
@@ -1992,23 +2381,33 @@ __global__ void adjoint_source_injection_gpu(
     int NX, int NY, int NZ, int nsrc, int source_component, int nt,
     float* __restrict__ grad_source)
 {
+    __shared__ float partial_sums[256];
     long long field_stride = (long long)NX * NY * NZ;
-    long long work = (long long)blockIdx.x * blockDim.x + threadIdx.x;
-    long long total = (long long)step * nsrc;
-    if (work >= total) return;
-
-    int s = (int)(work / nsrc);
-    long long src = work % nsrc;
-    long long i = source_location[s * nsrc * 3 + src * 3 + 0];
-    long long j = source_location[s * nsrc * 3 + src * 3 + 1];
-    long long k = source_location[s * nsrc * 3 + src * 3 + 2];
-    long long material_idx = i * NY * NZ + j * NZ + k;
-    long long field_idx = (long long)s * field_stride + material_idx;
-    float lambda_e = source_component == 0 ? lambda_ex[field_idx]
-        : (source_component == 1 ? lambda_ey[field_idx] : lambda_ez[field_idx]);
-    float dipole_length = source_component == 0 ? dx : (source_component == 1 ? dy : dz);
-    float value = -ce_rhs[material_idx] * dipole_length / (dx * dy * dz) * lambda_e;
-    atomicAdd(&grad_source[src * nt + iteration], value);
+    long long src = blockIdx.x;
+    float partial = 0.0f;
+    for (int s = threadIdx.x; s < step; s += blockDim.x) {
+        long long i = source_location[s * nsrc * 3 + src * 3 + 0];
+        long long j = source_location[s * nsrc * 3 + src * 3 + 1];
+        long long k = source_location[s * nsrc * 3 + src * 3 + 2];
+        long long material_idx = i * NY * NZ + j * NZ + k;
+        long long field_idx = (long long)s * field_stride + material_idx;
+        float lambda_e = source_component == 0 ? lambda_ex[field_idx]
+            : (source_component == 1 ? lambda_ey[field_idx] : lambda_ez[field_idx]);
+        float dipole_length = source_component == 0 ? dx : (source_component == 1 ? dy : dz);
+        float value = -ce_rhs[material_idx] * dipole_length / (dx * dy * dz) * lambda_e;
+        partial = __fadd_rn(partial, value);
+    }
+    partial_sums[threadIdx.x] = partial;
+    __syncthreads();
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (threadIdx.x < stride) {
+            partial_sums[threadIdx.x] = __fadd_rn(partial_sums[threadIdx.x], partial_sums[threadIdx.x + stride]);
+        }
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) {
+        grad_source[src * nt + iteration] = __fadd_rn(grad_source[src * nt + iteration], partial_sums[0]);
+    }
 }
 
 
@@ -2677,6 +3076,40 @@ static Int8FrameView int8_frame_view(
 
 
 /*
+ * Scratch for the CPML derivative weights of the 2D TM gather adjoint: the
+ * x/y-face Ez phi2 (electric) and Hy/Hx phi1 (magnetic) arrays, laid out like
+ * the auxiliary arrays they shadow. Returns the float count.
+ */
+static long long tm2d_weight_layout(int step, int NX, int NY, int NZ, const int pml[4],
+                                    float* base, CpmlArrays* electric, CpmlArrays* magnetic)
+{
+    long long sizes[8] = {
+        pml[0] > 0 ? (long long)step * (pml[0] + 1) * NY * (NZ - 1) : 0,
+        pml[1] > 0 ? (long long)step * (pml[1] + 1) * NY * (NZ - 1) : 0,
+        pml[2] > 0 ? (long long)step * NX * (pml[2] + 1) * (NZ - 1) : 0,
+        pml[3] > 0 ? (long long)step * NX * (pml[3] + 1) * (NZ - 1) : 0,
+        pml[0] > 0 ? (long long)step * pml[0] * NY * (NZ - 1) : 0,
+        pml[1] > 0 ? (long long)step * pml[1] * NY * (NZ - 1) : 0,
+        pml[2] > 0 ? (long long)step * NX * pml[2] * (NZ - 1) : 0,
+        pml[3] > 0 ? (long long)step * NX * pml[3] * (NZ - 1) : 0};
+    float* pointers[8];
+    long long total = 0;
+    for (int index = 0; index < 8; ++index) {
+        pointers[index] = (base != nullptr && sizes[index] > 0) ? base + total : nullptr;
+        total += sizes[index];
+    }
+    CpmlArrays none = {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+                       nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
+    *electric = none;
+    *magnetic = none;
+    electric->x0P2 = pointers[0]; electric->xmP2 = pointers[1];
+    electric->y0P2 = pointers[2]; electric->ymP2 = pointers[3];
+    magnetic->x0P1 = pointers[4]; magnetic->xmP1 = pointers[5];
+    magnetic->y0P1 = pointers[6]; magnetic->ymP1 = pointers[7];
+    return total;
+}
+
+/*
  * Run CUDA forward FDTD modeling.
  *
  * Parameters:
@@ -3238,10 +3671,22 @@ DEEPGPR_API void backward(const float* __restrict__ eps_r_pad, const float* __re
     build_update_coeffs_gpu<<<grid_material, blockSize, 0, stream_comp>>>(eps_r_pad, sigma_pad, mu_r_pad, ce_hist, ce_curl, ce_rhs, ch_hist, ch_curl, ch_rhs, NX_FIELDS, NY_FIELDS, NZ_FIELDS, dt, dx);
     CUDA_CHECK_LAST();
 
-    long long total_data_source = (long long)step * ndata_source;
-    dim3 grid_data_source(CEIL_DIV(total_data_source, blockSize));
-    long long total_source = (long long)step * nsource;
-    dim3 grid_source(CEIL_DIV(total_source, blockSize));
+    /* Deterministic receiver / source-waveform adjoints (no atomics). */
+    dim3 grid_data_source(CEIL_DIV((long long)step * ndata_source, blockSize));
+    dim3 grid_source((unsigned int)(nsource > 0 ? nsource : 1));
+
+    /* 2D TM path: gather adjoint with phi-sized CPML derivative-weight scratch. */
+    CpmlArrays weights_e, weights_h;
+    if (tm2d) {
+        int pml_xy[4] = {pml0, pml1, pml2, pml3};
+        long long weight_count = tm2d_weight_layout(step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, pml_xy,
+            nullptr, &weights_e, &weights_h);
+        if (weight_count > 0) {
+            CUDA_CHECK(cudaMalloc(&resources.d_cpml_weights, weight_count * sizeof(float)));
+        }
+        tm2d_weight_layout(step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, pml_xy,
+            resources.d_cpml_weights, &weights_e, &weights_h);
+    }
 
     long long total_grad = (long long)history.nx * history.ny * history.nz;
     dim3 grid_grad(CEIL_DIV(total_grad, blockSize));
@@ -3377,6 +3822,31 @@ DEEPGPR_API void backward(const float* __restrict__ eps_r_pad, const float* __re
             }
         }
 
+        if (tm2d) {
+            /* (E CPML + E update)^T and (H CPML + H update)^T as gathers. */
+            if (has_cpml_e) {
+                LAUNCH_ORDER_KERNEL(adjoint_cpml_e_weights_tm2d_gpu, grid_cpml_e, blockSize, stream_comp, fdtd_order,
+                    lambda_ez, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, pml0, pml1, pml2, pml3, dx, dy,
+                    x0ER, xmER, y0ER, ymER, ce_rhs, x0EPhi2, xmEPhi2, y0EPhi2, ymEPhi2, weights_e);
+                CUDA_CHECK_LAST();
+            }
+            LAUNCH_ORDER_KERNEL(adjoint_e_gather_tm2d_gpu, grid_cells, blockSize, stream_comp, fdtd_order,
+                ce_curl, ch_hist, lambda_ez, lambda_hx, lambda_hy, weights_e, cell_grid,
+                NX_FIELDS, NY_FIELDS, NZ_FIELDS, pml0, pml1, pml2, pml3, dx, dy, i != nt - 1);
+            CUDA_CHECK_LAST();
+            if (has_cpml_h) {
+                LAUNCH_ORDER_KERNEL(adjoint_cpml_h_weights_tm2d_gpu, grid_cpml_h, blockSize, stream_comp, fdtd_order,
+                    lambda_hx, lambda_hy, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, pml0, pml1, pml2, pml3, dx, dy,
+                    x0HR, xmHR, y0HR, ymHR, ch_rhs, x0HPhi1, xmHPhi1, y0HPhi1, ymHPhi1, weights_h);
+                CUDA_CHECK_LAST();
+            }
+            LAUNCH_ORDER_KERNEL(adjoint_h_gather_tm2d_gpu, grid_cells, blockSize, stream_comp, fdtd_order,
+                ce_hist, ch_curl, lambda_ez, lambda_hx, lambda_hy, weights_h, cell_grid,
+                NX_FIELDS, NY_FIELDS, NZ_FIELDS, pml0, pml1, pml2, pml3, dx, dy);
+            CUDA_CHECK_LAST();
+            continue;
+        }
+
         /* E CPML^T -> E update^T -> H CPML^T -> H update^T. */
         if (has_cpml_e) {
             LAUNCH_ORDER_TM_KERNEL(adjoint_cpml_e_gpu, tm2d, grid_cpml_e, blockSize, stream_comp, fdtd_order,
@@ -3401,6 +3871,12 @@ DEEPGPR_API void backward(const float* __restrict__ eps_r_pad, const float* __re
         LAUNCH_ORDER_TM_KERNEL(adjoint_h_gpu, tm2d, grid_cells, blockSize, stream_comp, fdtd_order,
             ch_hist, ch_curl, lambda_ex, lambda_ey, lambda_ez, lambda_hx, lambda_hy, lambda_hz,
             cell_grid, NX_FIELDS, NY_FIELDS, NZ_FIELDS, dx, dy, dz);
+        CUDA_CHECK_LAST();
+    }
+
+    if (tm2d && nt > 0) {
+        scale_magnetic_adjoint_tm2d_gpu<<<grid_cells, blockSize, 0, stream_comp>>>(
+            ch_hist, lambda_hx, lambda_hy, cell_grid, NX_FIELDS, NY_FIELDS, NZ_FIELDS);
         CUDA_CHECK_LAST();
     }
 

@@ -47,6 +47,16 @@ Measurements, protocol and per-item decisions:
   is bitwise unchanged; initial-state gradients of Ex/Ey/Hz are zero on this
   path. Other calls use the general kernels.
 
+- CUDA 2D TM adjoint as a gather (AUDIT N-7): on the 2D TM fast path the
+  transposed curl and CPML updates no longer scatter with `atomicAdd`; every
+  target point gathers its source stencil in a fixed order with CPML
+  derivative weights from phi-sized scratch (2D backward about 30 % faster,
+  bitwise reproducible). Receiver and source-waveform adjoints add coincident
+  points in a fixed order on every path. The general (3D) CUDA adjoint keeps
+  the atomic scatter, which measured faster than a gather there;
+  `deepgpr_deterministic_adjoint()` stays 0. Gradients differ from the
+  previous release at rounding level only.
+
 ### Changed
 
 - An explicit `model_gradient_sampling_interval > 1` no longer always raises a
