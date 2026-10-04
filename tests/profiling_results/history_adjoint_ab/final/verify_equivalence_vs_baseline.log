@@ -1,0 +1,113 @@
+DeepGPR INT8 wavefield compression requires GPU-resident power-of-two blocks with at most 256 voxels.
+torch=1.11.0+cu115  devices=['cpu', 'cuda']  OMP_NUM_THREADS=1
+reference: /tmp/tmpy_lig61j/DeepGPR_reference
+candidate: /home/ll/下载/DeepGPR-dev/src/DeepGPR
+
+[OK  ] cpu  2d-o2-float32-s1          forward 0.0e+00  gradient 0.0e+00
+[OK  ] cpu  2d-o2-float32-s3          forward 0.0e+00  gradient 0.0e+00
+[OK  ] cpu  2d-o2-float16-s1          forward 0.0e+00  gradient 0.0e+00
+[OK  ] cpu  2d-o2-float16-s3          forward 0.0e+00  gradient 0.0e+00
+[OK  ] cpu  2d-o2-bfloat16-s1         forward 0.0e+00  gradient 0.0e+00
+[OK  ] cpu  2d-o2-bfloat16-s3         forward 0.0e+00  gradient 0.0e+00
+[OK  ] cpu  2d-o4-float32-s1          forward 0.0e+00  gradient 0.0e+00
+[OK  ] cpu  2d-o4-float32-s3          forward 0.0e+00  gradient 0.0e+00
+[OK  ] cpu  2d-o4-float16-s1          forward 0.0e+00  gradient 0.0e+00
+[OK  ] cpu  2d-o4-float16-s3          forward 0.0e+00  gradient 0.0e+00
+[OK  ] cpu  2d-o4-bfloat16-s1         forward 0.0e+00  gradient 0.0e+00
+[OK  ] cpu  2d-o4-bfloat16-s3         forward 0.0e+00  gradient 0.0e+00
+[OK  ] cpu  2d-o8-float32-s1          forward 0.0e+00  gradient 0.0e+00
+[OK  ] cpu  2d-o8-float32-s3          forward 0.0e+00  gradient 0.0e+00
+[OK  ] cpu  2d-o8-float16-s1          forward 0.0e+00  gradient 0.0e+00
+[OK  ] cpu  2d-o8-float16-s3          forward 0.0e+00  gradient 0.0e+00
+[OK  ] cpu  2d-o8-bfloat16-s1         forward 0.0e+00  gradient 0.0e+00
+[OK  ] cpu  2d-o8-bfloat16-s3         forward 0.0e+00  gradient 0.0e+00
+[OK  ] cpu  3d-o2-float32-s1          forward 0.0e+00  gradient 0.0e+00
+[OK  ] cpu  3d-o2-float32-s3          forward 0.0e+00  gradient 0.0e+00
+[OK  ] cpu  3d-o2-float16-s1          forward 0.0e+00  gradient 0.0e+00
+[OK  ] cpu  3d-o2-float16-s3          forward 0.0e+00  gradient 0.0e+00
+[OK  ] cpu  3d-o2-bfloat16-s1         forward 0.0e+00  gradient 0.0e+00
+[OK  ] cpu  3d-o2-bfloat16-s3         forward 0.0e+00  gradient 0.0e+00
+[OK  ] cpu  3d-o4-float32-s1          forward 0.0e+00  gradient 0.0e+00
+[OK  ] cpu  3d-o4-float32-s3          forward 0.0e+00  gradient 0.0e+00
+[OK  ] cpu  3d-o4-float16-s1          forward 0.0e+00  gradient 0.0e+00
+[OK  ] cpu  3d-o4-float16-s3          forward 0.0e+00  gradient 0.0e+00
+[OK  ] cpu  3d-o4-bfloat16-s1         forward 0.0e+00  gradient 0.0e+00
+[OK  ] cpu  3d-o4-bfloat16-s3         forward 0.0e+00  gradient 0.0e+00
+[OK  ] cpu  3d-o8-float32-s1          forward 0.0e+00  gradient 0.0e+00
+[OK  ] cpu  3d-o8-float32-s3          forward 0.0e+00  gradient 0.0e+00
+[OK  ] cpu  3d-o8-float16-s1          forward 0.0e+00  gradient 0.0e+00
+[OK  ] cpu  3d-o8-float16-s3          forward 0.0e+00  gradient 0.0e+00
+[OK  ] cpu  3d-o8-bfloat16-s1         forward 0.0e+00  gradient 0.0e+00
+[OK  ] cpu  3d-o8-bfloat16-s3         forward 0.0e+00  gradient 0.0e+00
+[OK  ] cpu  no-pml                    forward 0.0e+00  gradient 0.0e+00
+[OK  ] cpu  asymmetric-pml            forward 0.0e+00  gradient 0.0e+00
+[OK  ] cpu  forward-only              forward 0.0e+00  gradient 0.0e+00
+[OK  ] cpu  mode3-2d                  forward 0.0e+00  gradient 0.0e+00
+[OK  ] cpu  checkpoint-segments       forward 0.0e+00  gradient 0.0e+00
+[FAIL] cpu  FIR / envelope / TV fixes
+         - FIR legacy n=8: legacy result differs from reference (5.9e-03)
+         - FIR legacy n=14: legacy result differs from reference (6.7e-03)
+         - apply_filter legacy: legacy result differs from reference (3.5e-03)
+         - hilbert legacy odd: legacy result differs from reference (3.4e-02)
+         - TV legacy isotropic: legacy result differs from reference (9.7e-02)
+         - TV legacy isotropic: legacy result differs from reference (1.6e-01)
+         native error surfaced as NativeLibraryError: Native DeepGPR backward failed: deepgpr_cpu backward: could not allocate 844424930131968 bytes for the adjoint stencil weights
+[OK  ] cpu  native error reporting
+[OK  ] cuda 2d-o2-float32-s1          forward 0.0e+00  gradient 5.3e-07
+[OK  ] cuda 2d-o2-float32-s3          forward 0.0e+00  gradient 2.6e-07
+[OK  ] cuda 2d-o2-float16-s1          forward 0.0e+00  gradient 2.6e-07
+[OK  ] cuda 2d-o2-float16-s3          forward 0.0e+00  gradient 2.2e-07
+[OK  ] cuda 2d-o2-bfloat16-s1         forward 0.0e+00  gradient 4.8e-07
+[OK  ] cuda 2d-o2-bfloat16-s3         forward 0.0e+00  gradient 2.2e-07
+[OK  ] cuda 2d-o4-float32-s1          forward 0.0e+00  gradient 4.5e-07
+[OK  ] cuda 2d-o4-float32-s3          forward 0.0e+00  gradient 3.5e-07
+[OK  ] cuda 2d-o4-float16-s1          forward 0.0e+00  gradient 6.7e-07
+[OK  ] cuda 2d-o4-float16-s3          forward 0.0e+00  gradient 3.6e-07
+[OK  ] cuda 2d-o4-bfloat16-s1         forward 0.0e+00  gradient 6.2e-07
+[OK  ] cuda 2d-o4-bfloat16-s3         forward 0.0e+00  gradient 5.1e-07
+[OK  ] cuda 2d-o8-float32-s1          forward 0.0e+00  gradient 1.0e-06
+[OK  ] cuda 2d-o8-float32-s3          forward 0.0e+00  gradient 4.6e-07
+[OK  ] cuda 2d-o8-float16-s1          forward 0.0e+00  gradient 6.1e-07
+[OK  ] cuda 2d-o8-float16-s3          forward 0.0e+00  gradient 5.5e-07
+[OK  ] cuda 2d-o8-bfloat16-s1         forward 0.0e+00  gradient 7.5e-07
+[OK  ] cuda 2d-o8-bfloat16-s3         forward 0.0e+00  gradient 6.5e-07
+[OK  ] cuda 3d-o2-float32-s1          forward 0.0e+00  gradient 4.4e-07
+[OK  ] cuda 3d-o2-float32-s3          forward 0.0e+00  gradient 1.4e-07
+[OK  ] cuda 3d-o2-float16-s1          forward 0.0e+00  gradient 3.0e-07
+[OK  ] cuda 3d-o2-float16-s3          forward 0.0e+00  gradient 3.6e-07
+[OK  ] cuda 3d-o2-bfloat16-s1         forward 0.0e+00  gradient 3.5e-07
+[OK  ] cuda 3d-o2-bfloat16-s3         forward 0.0e+00  gradient 2.5e-07
+[OK  ] cuda 3d-o4-float32-s1          forward 0.0e+00  gradient 5.6e-07
+[OK  ] cuda 3d-o4-float32-s3          forward 0.0e+00  gradient 4.0e-07
+[OK  ] cuda 3d-o4-float16-s1          forward 0.0e+00  gradient 3.9e-07
+[OK  ] cuda 3d-o4-float16-s3          forward 0.0e+00  gradient 3.1e-07
+[OK  ] cuda 3d-o4-bfloat16-s1         forward 0.0e+00  gradient 4.1e-07
+[OK  ] cuda 3d-o4-bfloat16-s3         forward 0.0e+00  gradient 3.2e-07
+[OK  ] cuda 3d-o8-float32-s1          forward 0.0e+00  gradient 7.9e-07
+[OK  ] cuda 3d-o8-float32-s3          forward 0.0e+00  gradient 4.8e-07
+[OK  ] cuda 3d-o8-float16-s1          forward 0.0e+00  gradient 4.7e-07
+[OK  ] cuda 3d-o8-float16-s3          forward 0.0e+00  gradient 4.6e-07
+[OK  ] cuda 3d-o8-bfloat16-s1         forward 0.0e+00  gradient 4.2e-07
+[OK  ] cuda 3d-o8-bfloat16-s3         forward 0.0e+00  gradient 4.0e-07
+[OK  ] cuda no-pml                    forward 0.0e+00  gradient 1.1e-07
+[OK  ] cuda asymmetric-pml            forward 0.0e+00  gradient 1.2e-07
+[OK  ] cuda forward-only              forward 0.0e+00  gradient 0.0e+00
+[OK  ] cuda mode3-2d                  forward 0.0e+00  gradient 1.1e-07
+[OK  ] cuda checkpoint-segments       forward 0.0e+00  gradient 7.7e-07
+[OK  ] cuda cuda-int8                 forward 0.0e+00  gradient 8.5e-08
+[OK  ] cuda cuda-int8-3d              forward 0.0e+00  gradient 1.6e-07
+[OK  ] cuda cuda-async-offload        forward 0.0e+00  gradient 9.4e-08
+[OK  ] cuda cuda-fp16-legacy          forward 0.0e+00  gradient 8.9e-08
+[OK  ] cuda cuda-fp16-vec2            forward 0.0e+00  gradient 1.1e-07
+[FAIL] cuda FIR / envelope / TV fixes
+         - FIR legacy n=8: legacy result differs from reference (5.9e-03)
+         - FIR legacy n=14: legacy result differs from reference (6.7e-03)
+         - apply_filter legacy: legacy result differs from reference (3.5e-03)
+         - hilbert legacy odd: legacy result differs from reference (3.4e-02)
+         - TV legacy isotropic: legacy result differs from reference (9.7e-02)
+         - TV legacy isotropic: legacy result differs from reference (1.6e-01)
+         native error surfaced as NativeLibraryError: Native DeepGPR backward failed: DeepGPR INT8 wavefield compression requires GPU-resident power-of-two blocks with at most 256 voxels.
+[OK  ] cuda native error reporting
+[OK  ] cpu  bitwise determinism for OMP_NUM_THREADS=[1, 2, 4, 8]
+
+2 check(s) failed.

@@ -1,0 +1,614 @@
+{
+  "cases": [
+    {
+      "device": "cpu",
+      "case": "2d-o2-float32-s1",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 4.43955028421113e-07
+    },
+    {
+      "device": "cpu",
+      "case": "2d-o2-float32-s3",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 2.0747533636938908e-07
+    },
+    {
+      "device": "cpu",
+      "case": "2d-o2-float16-s1",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 2.849314893631086e-07
+    },
+    {
+      "device": "cpu",
+      "case": "2d-o2-float16-s3",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 2.4304587422823214e-07
+    },
+    {
+      "device": "cpu",
+      "case": "2d-o2-bfloat16-s1",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 2.398849799498137e-07
+    },
+    {
+      "device": "cpu",
+      "case": "2d-o2-bfloat16-s3",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 2.728285970708618e-07
+    },
+    {
+      "device": "cpu",
+      "case": "2d-o4-float32-s1",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 5.158607483620015e-07
+    },
+    {
+      "device": "cpu",
+      "case": "2d-o4-float32-s3",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 3.9504409284642307e-07
+    },
+    {
+      "device": "cpu",
+      "case": "2d-o4-float16-s1",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 6.420245287611295e-07
+    },
+    {
+      "device": "cpu",
+      "case": "2d-o4-float16-s3",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 2.548700570501136e-07
+    },
+    {
+      "device": "cpu",
+      "case": "2d-o4-bfloat16-s1",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 7.566321927236552e-07
+    },
+    {
+      "device": "cpu",
+      "case": "2d-o4-bfloat16-s3",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 4.0915868994752335e-07
+    },
+    {
+      "device": "cpu",
+      "case": "2d-o8-float32-s1",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 1.533183194949354e-06
+    },
+    {
+      "device": "cpu",
+      "case": "2d-o8-float32-s3",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 5.02992071198802e-07
+    },
+    {
+      "device": "cpu",
+      "case": "2d-o8-float16-s1",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 6.784776968776049e-07
+    },
+    {
+      "device": "cpu",
+      "case": "2d-o8-float16-s3",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 4.6996790223665034e-07
+    },
+    {
+      "device": "cpu",
+      "case": "2d-o8-bfloat16-s1",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 7.927464261592145e-07
+    },
+    {
+      "device": "cpu",
+      "case": "2d-o8-bfloat16-s3",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 5.117742506089648e-07
+    },
+    {
+      "device": "cpu",
+      "case": "3d-o2-float32-s1",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 4.418637459312383e-07
+    },
+    {
+      "device": "cpu",
+      "case": "3d-o2-float32-s3",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 1.8688961850595953e-07
+    },
+    {
+      "device": "cpu",
+      "case": "3d-o2-float16-s1",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 4.816238042886352e-07
+    },
+    {
+      "device": "cpu",
+      "case": "3d-o2-float16-s3",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 3.637598215151809e-07
+    },
+    {
+      "device": "cpu",
+      "case": "3d-o2-bfloat16-s1",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 2.7280038322997836e-07
+    },
+    {
+      "device": "cpu",
+      "case": "3d-o2-bfloat16-s3",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 3.005048929464597e-07
+    },
+    {
+      "device": "cpu",
+      "case": "3d-o4-float32-s1",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 4.997788534104642e-07
+    },
+    {
+      "device": "cpu",
+      "case": "3d-o4-float32-s3",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 3.3153224852569354e-07
+    },
+    {
+      "device": "cpu",
+      "case": "3d-o4-float16-s1",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 6.757343132381855e-07
+    },
+    {
+      "device": "cpu",
+      "case": "3d-o4-float16-s3",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 3.5894859935025995e-07
+    },
+    {
+      "device": "cpu",
+      "case": "3d-o4-bfloat16-s1",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 5.121489256772492e-07
+    },
+    {
+      "device": "cpu",
+      "case": "3d-o4-bfloat16-s3",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 2.894560761403788e-07
+    },
+    {
+      "device": "cpu",
+      "case": "3d-o8-float32-s1",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 5.95260521719936e-07
+    },
+    {
+      "device": "cpu",
+      "case": "3d-o8-float32-s3",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 4.687354252578709e-07
+    },
+    {
+      "device": "cpu",
+      "case": "3d-o8-float16-s1",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 8.157711935398231e-07
+    },
+    {
+      "device": "cpu",
+      "case": "3d-o8-float16-s3",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 6.233453776446866e-07
+    },
+    {
+      "device": "cpu",
+      "case": "3d-o8-bfloat16-s1",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 5.881606738269818e-07
+    },
+    {
+      "device": "cpu",
+      "case": "3d-o8-bfloat16-s3",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 4.6969021141320045e-07
+    },
+    {
+      "device": "cpu",
+      "case": "no-pml",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 1.130639261176991e-07
+    },
+    {
+      "device": "cpu",
+      "case": "asymmetric-pml",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 1.1596335279739556e-07
+    },
+    {
+      "device": "cpu",
+      "case": "forward-only",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 0.0
+    },
+    {
+      "device": "cpu",
+      "case": "mode3-2d",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 6.989702769879413e-08
+    },
+    {
+      "device": "cpu",
+      "case": "checkpoint-segments",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 8.444641383717442e-07
+    },
+    {
+      "device": "cuda",
+      "case": "2d-o2-float32-s1",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 3.5516399120152246e-07
+    },
+    {
+      "device": "cuda",
+      "case": "2d-o2-float32-s3",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 2.8527855791377764e-07
+    },
+    {
+      "device": "cuda",
+      "case": "2d-o2-float16-s1",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 2.564383404267977e-07
+    },
+    {
+      "device": "cuda",
+      "case": "2d-o2-float16-s3",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 2.4304587422823214e-07
+    },
+    {
+      "device": "cuda",
+      "case": "2d-o2-bfloat16-s1",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 2.6987060244354037e-07
+    },
+    {
+      "device": "cuda",
+      "case": "2d-o2-bfloat16-s3",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 2.1655950400077443e-07
+    },
+    {
+      "device": "cuda",
+      "case": "2d-o4-float32-s1",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 5.627571800312743e-07
+    },
+    {
+      "device": "cuda",
+      "case": "2d-o4-float32-s3",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 3.9504409284642307e-07
+    },
+    {
+      "device": "cuda",
+      "case": "2d-o4-float16-s1",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 7.133605196612622e-07
+    },
+    {
+      "device": "cuda",
+      "case": "2d-o4-float16-s3",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 4.077920081330038e-07
+    },
+    {
+      "device": "cuda",
+      "case": "2d-o4-bfloat16-s1",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 5.340932174256102e-07
+    },
+    {
+      "device": "cuda",
+      "case": "2d-o4-bfloat16-s3",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 7.160275609237165e-07
+    },
+    {
+      "device": "cuda",
+      "case": "2d-o8-float32-s1",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 8.091800884800098e-07
+    },
+    {
+      "device": "cuda",
+      "case": "2d-o8-float32-s3",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 4.5726551927163824e-07
+    },
+    {
+      "device": "cuda",
+      "case": "2d-o8-float16-s1",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 6.445538120337247e-07
+    },
+    {
+      "device": "cuda",
+      "case": "2d-o8-float16-s3",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 5.809325458203039e-07
+    },
+    {
+      "device": "cuda",
+      "case": "2d-o8-bfloat16-s1",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 7.461144226156235e-07
+    },
+    {
+      "device": "cuda",
+      "case": "2d-o8-bfloat16-s3",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 5.58299182482507e-07
+    },
+    {
+      "device": "cuda",
+      "case": "3d-o2-float32-s1",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 5.623720402761214e-07
+    },
+    {
+      "device": "cuda",
+      "case": "3d-o2-float32-s3",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 1.557413390528198e-07
+    },
+    {
+      "device": "cuda",
+      "case": "3d-o2-float16-s1",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 3.071224259231877e-07
+    },
+    {
+      "device": "cuda",
+      "case": "3d-o2-float16-s3",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 1.9400523814142982e-07
+    },
+    {
+      "device": "cuda",
+      "case": "3d-o2-bfloat16-s1",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 3.5123049340859714e-07
+    },
+    {
+      "device": "cuda",
+      "case": "3d-o2-bfloat16-s3",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 2.935164070639839e-07
+    },
+    {
+      "device": "cuda",
+      "case": "3d-o4-float32-s1",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 4.22035438715612e-07
+    },
+    {
+      "device": "cuda",
+      "case": "3d-o4-float32-s3",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 6.165335977773894e-07
+    },
+    {
+      "device": "cuda",
+      "case": "3d-o4-float16-s1",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 2.6546705162928714e-07
+    },
+    {
+      "device": "cuda",
+      "case": "3d-o4-float16-s3",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 3.1147650766310076e-07
+    },
+    {
+      "device": "cuda",
+      "case": "3d-o4-bfloat16-s1",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 3.31390481320573e-07
+    },
+    {
+      "device": "cuda",
+      "case": "3d-o4-bfloat16-s3",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 2.8945604262645465e-07
+    },
+    {
+      "device": "cuda",
+      "case": "3d-o8-float32-s1",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 5.952606884659067e-07
+    },
+    {
+      "device": "cuda",
+      "case": "3d-o8-float32-s3",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 2.7342899806709136e-07
+    },
+    {
+      "device": "cuda",
+      "case": "3d-o8-float16-s1",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 2.936776296743363e-07
+    },
+    {
+      "device": "cuda",
+      "case": "3d-o8-float16-s3",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 3.3564751103944663e-07
+    },
+    {
+      "device": "cuda",
+      "case": "3d-o8-bfloat16-s1",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 7.057928085923781e-07
+    },
+    {
+      "device": "cuda",
+      "case": "3d-o8-bfloat16-s3",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 2.6013611709038794e-07
+    },
+    {
+      "device": "cuda",
+      "case": "no-pml",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 1.1306391333424915e-07
+    },
+    {
+      "device": "cuda",
+      "case": "asymmetric-pml",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 2.3192667869979584e-07
+    },
+    {
+      "device": "cuda",
+      "case": "forward-only",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 0.0
+    },
+    {
+      "device": "cuda",
+      "case": "mode3-2d",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 1.106155901391511e-07
+    },
+    {
+      "device": "cuda",
+      "case": "checkpoint-segments",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 8.444642680298879e-07
+    },
+    {
+      "device": "cuda",
+      "case": "cuda-int8",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 7.209133799504761e-08
+    },
+    {
+      "device": "cuda",
+      "case": "cuda-int8-3d",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 7.965376737627021e-08
+    },
+    {
+      "device": "cuda",
+      "case": "cuda-async-offload",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 9.43103241606169e-08
+    },
+    {
+      "device": "cuda",
+      "case": "cuda-fp16-legacy",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 8.94942759013662e-08
+    },
+    {
+      "device": "cuda",
+      "case": "cuda-fp16-vec2",
+      "problems": [],
+      "forward": 0.0,
+      "gradient": 7.032302318114071e-08
+    }
+  ],
+  "failures": 0
+}

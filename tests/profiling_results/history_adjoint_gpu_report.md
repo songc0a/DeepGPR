@@ -699,3 +699,46 @@ fused 3D adjoint kernels (44-48 / 40 registers, no spills) made them 1.2 % /
 -1.4 % / -1.9 % for fp16 backward (`item6_size_sweep/big3d_*`).
 
 Full suite: 142 tests, all passed (1 skipped).
+
+## Final verification and native libraries
+
+The rebuilt `deepgpr.so` / `deepgpr_cpu.so` are in a separate last commit. They
+were built with the flags of `.github/workflows/workflow.yaml` (`-O3`, ten
+`-gencode` targets sm_50 … sm_90, static libstdc++/libgcc/cudart; CPU:
+`-O3 -fopenmp -static-libgcc`), so they cover the same GPUs as the committed
+CI binaries. They were built on this Ubuntu 22.04 host, however: the CUDA
+library needs GLIBC 2.34 where the CI container build needs 2.17 (the CPU
+library needs 2.4, as before). All A/B measurements above used the
+sm_89 development build from `docs/BUILDING.md`. The fat build gives bitwise
+the same forward results and 2D gradients as that build on the 114-case
+dump (3D gradients 3.4e-7, atomic order).
+
+| check | baseline (`ccf0e54`) | final tree |
+|---|---|---|
+| `python -m unittest discover -s tests -p "test_*.py"` | 105 run, all passed, 1 skipped | 142 run, all passed, 1 skipped (same skipped two-GPU test); no baseline test removed, 37 added (`history_adjoint_ab/final/unittest.log`) |
+| `tools/verify_equivalence.py` (default reference `73b2b50`) | - | all checks passed: 92 cases, forward 0.0, gradients ≤ 8e-7, CPU bitwise determinism for 1/2/4/8 threads (`final/verify_equivalence_73b2b50.log`) |
+| same with `--reference-src` = baseline tree | - | every solver case passes (forward 0.0 everywhere, gradients ≤ 7.9e-7); the "FIR / envelope / TV" check fails by construction, because it compares `legacy=True` against the reference's default and is only meaningful against the pre-0.1.0 reference (`final/verify_equivalence_vs_baseline.log`) |
+| `ruff check src/DeepGPR tools` | - | passed |
+
+Tests changed rather than added (all at their original thresholds):
+`test_numerics.test_cuda_async_memory_estimate_splits_host_and_device_payload`
+(item 2: the host peak excludes the device-resident final E frame) and
+`test_discrete_adjoint` helpers (item 4: `_material_case` takes a device; the
+seeds accept a per-face PML list).
+
+## Observations outside the scope (not changed)
+
+- `tools/verify_equivalence.py`: the helper check assumes the pre-0.1.0
+  reference; with any later `--reference-src` it reports the legacy helpers
+  as failures (see above).
+- `adjoint_e_gpu` / `adjoint_h_gpu` are still instantiated with `TM2D = 1`
+  through `LAUNCH_ORDER_TM_KERNEL`, but since item 5 the 2D TM path never
+  launches them (it uses the gather kernels). Only binary size is affected.
+- The formal protocol's `empty_cache()` puts history `cudaMalloc` inside the
+  timed window; for the baseline's 8.4 GiB 2D fp32 E+R history this moved the
+  forward median between 95 and 213 ms across batches (§0, §6).
+- The cause of the fused 3D forward slowdown on large grids (§6) needs
+  hardware counters; Nsight Compute is not permitted on this machine.
+- Not touched as instructed: the CPU loop structure, the process-global
+  `fdtd_order` (AUDIT N-3), CUDA Graphs, example notebooks and Windows/macOS
+  binaries.

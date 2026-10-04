@@ -1,0 +1,78 @@
+................/home/ll/下载/DeepGPR-dev/tests/test_discrete_adjoint.py:759: RuntimeWarning: model_gradient_sampling_interval=4 exceeds the recommended bound 1 = floor(1 / (4 f_max dt)) for the source spectrum (f_max=5.0000e+10 Hz, dt=1.0000e-11 s). The temporal-sampling gradient approximation degrades quickly above this bound; use model_gradient_sampling_interval='auto' or an interval <= the bound.
+  receiver = DeepGPR.compute(
+....s/home/ll/下载/DeepGPR-dev/tests/test_discrete_adjoint.py:718: RuntimeWarning: model_gradient_sampling_interval=3 exceeds the recommended bound 1 = floor(1 / (4 f_max dt)) for the source spectrum (f_max=5.0000e+10 Hz, dt=1.0000e-11 s). The temporal-sampling gradient approximation degrades quickly above this bound; use model_gradient_sampling_interval='auto' or an interval <= the bound.
+  result = DeepGPR.compute(
+../home/ll/下载/DeepGPR-dev/tests/test_discrete_adjoint.py:514: RuntimeWarning: model_gradient_sampling_interval=11 exceeds the recommended bound 1 = floor(1 / (4 f_max dt)) for the source spectrum (f_max=1.6667e+10 Hz, dt=3.0000e-11 s). The temporal-sampling gradient approximation degrades quickly above this bound; use model_gradient_sampling_interval='auto' or an interval <= the bound.
+  receiver = DeepGPR.compute(
+/home/ll/下载/DeepGPR-dev/tests/test_discrete_adjoint.py:514: RuntimeWarning: model_gradient_sampling_interval=16 exceeds the recommended bound 1 = floor(1 / (4 f_max dt)) for the source spectrum (f_max=1.6667e+10 Hz, dt=3.0000e-11 s). The temporal-sampling gradient approximation degrades quickly above this bound; use model_gradient_sampling_interval='auto' or an interval <= the bound.
+  receiver = DeepGPR.compute(
+..................................................../home/ll/下载/DeepGPR-dev/tests/test_numerics.py:272: RuntimeWarning: model_gradient_sampling_interval=2 exceeds the recommended bound 1 = floor(1 / (4 f_max dt)) for the source spectrum (f_max=1.6667e+10 Hz, dt=3.0000e-11 s). The temporal-sampling gradient approximation degrades quickly above this bound; use model_gradient_sampling_interval='auto' or an interval <= the bound.
+  DeepGPR.compute(
+................../home/ll/下载/DeepGPR-dev/tests/test_numerics.py:728: RuntimeWarning: model_gradient_sampling_interval=10 exceeds the recommended bound 8 = floor(1 / (4 f_max dt)) for the source spectrum (f_max=1.5022e+09 Hz, dt=2.0000e-11 s). The temporal-sampling gradient approximation degrades quickly above this bound; use model_gradient_sampling_interval='auto' or an interval <= the bound.
+  result = DeepGPR.compute(
+........................................pypi_recent unavailable: simulated provider outage
+pypi_metadata unavailable: simulated provider outage
+pypi_history unavailable: simulated provider outage
+github_repository unavailable: simulated provider outage
+.........
+----------------------------------------------------------------------
+Ran 142 tests in 6.052s
+
+OK (skipped=1)
+
+=== DeepGPR compute preview ===
+Simulation
+  device: cpu
+  model shape: (12, 16, 1)
+  computational shape (including PML): (18, 22, 1)
+  padded field shape: (19, 23, 2)
+  shots / sources per shot / receivers per shot: 1 / 1 / 1
+  time steps: 80
+  dx / dy / dz: 2.000000e-02 m / 2.000000e-02 m / 2.000000e-02 m
+  dt / simulated duration: 3.000000e-11 s / 2.400000e-09 s
+  FDTD order / gradient mode: 4 / 2
+  source / receiver component: 2 / 2
+  PML thickness [x0, x1, y0, y1, z0, z1]: [3, 3, 3, 3, 0, 0]
+Model
+  eps_r range / requires_grad: [4.000000e+00, 4.000000e+00] / True
+  sigma range / requires_grad: [2.000000e-04, 2.000000e-04] / True
+  mu_r range / supplied: [1.000000e+00, 1.000000e+00] / False
+  propagation dtype: torch.float32
+Wavefield and runtime options
+  save wavefield history: True
+  gradient sampling interval / saved time steps: 2 / 40
+  saved components / compression: 1 / none
+  history region / frame cells: extended / (18, 22, 1)
+  R history: stored with E
+  saved wavefield storage dtype: torch.float16
+  CUDA conversion backend: legacy
+  async offload requested / effective: False / False
+  debug validation: False
+  print parameters: True
+  forward wavefield save directory: disabled
+  initial E / H / PML supplied: False / False / False
+Input tensors
+  source amplitudes shape / range: (1, 80, 1) / [-4.461524e-01, 2.072797e-01]
+  source locations shape: (1, 1, 3)
+  receiver locations shape: (1, 1, 3)
+Estimated tensor payload
+  model and padded materials: 13.34 KiB
+  electric and magnetic fields: 20.48 KiB
+  CPML auxiliary fields: 6.67 KiB
+  CPML coefficients: 496.00 B
+  source and acquisition locations: 344.00 B
+  saved E_saved and R_saved wavefields: 61.88 KiB
+    of which final E frame (E-only history): 0.00 B
+  FDTD update coefficients: 20.48 KiB
+  receiver data: 320.00 B
+  material gradients: 3.09 KiB
+  adjoint fields and CPML: 27.16 KiB
+  receiver adjoint: 320.00 B
+  CPU adjoint stencil weights: 20.48 KiB
+  low-precision exact snapshot: 1.55 KiB
+  CUDA transfer buffers: 0.00 B
+  estimated peak CPU memory: 175.03 KiB
+  recommended CPU capacity with 20% margin: 210.04 KiB
+  note: estimates exclude the CUDA context, PyTorch allocator cache, autograd metadata, Python objects, and other tensors owned by the calling program.
+=== End DeepGPR compute preview ===
+

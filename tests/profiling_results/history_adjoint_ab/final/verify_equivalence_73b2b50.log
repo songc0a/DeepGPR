@@ -1,0 +1,155 @@
+torch=1.11.0+cu115  devices=['cpu', 'cuda']  OMP_NUM_THREADS=1
+reference: /tmp/tmpyie6om1q/DeepGPR_reference
+candidate: /home/ll/下载/DeepGPR-dev/src/DeepGPR
+
+[OK  ] cpu  2d-o2-float32-s1          forward 0.0e+00  gradient 4.4e-07
+Tips: The number of source waveforms is 1, but the number of sources is  2 . The source waveform is repeated for all sources.
+[OK  ] cpu  2d-o2-float32-s3          forward 0.0e+00  gradient 2.1e-07
+[OK  ] cpu  2d-o2-float16-s1          forward 0.0e+00  gradient 2.8e-07
+Tips: The number of source waveforms is 1, but the number of sources is  2 . The source waveform is repeated for all sources.
+[OK  ] cpu  2d-o2-float16-s3          forward 0.0e+00  gradient 2.4e-07
+[OK  ] cpu  2d-o2-bfloat16-s1         forward 0.0e+00  gradient 2.4e-07
+Tips: The number of source waveforms is 1, but the number of sources is  2 . The source waveform is repeated for all sources.
+[OK  ] cpu  2d-o2-bfloat16-s3         forward 0.0e+00  gradient 2.7e-07
+[OK  ] cpu  2d-o4-float32-s1          forward 0.0e+00  gradient 5.2e-07
+Tips: The number of source waveforms is 1, but the number of sources is  2 . The source waveform is repeated for all sources.
+[OK  ] cpu  2d-o4-float32-s3          forward 0.0e+00  gradient 4.0e-07
+[OK  ] cpu  2d-o4-float16-s1          forward 0.0e+00  gradient 6.4e-07
+Tips: The number of source waveforms is 1, but the number of sources is  2 . The source waveform is repeated for all sources.
+[OK  ] cpu  2d-o4-float16-s3          forward 0.0e+00  gradient 2.5e-07
+[OK  ] cpu  2d-o4-bfloat16-s1         forward 0.0e+00  gradient 7.6e-07
+Tips: The number of source waveforms is 1, but the number of sources is  2 . The source waveform is repeated for all sources.
+[OK  ] cpu  2d-o4-bfloat16-s3         forward 0.0e+00  gradient 4.1e-07
+[OK  ] cpu  2d-o8-float32-s1          forward 0.0e+00  gradient 1.5e-06
+Tips: The number of source waveforms is 1, but the number of sources is  2 . The source waveform is repeated for all sources.
+[OK  ] cpu  2d-o8-float32-s3          forward 0.0e+00  gradient 5.0e-07
+[OK  ] cpu  2d-o8-float16-s1          forward 0.0e+00  gradient 6.8e-07
+Tips: The number of source waveforms is 1, but the number of sources is  2 . The source waveform is repeated for all sources.
+[OK  ] cpu  2d-o8-float16-s3          forward 0.0e+00  gradient 4.7e-07
+[OK  ] cpu  2d-o8-bfloat16-s1         forward 0.0e+00  gradient 7.9e-07
+Tips: The number of source waveforms is 1, but the number of sources is  2 . The source waveform is repeated for all sources.
+[OK  ] cpu  2d-o8-bfloat16-s3         forward 0.0e+00  gradient 5.1e-07
+[OK  ] cpu  3d-o2-float32-s1          forward 0.0e+00  gradient 4.4e-07
+Tips: The number of source waveforms is 1, but the number of sources is  2 . The source waveform is repeated for all sources.
+[OK  ] cpu  3d-o2-float32-s3          forward 0.0e+00  gradient 1.9e-07
+[OK  ] cpu  3d-o2-float16-s1          forward 0.0e+00  gradient 4.8e-07
+Tips: The number of source waveforms is 1, but the number of sources is  2 . The source waveform is repeated for all sources.
+[OK  ] cpu  3d-o2-float16-s3          forward 0.0e+00  gradient 3.6e-07
+[OK  ] cpu  3d-o2-bfloat16-s1         forward 0.0e+00  gradient 2.7e-07
+Tips: The number of source waveforms is 1, but the number of sources is  2 . The source waveform is repeated for all sources.
+[OK  ] cpu  3d-o2-bfloat16-s3         forward 0.0e+00  gradient 3.0e-07
+[OK  ] cpu  3d-o4-float32-s1          forward 0.0e+00  gradient 5.0e-07
+Tips: The number of source waveforms is 1, but the number of sources is  2 . The source waveform is repeated for all sources.
+[OK  ] cpu  3d-o4-float32-s3          forward 0.0e+00  gradient 3.3e-07
+[OK  ] cpu  3d-o4-float16-s1          forward 0.0e+00  gradient 6.8e-07
+Tips: The number of source waveforms is 1, but the number of sources is  2 . The source waveform is repeated for all sources.
+[OK  ] cpu  3d-o4-float16-s3          forward 0.0e+00  gradient 3.6e-07
+[OK  ] cpu  3d-o4-bfloat16-s1         forward 0.0e+00  gradient 5.1e-07
+Tips: The number of source waveforms is 1, but the number of sources is  2 . The source waveform is repeated for all sources.
+[OK  ] cpu  3d-o4-bfloat16-s3         forward 0.0e+00  gradient 2.9e-07
+[OK  ] cpu  3d-o8-float32-s1          forward 0.0e+00  gradient 6.0e-07
+Tips: The number of source waveforms is 1, but the number of sources is  2 . The source waveform is repeated for all sources.
+[OK  ] cpu  3d-o8-float32-s3          forward 0.0e+00  gradient 4.7e-07
+[OK  ] cpu  3d-o8-float16-s1          forward 0.0e+00  gradient 8.2e-07
+Tips: The number of source waveforms is 1, but the number of sources is  2 . The source waveform is repeated for all sources.
+[OK  ] cpu  3d-o8-float16-s3          forward 0.0e+00  gradient 6.2e-07
+[OK  ] cpu  3d-o8-bfloat16-s1         forward 0.0e+00  gradient 5.9e-07
+Tips: The number of source waveforms is 1, but the number of sources is  2 . The source waveform is repeated for all sources.
+[OK  ] cpu  3d-o8-bfloat16-s3         forward 0.0e+00  gradient 4.7e-07
+[OK  ] cpu  no-pml                    forward 0.0e+00  gradient 1.1e-07
+[OK  ] cpu  asymmetric-pml            forward 0.0e+00  gradient 1.2e-07
+[OK  ] cpu  forward-only              forward 0.0e+00  gradient 0.0e+00
+[OK  ] cpu  mode3-2d                  forward 0.0e+00  gradient 7.0e-08
+[OK  ] cpu  checkpoint-segments       forward 0.0e+00  gradient 8.4e-07
+[OK  ] cpu  FIR / envelope / TV fixes
+         native error surfaced as NativeLibraryError: Native DeepGPR backward failed: deepgpr_cpu backward: could not allocate 844424930131968 bytes for the adjoint stencil weights
+[OK  ] cpu  native error reporting
+[OK  ] cuda 2d-o2-float32-s1          forward 0.0e+00  gradient 3.6e-07
+Tips: The number of source waveforms is 1, but the number of sources is  2 . The source waveform is repeated for all sources.
+Tips: The number of source waveforms is 1, but the number of sources is  2 . The source waveform is repeated for all sources.
+[OK  ] cuda 2d-o2-float32-s3          forward 0.0e+00  gradient 2.9e-07
+[OK  ] cuda 2d-o2-float16-s1          forward 0.0e+00  gradient 2.6e-07
+Tips: The number of source waveforms is 1, but the number of sources is  2 . The source waveform is repeated for all sources.
+Tips: The number of source waveforms is 1, but the number of sources is  2 . The source waveform is repeated for all sources.
+[OK  ] cuda 2d-o2-float16-s3          forward 0.0e+00  gradient 2.4e-07
+[OK  ] cuda 2d-o2-bfloat16-s1         forward 0.0e+00  gradient 2.7e-07
+Tips: The number of source waveforms is 1, but the number of sources is  2 . The source waveform is repeated for all sources.
+Tips: The number of source waveforms is 1, but the number of sources is  2 . The source waveform is repeated for all sources.
+[OK  ] cuda 2d-o2-bfloat16-s3         forward 0.0e+00  gradient 2.2e-07
+[OK  ] cuda 2d-o4-float32-s1          forward 0.0e+00  gradient 5.6e-07
+Tips: The number of source waveforms is 1, but the number of sources is  2 . The source waveform is repeated for all sources.
+Tips: The number of source waveforms is 1, but the number of sources is  2 . The source waveform is repeated for all sources.
+[OK  ] cuda 2d-o4-float32-s3          forward 0.0e+00  gradient 4.0e-07
+[OK  ] cuda 2d-o4-float16-s1          forward 0.0e+00  gradient 7.1e-07
+Tips: The number of source waveforms is 1, but the number of sources is  2 . The source waveform is repeated for all sources.
+Tips: The number of source waveforms is 1, but the number of sources is  2 . The source waveform is repeated for all sources.
+[OK  ] cuda 2d-o4-float16-s3          forward 0.0e+00  gradient 4.1e-07
+[OK  ] cuda 2d-o4-bfloat16-s1         forward 0.0e+00  gradient 5.3e-07
+Tips: The number of source waveforms is 1, but the number of sources is  2 . The source waveform is repeated for all sources.
+Tips: The number of source waveforms is 1, but the number of sources is  2 . The source waveform is repeated for all sources.
+[OK  ] cuda 2d-o4-bfloat16-s3         forward 0.0e+00  gradient 7.2e-07
+[OK  ] cuda 2d-o8-float32-s1          forward 0.0e+00  gradient 8.1e-07
+Tips: The number of source waveforms is 1, but the number of sources is  2 DeepGPR INT8 wavefield compression requires GPU-resident power-of-two blocks with at most 256 voxels.
+. The source waveform is repeated for all sources.
+Tips: The number of source waveforms is 1, but the number of sources is  2 . The source waveform is repeated for all sources.
+[OK  ] cuda 2d-o8-float32-s3          forward 0.0e+00  gradient 4.6e-07
+[OK  ] cuda 2d-o8-float16-s1          forward 0.0e+00  gradient 6.4e-07
+Tips: The number of source waveforms is 1, but the number of sources is  2 . The source waveform is repeated for all sources.
+Tips: The number of source waveforms is 1, but the number of sources is  2 . The source waveform is repeated for all sources.
+[OK  ] cuda 2d-o8-float16-s3          forward 0.0e+00  gradient 5.8e-07
+[OK  ] cuda 2d-o8-bfloat16-s1         forward 0.0e+00  gradient 7.5e-07
+Tips: The number of source waveforms is 1, but the number of sources is  2 . The source waveform is repeated for all sources.
+Tips: The number of source waveforms is 1, but the number of sources is  2 . The source waveform is repeated for all sources.
+[OK  ] cuda 2d-o8-bfloat16-s3         forward 0.0e+00  gradient 5.6e-07
+[OK  ] cuda 3d-o2-float32-s1          forward 0.0e+00  gradient 5.6e-07
+Tips: The number of source waveforms is 1, but the number of sources is  2 . The source waveform is repeated for all sources.
+Tips: The number of source waveforms is 1, but the number of sources is  2 . The source waveform is repeated for all sources.
+[OK  ] cuda 3d-o2-float32-s3          forward 0.0e+00  gradient 1.6e-07
+[OK  ] cuda 3d-o2-float16-s1          forward 0.0e+00  gradient 3.1e-07
+Tips: The number of source waveforms is 1, but the number of sources is  2 . The source waveform is repeated for all sources.
+Tips: The number of source waveforms is 1, but the number of sources is  2 . The source waveform is repeated for all sources.
+[OK  ] cuda 3d-o2-float16-s3          forward 0.0e+00  gradient 1.9e-07
+[OK  ] cuda 3d-o2-bfloat16-s1         forward 0.0e+00  gradient 3.5e-07
+Tips: The number of source waveforms is 1, but the number of sources is  2 . The source waveform is repeated for all sources.
+Tips: The number of source waveforms is 1, but the number of sources is  2 . The source waveform is repeated for all sources.
+[OK  ] cuda 3d-o2-bfloat16-s3         forward 0.0e+00  gradient 2.9e-07
+[OK  ] cuda 3d-o4-float32-s1          forward 0.0e+00  gradient 4.2e-07
+Tips: The number of source waveforms is 1, but the number of sources is  2 . The source waveform is repeated for all sources.
+Tips: The number of source waveforms is 1, but the number of sources is  2 . The source waveform is repeated for all sources.
+[OK  ] cuda 3d-o4-float32-s3          forward 0.0e+00  gradient 6.2e-07
+[OK  ] cuda 3d-o4-float16-s1          forward 0.0e+00  gradient 2.7e-07
+Tips: The number of source waveforms is 1, but the number of sources is  2 . The source waveform is repeated for all sources.
+Tips: The number of source waveforms is 1, but the number of sources is  2 . The source waveform is repeated for all sources.
+[OK  ] cuda 3d-o4-float16-s3          forward 0.0e+00  gradient 3.1e-07
+[OK  ] cuda 3d-o4-bfloat16-s1         forward 0.0e+00  gradient 3.3e-07
+Tips: The number of source waveforms is 1, but the number of sources is  2 . The source waveform is repeated for all sources.
+Tips: The number of source waveforms is 1, but the number of sources is  2 . The source waveform is repeated for all sources.
+[OK  ] cuda 3d-o4-bfloat16-s3         forward 0.0e+00  gradient 2.9e-07
+[OK  ] cuda 3d-o8-float32-s1          forward 0.0e+00  gradient 6.0e-07
+Tips: The number of source waveforms is 1, but the number of sources is  2 . The source waveform is repeated for all sources.
+Tips: The number of source waveforms is 1, but the number of sources is  2 . The source waveform is repeated for all sources.
+[OK  ] cuda 3d-o8-float32-s3          forward 0.0e+00  gradient 2.7e-07
+[OK  ] cuda 3d-o8-float16-s1          forward 0.0e+00  gradient 2.9e-07
+Tips: The number of source waveforms is 1, but the number of sources is  2 . The source waveform is repeated for all sources.
+Tips: The number of source waveforms is 1, but the number of sources is  2 . The source waveform is repeated for all sources.
+[OK  ] cuda 3d-o8-float16-s3          forward 0.0e+00  gradient 3.4e-07
+[OK  ] cuda 3d-o8-bfloat16-s1         forward 0.0e+00  gradient 7.1e-07
+Tips: The number of source waveforms is 1, but the number of sources is  2 . The source waveform is repeated for all sources.
+Tips: The number of source waveforms is 1, but the number of sources is  2 . The source waveform is repeated for all sources.
+[OK  ] cuda 3d-o8-bfloat16-s3         forward 0.0e+00  gradient 2.6e-07
+[OK  ] cuda no-pml                    forward 0.0e+00  gradient 1.1e-07
+[OK  ] cuda asymmetric-pml            forward 0.0e+00  gradient 2.3e-07
+[OK  ] cuda forward-only              forward 0.0e+00  gradient 0.0e+00
+[OK  ] cuda mode3-2d                  forward 0.0e+00  gradient 1.1e-07
+[OK  ] cuda checkpoint-segments       forward 0.0e+00  gradient 8.4e-07
+[OK  ] cuda cuda-int8                 forward 0.0e+00  gradient 7.2e-08
+[OK  ] cuda cuda-int8-3d              forward 0.0e+00  gradient 8.0e-08
+[OK  ] cuda cuda-async-offload        forward 0.0e+00  gradient 9.4e-08
+[OK  ] cuda cuda-fp16-legacy          forward 0.0e+00  gradient 8.9e-08
+[OK  ] cuda cuda-fp16-vec2            forward 0.0e+00  gradient 7.0e-08
+[OK  ] cuda FIR / envelope / TV fixes
+         native error surfaced as NativeLibraryError: Native DeepGPR backward failed: DeepGPR INT8 wavefield compression requires GPU-resident power-of-two blocks with at most 256 voxels.
+[OK  ] cuda native error reporting
+[OK  ] cpu  bitwise determinism for OMP_NUM_THREADS=[1, 2, 4, 8]
+
+All checks passed.
