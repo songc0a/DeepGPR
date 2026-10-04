@@ -34,7 +34,7 @@
           <span class="kicker">02 / Environment</span><h2>Requirements</h2>
           <div class="doc-grid">
             <article class="info-card"><span class="card-tag">Python</span><h3>Python 3.8+</h3><p>The package metadata requires Python 3.8 or newer.</p></article>
-            <article class="info-card"><span class="card-tag">Libraries</span><h3>Scientific Python stack</h3><p>PyTorch, NumPy, SciPy, and Matplotlib are declared runtime dependencies.</p></article>
+            <article class="info-card"><span class="card-tag">Libraries</span><h3>Scientific Python stack</h3><p>PyTorch, NumPy, and Matplotlib are the runtime dependencies. The <code>examples</code> extra adds SciPy, scikit-image, and Jupyter for the notebooks.</p></article>
             <article class="info-card"><span class="card-tag">CPU</span><h3>Linux, Windows, macOS</h3><p>The C/OpenMP CPU backend supports all three operating-system families listed by the project.</p></article>
             <article class="info-card"><span class="card-tag">CUDA</span><h3>Linux and Windows</h3><p>CUDA execution is documented for Linux and Windows and requires an NVIDIA GPU with sufficient VRAM.</p></article>
           </div>
@@ -85,14 +85,22 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 cpu_device = torch.device("cpu")
 gpu_device = torch.device("cuda:0")
 
-# Optional CUDA memory control for saved model-gradient wavefields
+# Optional memory control for saved model-gradient wavefields
 result = DeepGPR.compute(
     device=gpu_device,
     # model, source, and acquisition arguments...
+    wavefield_history_region="physical",       # history without the CPML cells
+    model_gradient_sampling_interval="auto",   # interval from the source spectrum
     wavefield_storage_dtype=torch.float16,
     use_async_offload=True,
 )</code></pre></div>
           <div class="callout"><code>use_async_offload=True</code> is CUDA-only and transfers saved wavefields to pinned CPU memory. Lower-precision storage and temporal sampling trade gradient accuracy for memory savings; use interval 1 with float32 storage for strict gradient checks.</div>
+          <h3>Saved-history memory</h3>
+          <ul>
+            <li>With float32 storage and sampling interval 1, the default <code>wavefield_rhs_history="auto"</code> stores only <code>E</code> and rebuilds the right-hand side in the adjoint: half the history memory, unchanged gradients. <code>"stored"</code> keeps the earlier E+R layout.</li>
+            <li><code>wavefield_history_region="physical"</code> stores the history only on the physical model cells; material gradients are unchanged. The default <code>"extended"</code> also covers the CPML.</li>
+            <li><code>model_gradient_sampling_interval="auto"</code> picks <code>floor(1 / (4 f_max dt))</code> from the source spectrum; <code>DeepGPR.recommended_sampling_interval(source, dt)</code> returns the same value for segmented runs. The default stays 1 (exact gradient).</li>
+          </ul>
         </section>
 
         <section class="content-panel" id="forward">
@@ -110,7 +118,7 @@ result = DeepGPR.compute(
 
         <section class="content-panel" id="api">
           <span class="kicker">06 / Reference</span><h2>Main API</h2>
-          <p>This table covers the parameters most often needed for modelling. The complete signature and constraints remain in the repository README.</p>
+          <p>This table covers the parameters most often needed for modelling. The complete signature and constraints are in the API reference (<code>docs/API.md</code>).</p>
           <table class="parameter-table"><thead><tr><th>Parameter</th><th>Purpose</th><th>Core form</th></tr></thead><tbody>
             <tr><td>device</td><td>Execution device and native backend</td><td><code>"cpu"</code>, <code>"cuda:0"</code>, or <code>torch.device</code></td></tr>
             <tr><td>dx</td><td>Grid spacing in metres</td><td>Scalar or three values</td></tr>
@@ -124,12 +132,16 @@ result = DeepGPR.compute(
             <tr><td>pmlthick</td><td>External CPML thickness</td><td>Integer or four/six values</td></tr>
             <tr><td>fdtd_order</td><td>Spatial finite-difference order</td><td>2, 4, or 8</td></tr>
             <tr><td>mode</td><td>Material-gradient component mode</td><td>2 or 3</td></tr>
+            <tr><td>model_gradient_sampling_interval</td><td>Temporal sampling of the saved history; values above 1 approximate the gradient</td><td>Integer (default 1) or <code>"auto"</code></td></tr>
+            <tr><td>wavefield_storage_dtype</td><td>Precision of the saved history</td><td><code>torch.float32</code>, <code>float16</code>, or <code>bfloat16</code></td></tr>
+            <tr><td>wavefield_rhs_history</td><td>Store or rebuild the right-hand-side history</td><td><code>"auto"</code>, <code>"stored"</code>, or <code>"reconstructed"</code></td></tr>
+            <tr><td>wavefield_history_region</td><td>Cells covered by the saved history</td><td><code>"extended"</code> or <code>"physical"</code></td></tr>
           </tbody></table>
           <h3>Physical model and automatic PML</h3>
           <p>Supply only air and the target region in <code>eps_r</code>, <code>sigma</code>, and optional <code>mu_r</code>. Each call replicates current edge values outward by the configured PML thickness. Acquisition indices start at zero in the input model; the solver shifts them internally. Remove old manual PML padding and its coordinate offsets when migrating.</p>
           <p>For input <code>(nx, ny, nz)</code> and face widths <code>[px0, px1, py0, py1, pz0, pz1]</code>, the solver uses <code>Nx = nx + px0 + px1</code>, and likewise for Y and Z. In 2D, <code>Nz = 1</code>. Update the physical model with your FWI optimizer; PML is regenerated on the next call. Apply an air mask if air must remain fixed.</p>
           <p>Backward holds PML materials and coefficient averages fixed and crops material gradients to the model. It does not sum PML sensitivities into edge cells. For finite-difference checks, freeze the boundary values or the PML explicitly. Native CPU/CUDA libraries must be rebuilt with the <code>deepgpr_supports_external_pml</code> capability.</p>
-          <p><a href="https://github.com/songc0a/DeepGPR#compute-interface-documentation">Open the full interface documentation on GitHub ↗</a></p>
+          <p><a href="https://github.com/songc0a/DeepGPR/blob/main/docs/API.md">Open the full interface documentation on GitHub ↗</a></p>
         </section>
 
         <section class="content-panel" id="outputs">
@@ -141,7 +153,8 @@ result = DeepGPR.compute(
             <li><strong><code>PML_Tuple</code></strong> — 24 CPML auxiliary state tensors.</li>
             <li><strong><code>receiver_amplitudes</code></strong> — recorded data with shape <code>(nstep, nt, nrx)</code>.</li>
           </ol>
-          <p>Histories (including compressed and saved-file histories) retain the full <code>(Nx, Ny, Nz)</code> solver grid. E/H tensors have shape <code>(nstep, Nx+1, Ny+1, Nz+1)</code>, including the Yee halo. For physical history plots, slice each spatial axis from its low PML width for the input model length.</p>
+          <p>By default, histories (including compressed and saved-file histories) retain the full <code>(Nx, Ny, Nz)</code> solver grid; for physical history plots, slice each spatial axis from its low PML width for the input model length. With <code>wavefield_history_region="physical"</code> the history already has the physical shape <code>(nx, ny, nz)</code>. E/H tensors always have shape <code>(nstep, Nx+1, Ny+1, Nz+1)</code>, including the Yee halo.</p>
+          <p>CPU results are bitwise reproducible for any thread count. On CUDA, 2D Ez-TM runs are bitwise reproducible; 3D gradients can differ in the last bits between runs because the 3D adjoint accumulates with atomics.</p>
           <h3>Continuation and checkpointing</h3>
           <p><code>checkpoint_initial_field</code> takes the physical model and allocates full-grid E/H/PML states. Pass all returned states back without cropping or padding, using the same geometry, PML settings, and shot ordering. The material model stays unextended on every segment.</p>
           <p>The native solver advances supplied states in place. Clone all 30 boundary tensors inside a PyTorch checkpointed function before propagation, and return their final states with the receiver traces. Keep materials fixed throughout the trajectory and backward pass; start the next FWI iteration from the appropriate initial state after optimization.</p>

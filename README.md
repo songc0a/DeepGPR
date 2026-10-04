@@ -11,7 +11,7 @@ DeepGPR provides a wave propagation module for PyTorch, designed for application
 - Automatic extension of the physical model into a CPML with an independent thickness on every face. Supply only air and the target region; material gradients keep the input model shape.
 - CUDA GPU backend and a C/OpenMP CPU backend (selected automatically with `device='cpu'`).
 - Spatial FDTD order 2, 4 or 8 (`fdtd_order`), and gradient mode 2 (Ez only) or 3 (Ex, Ey, Ez).
-- Large models: checkpointing, DDP, temporal sub-sampling, FP16/BF16 or GPU-native INT8 wavefield histories and asynchronous offload to host memory.
+- Large models: checkpointing, DDP, temporal sub-sampling (fixed or `"auto"` from the source spectrum), E-only float32 histories (default; half the memory of E+R), histories restricted to the physical model (`wavefield_history_region="physical"`), FP16/BF16 or GPU-native INT8 wavefield histories and asynchronous offload to host memory. See [`docs/API.md`](docs/API.md) §4.3-4.6.
 
 ## System requirements
 
@@ -126,6 +126,7 @@ The figures show the true model, the initial model and the inverted result.
 | `DeepGPR.apply_filter`, `DeepGPR.hilbert_transform` | low-pass FIR and envelope for multi-scale FWI |
 | `DeepGPR.max_stable_time_step(...)` | largest CFL-stable `dt` for a grid, order and material |
 | `DeepGPR.estimate_compute_memory(...)` | memory estimate (also printed by `print_parameters=True`) |
+| `DeepGPR.recommended_sampling_interval(...)`, `DeepGPR.source_max_frequency(...)` | gradient sampling interval bound `floor(1 / (4 f_max dt))` from a source waveform (what `model_gradient_sampling_interval="auto"` uses) |
 | `DeepGPR.decompress_wavefield_history(...)` | decode a packed INT8 history for diagnostics |
 | `DeepGPR.visualization.plot_*` | models, radargrams, traces, true/initial/inverted comparison |
 | `DeepGPR.configure_logging(level)` | enable DeepGPR log output |

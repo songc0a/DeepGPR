@@ -1,4 +1,4 @@
-<!-- Moved from README.md in 0.1.0; content unchanged apart from headings. -->
+<!-- Moved from README.md in 0.1.0; kept up to date with the [Unreleased] changes in CHANGELOG.md. -->
 
 # `DeepGPR.compute` API reference
 
@@ -60,7 +60,7 @@ result = DeepGPR.compute(
 | **`fdtd_order`** | `int` | Spatial finite-difference order used by the FDTD field updates. Supported values are `2`, `4`, and `8`; default is `2` for compatibility with earlier versions. |
 | **`mode`** | `int` | FWI gradient mode. `2` keeps the previous Ez-only model-gradient calculation. `3` uses Ex, Ey, and Ez electric-field contributions for relative permittivity and conductivity gradients. |
 | **`debug`** | `bool` | Runs expensive NaN/Inf and zero-field validation checks when `True`. Backward validation covers material, source, and initial-state gradients actually requested by autograd. The default `False` keeps these checks disabled for faster production runs. |
-| **`print_parameters`** | `bool` | Prints a preflight summary before native FDTD execution. The summary includes all simulation options and a tensor-payload memory estimate for model/state tensors, CPML, saved `E_saved`/`R_saved` wavefields, receiver buffers, gradients, low-precision snapshots, and CUDA offload buffers. CPU and CUDA estimates are reported separately with a 20% capacity margin. |
+| **`print_parameters`** | `bool` | Prints a preflight summary before native FDTD execution. The summary includes all simulation options (including the resolved R-history mode and history region) and a tensor-payload memory estimate for model/state tensors, CPML, saved `E_saved`/`R_saved` wavefields (or the E-only history and its final frame), receiver buffers, gradients, low-precision snapshots, and CUDA offload buffers. CPU and CUDA estimates are reported separately with a 20% capacity margin. The same estimate is available as `DeepGPR.estimate_compute_memory(...)` (keyword arguments include `reconstruct_rhs` and `history_region`). |
 | **`save_forward_wavefield_path`** | `str` / path-like / `None` | Directory used to save `E_saved` after a successful forward run. The default `None` performs no file I/O. Files use the local 24-hour start time, for example `forward_wavefield_14-35.pt`; a numeric suffix prevents overwriting when multiple runs start in the same minute. |
 ### 2. Medium Model Parameters
 
@@ -112,7 +112,7 @@ This section defines the geometric observation system (coordinates) and the exci
 | **`int8_reduction_backend`** | `str` | `"auto"`, `"current"`, `"cub_block"`, or `"warp_shuffle"` | Tile maximum reduction. The audited default `"auto"` selects NVIDIA CUB `BlockReduce` for 64-voxel tiles and preserves the prior shared-memory tree for other valid tile sizes. Explicit values expose the retained A/B implementations. |
 | **`wavefield_compression_rate`** | scalar / `None` | Optional ZFP setting | Reserved for an optional ZFP backend. It is rejected unless that backend is selected and available. |
 | **`wavefield_history_region`** | `str` | `"extended"` or `"physical"` | Cells covered by the saved history (see [4.6](#46-physical-region-history)). `"extended"` (default) stores the whole grid including the external PML. `"physical"` stores only the physical model cells; material gradients are unchanged because CPML cells never receive one, and history memory falls in proportion to the cell count. |
-| **`wavefield_rhs_history`** | `str` | `"auto"`, `"stored"`, or `"reconstructed"` | Storage of the right-hand-side history `R^n` used by the material gradient (see [4.5](#45-e-only-history-at-sampling-interval-1)). `"auto"` (default) stores only `E^n` for uncompressed `float32` histories with `model_gradient_sampling_interval=1` and rebuilds `R^n` in the adjoint, halving history memory with unchanged gradients; other storage modes keep `E^n` and `R^n`. `"stored"` always keeps both (reproduces earlier results bit for bit); `"reconstructed"` requests the E-only history for any storage mode and requires interval 1. |
+| **`wavefield_rhs_history`** | `str` | `"auto"`, `"stored"`, or `"reconstructed"` | Storage of the right-hand-side history `R^n` used by the material gradient (see [4.5](#45-e-only-history-at-sampling-interval-1)). `"auto"` (default) stores only `E^n` for uncompressed `float32` histories with `model_gradient_sampling_interval=1` and rebuilds `R^n` in the adjoint, halving history memory with unchanged gradients; other storage modes keep `E^n` and `R^n`. `"stored"` always keeps both (the earlier history layout); `"reconstructed"` requests the E-only history for any storage mode and requires interval 1. |
 | **`use_async_offload`** | `bool` | Scalar | CUDA-only VRAM optimization flag (Default: `False`).<br>If `True`, `E_saved` and `R_saved` are asynchronously offloaded to page-locked host memory (`pin_memory` CPU RAM). This reduces GPU VRAM consumption at the cost of PCIe transfers. On CPU this option is ignored. |
 
 ### 4.1 FWI Gradient Mode
@@ -233,8 +233,8 @@ two independently rounded E frames has an error proportional to `|E|` instead
 of `|E^(n+1) - E^n|`, which was up to 3.5x larger in some measured cases (mostly
 comparable; see `tests/profiling_results/history_adjoint_gpu_report.md`).
 `wavefield_rhs_history="reconstructed"` enables the E-only history for these
-modes as well when memory matters more. `"stored"` reproduces earlier results
-in every mode. Native libraries without the
+modes as well when memory matters more. `"stored"` restores the earlier E+R
+layout in every mode. Native libraries without the
 `deepgpr_supports_rhs_reconstruction` capability (for example older prebuilt
 Windows/macOS binaries) fall back to E+R under `"auto"` and reject
 `"reconstructed"`.
@@ -339,7 +339,7 @@ return E_saved, (Ex, Ey, Ez), (Hx, Hy, Hz), (x0EPhi1...zmHPhi2), receiver_amplit
     *   `Nx`, `Ny`, `Nz` include external PML. Histories, saved files, and full E/H/PML states keep that grid; only material gradients are cropped. To plot a physical history, slice spatial axes with `[px0:px0+nx, py0:py0+ny, pz0:pz0+nz]`. With `wavefield_history_region="physical"` the spatial axes are already `(nx, ny, nz)` (§4.6).
     *   `nt_saved` depends on `nt` and `model_gradient_sampling_interval`.
     *   Dtype is selected by `wavefield_storage_dtype` when compression is disabled. With `wavefield_compression="int8"`, this is an opaque packed one-dimensional `torch.int8` tensor containing values and FP32 scales.
-    *   Set `save_forward_wavefield_path="/path/to/output"` to save a CPU-loadable `.pt` file. Uncompressed modes save the tensor directly. INT8 mode saves a dictionary containing `wavefield`, `compression`, `block_size`, and `uncompressed_shape` so diagnostics can reconstruct it safely.
+    *   Set `save_forward_wavefield_path="/path/to/output"` to save a CPU-loadable `.pt` file. Uncompressed extended histories save the tensor directly. INT8 mode saves a dictionary containing `wavefield`, `compression`, `block_size`, and `uncompressed_shape` so diagnostics can reconstruct it safely; `wavefield_history_region="physical"` always saves a dictionary that also records `history_region`, `history_origin` and `pmlthick` (§4.6).
 2.  **`(Ex, Ey, Ez)`**: The 3D electric field state at the final time step.
 3.  **`(Hx, Hy, Hz)`**: The 3D magnetic field state at the final time step.
 4.  **`(PML_Tuple)`**: A tuple of 24 Tensors recording the final time step state of the PML auxiliary $\Phi$ variables.

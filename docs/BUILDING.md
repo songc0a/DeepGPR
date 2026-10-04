@@ -21,6 +21,16 @@ The new INT8 path deliberately keeps native ABI 6 because the forward/backward
 C signatures are unchanged. A capability symbol prevents an older ABI-6 CUDA
 library from accepting the packed storage code and corrupting memory. External PML also requires the `deepgpr_supports_external_pml` capability on CPU and CUDA, including the INT8 gradient path. Rebuild native libraries on each target platform; older binaries are rejected for PML runs rather than silently dropping physical edge gradients.
 
+The history and adjoint changes in `CHANGELOG.md` [Unreleased] add three more
+capability symbols (ABI stays 6): `deepgpr_supports_rhs_reconstruction`
+(E-only history, `wavefield_rhs_history`), `deepgpr_supports_physical_history`
+(`wavefield_history_region="physical"`) and `deepgpr_supports_tm2d_fast_path`
+(CUDA 2D TM fast path). A library built before them still works: `"auto"`
+falls back to the E+R history and the general CUDA kernels, while an explicit
+`wavefield_rhs_history="reconstructed"` or `wavefield_history_region="physical"`
+raises `NativeLibraryError`. The prebuilt Windows and macOS binaries in
+`src/DeepGPR/lib` predate these symbols until they are rebuilt.
+
 ## CPU backend
 
 The CPU backend is a plain C shared library and is built with OpenMP by default. Build it into `src/DeepGPR/lib` before running with `device='cpu'`. You can control CPU thread count with `OMP_NUM_THREADS`.

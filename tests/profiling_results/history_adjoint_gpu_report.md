@@ -739,6 +739,15 @@ seeds accept a per-face PML list).
   forward median between 95 and 213 ms across batches (§0, §6).
 - The cause of the fused 3D forward slowdown on large grids (§6) needs
   hardware counters; Nsight Compute is not permitted on this machine.
+- Example notebooks (checked after the work, not edited): `examples/3.3DFWI.ipynb`
+  computes 3D material gradients without `mode=3` and therefore raises
+  `ValueError` ("mode=2 is an exact model-gradient mode only for 2D Ez-TM
+  modeling") on the current tree and on the baseline alike; the restriction
+  dates from commit `39481e2`, and the stored outputs come from an older
+  version. All three notebooks use the deprecated `er=` / `se=` aliases (still
+  accepted). The stored output of `examples/2.2DFWI.ipynb` shows the old
+  sampling-interval `RuntimeWarning`; with the new policy `S = 5` is inside the
+  bound `S = 8` of that source and is only logged at INFO.
 - Not touched as instructed: the CPU loop structure, the process-global
   `fdtd_order` (AUDIT N-3), CUDA Graphs, example notebooks and Windows/macOS
   binaries.

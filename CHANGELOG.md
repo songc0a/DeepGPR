@@ -84,6 +84,10 @@ Measurements, protocol and per-item decisions:
   `final_e_frame` entry; `print_parameters` reports the R-history mode.
 - The native `storage_type` argument reserves bits 4-7 for history flags (the
   storage kind now uses bits 0-3).
+- Documentation: README, `docs/API.md`, `docs/BUILDING.md` (new capability
+  probes) and the website describe the new history options; the website now
+  links to `docs/API.md` instead of a README anchor that moved in 0.1.0 and no
+  longer lists SciPy as a runtime dependency.
 
 ## [0.1.0] — Structural refactor and numerical fixes
 
