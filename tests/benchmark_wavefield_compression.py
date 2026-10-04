@@ -8,6 +8,7 @@ formal result files.
 from __future__ import annotations
 
 import argparse
+import ast
 import csv
 import gc
 import statistics
@@ -20,8 +21,22 @@ import torch
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO_ROOT / "src"))
+
+
+def _source_root_from_argv():
+    """Return the ``--src-root`` value before DeepGPR is imported."""
+    pre_parser = argparse.ArgumentParser(add_help=False)
+    pre_parser.add_argument("--src-root", type=Path, default=REPO_ROOT / "src")
+    known, _ = pre_parser.parse_known_args()
+    return known.src_root.resolve()
+
+
+SRC_ROOT = _source_root_from_argv()
+sys.path.insert(0, str(SRC_ROOT))
 import DeepGPR
+
+#: Autograd-context attributes that hold forward wavefield histories.
+HISTORY_CONTEXT_ATTRIBUTES = ("E_saved", "R_saved", "E_final")
 
 
 @dataclass(frozen=True)
@@ -115,6 +130,14 @@ MODES = {
         "DEEPGPR_BF16_VEC2_BACKWARD",
         "native_vec2",
     ),
+    "bf16": Mode(
+        "bf16",
+        torch.bfloat16,
+        "none",
+        True,
+        "DEEPGPR_BF16_FORWARD",
+        "DEEPGPR_BF16_BACKWARD",
+    ),
     "int8": Mode(
         "int8",
         torch.float32,
@@ -160,9 +183,8 @@ MODES = {
 
 def make_inputs(args):
     device = torch.device(args.device)
-    eps_r = torch.full(
-        (args.nx, args.ny), 5.0, device=device, requires_grad=True
-    )
+    shape = (args.nx, args.ny) if args.nz <= 1 else (args.nx, args.ny, args.nz)
+    eps_r = torch.full(shape, 5.0, device=device, requires_grad=True)
     sigma = torch.full_like(eps_r, 1.0e-3, requires_grad=True)
     source = DeepGPR.wavelet.ricker(
         args.frequency, args.nt, args.dt, args.peak_time, device=device
@@ -183,6 +205,12 @@ def make_inputs(args):
     source_location[:, 0, 1] = 2
     receiver_location[:, :, 0] = receiver_x
     receiver_location[:, :, 1] = 2
+    if args.nz > 1:
+        # 3D: surface acquisition on the z = 2 plane through the model centre.
+        source_location[:, 0, 1] = args.ny // 2
+        source_location[:, 0, 2] = 2
+        receiver_location[:, :, 1] = args.ny // 2 + 4
+        receiver_location[:, :, 2] = 2
     return eps_r, sigma, source, source_location, receiver_location
 
 
@@ -208,10 +236,11 @@ def compute_kwargs(args, mode, tensors):
         use_async_offload=args.async_offload,
         wavefield_compression=mode.compression,
         wavefield_compression_block_size=(args.block_x, args.block_y)
-        if mode.compression == "int8"
+        if mode.compression == "int8" and args.nz <= 1
         else None,
         fdtd_order=args.order,
-        mode=2,
+        mode=args.gradient_mode,
+        **args.compute_kwargs,
     )
 
 
@@ -230,7 +259,8 @@ def run_once(args, mode, forward_only, capture=False):
     tensors = make_inputs(args)
     kwargs = compute_kwargs(args, mode, tensors)
     gc.collect()
-    torch.cuda.empty_cache()
+    if not args.keep_allocator_cache:
+        torch.cuda.empty_cache()
     torch.cuda.synchronize(device)
     torch.cuda.reset_peak_memory_stats(device)
 
@@ -250,6 +280,8 @@ def run_once(args, mode, forward_only, capture=False):
     finally:
         _range_pop(args.nvtx)
     forward_end.record()
+    # Read the retained histories before backward releases them (host only).
+    history_bytes = _history_bytes(result) if mode.save_wavefield_history else 0
 
     loss = None
     if forward_only:
@@ -273,11 +305,6 @@ def run_once(args, mode, forward_only, capture=False):
     )
     total_ms = total_start.elapsed_time(total_end)
     peak_bytes = torch.cuda.max_memory_allocated(device)
-    history_bytes = (
-        2 * result[0].numel() * result[0].element_size()
-        if mode.save_wavefield_history
-        else 0
-    )
     row = {
         "forward_ms": forward_ms,
         "backward_ms": backward_ms,
@@ -294,8 +321,41 @@ def run_once(args, mode, forward_only, capture=False):
 
     del result, loss, kwargs, tensors
     gc.collect()
-    torch.cuda.empty_cache()
+    if not args.keep_allocator_cache:
+        torch.cuda.empty_cache()
     return row
+
+
+def _history_bytes(result):
+    """Bytes of every forward history tensor retained for the adjoint.
+
+    The custom autograd node is the ``ctx`` object of ``DeepGPR.forward``, so
+    its history attributes can be inspected without relying on the shape of
+    the public ``E_saved`` tensor (internal tensors such as ``R_saved`` or an
+    extra final frame are counted as well). The value is taken before
+    backward releases the histories.
+    """
+    node = result[-1].grad_fn
+    if node is None:
+        return result[0].numel() * result[0].element_size()
+    total = 0
+    for name in HISTORY_CONTEXT_ATTRIBUTES:
+        tensor = getattr(node, name, None)
+        if isinstance(tensor, torch.Tensor):
+            total += tensor.numel() * tensor.element_size()
+    return total
+
+
+def _parse_compute_kwarg(text):
+    """Parse ``KEY=VALUE`` (VALUE as a Python literal, else a string)."""
+    key, separator, raw = text.partition("=")
+    if not separator or not key:
+        raise argparse.ArgumentTypeError("--compute-kwarg expects KEY=VALUE")
+    try:
+        value = ast.literal_eval(raw)
+    except (SyntaxError, ValueError):
+        value = raw
+    return key, value
 
 
 def summarize(rows):
@@ -347,6 +407,8 @@ def _emit_and_save(lines, path, profile_run):
 
 
 def selected_modes(args):
+    if args.modes:
+        return [MODES[name] for name in args.modes.split(",")]
     if args.mode == "defaults":
         names = ("fdtd", "fp32", "fp16", "int8") if args.forward_only else (
             "fp32",
@@ -385,6 +447,23 @@ def main():
     parser.add_argument("--frequency", type=float, default=4.0e8)
     parser.add_argument("--peak-time", type=float, default=2.5e-9)
     parser.add_argument("--order", type=int, choices=(2, 4, 8), default=2)
+    parser.add_argument(
+        "--nz", type=int, default=1,
+        help="physical z cells; values > 1 run a 3D model (use --gradient-mode 3)",
+    )
+    parser.add_argument("--gradient-mode", type=int, choices=(2, 3), default=2)
+    parser.add_argument(
+        "--src-root", type=Path, default=REPO_ROOT / "src",
+        help="source tree whose DeepGPR package and native library are benchmarked",
+    )
+    parser.add_argument(
+        "--compute-kwarg", type=_parse_compute_kwarg, action="append", default=[],
+        metavar="KEY=VALUE", help="extra DeepGPR.compute keyword (repeatable)",
+    )
+    parser.add_argument(
+        "--save-captures", type=Path, default=None,
+        help="torch.save the first measured receiver data and gradients per mode",
+    )
     parser.add_argument("--sampling-interval", type=int, default=1)
     parser.add_argument("--block-x", type=int, default=8)
     parser.add_argument("--block-y", type=int, default=8)
@@ -396,6 +475,15 @@ def main():
     )
     parser.add_argument(
         "--mode", choices=("all", "defaults", *MODES), default="all"
+    )
+    parser.add_argument(
+        "--keep-allocator-cache", action="store_true",
+        help="do not empty the PyTorch CUDA cache between runs (steady-state FWI "
+        "loop); the default releases it so every run pays its cudaMalloc cost",
+    )
+    parser.add_argument(
+        "--modes", default=None,
+        help="comma-separated mode names; overrides --mode",
     )
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--repeat", "--repeats", dest="repeat", type=int, default=20)
@@ -411,10 +499,15 @@ def main():
         default=REPO_ROOT / "tests" / "profiling_results",
     )
     args = parser.parse_args()
+    args.compute_kwargs = dict(args.compute_kwarg)
+    if args.nz > 1 and args.gradient_mode != 3:
+        parser.error("3D models (--nz > 1) require --gradient-mode 3")
 
     if args.warmup < 0 or args.repeat < 1:
         parser.error("--warmup must be nonnegative and --repeat must be positive")
-    if args.mode == "fdtd" and not args.forward_only:
+    if args.modes and any(name not in MODES for name in args.modes.split(",")):
+        parser.error(f"--modes accepts {sorted(MODES)}")
+    if (args.mode == "fdtd" or "fdtd" in (args.modes or "").split(",")) and not args.forward_only:
         parser.error("--mode fdtd requires --forward-only")
     if args.async_offload and any(mode.compression == "int8" for mode in selected_modes(args)):
         parser.error("--async-offload is incompatible with INT8 modes")
@@ -427,8 +520,10 @@ def main():
     print(f"GPU: {torch.cuda.get_device_name(device)}")
     print(f"native library: {DeepGPR.get_deepgpr_library_path(device)}")
     print(
-        f"case: nx={args.nx} ny={args.ny} nt={args.nt} shots={args.shots} "
-        f"receivers={args.receivers} sampling_interval={args.sampling_interval}"
+        f"case: nx={args.nx} ny={args.ny} nz={args.nz} nt={args.nt} shots={args.shots} "
+        f"receivers={args.receivers} sampling_interval={args.sampling_interval} "
+        f"gradient_mode={args.gradient_mode} order={args.order} pml={args.pml} "
+        f"compute_kwargs={args.compute_kwargs}"
     )
     print(
         f"run: {'forward-only' if args.forward_only else 'full'} "
@@ -466,6 +561,14 @@ def main():
             f"receivers={args.receivers} sampling_interval={args.sampling_interval}"
         ),
     ]
+    if args.nz > 1 or args.gradient_mode != 2 or args.compute_kwargs or args.order != 2:
+        lines.append(
+            f"case_extra nz={args.nz} gradient_mode={args.gradient_mode} "
+            f"order={args.order} pml={args.pml} compute_kwargs={args.compute_kwargs}"
+        )
+    if args.save_captures is not None:
+        args.save_captures.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(captures, args.save_captures)
 
     if args.forward_only:
         lines.append(

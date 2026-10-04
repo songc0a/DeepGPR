@@ -1,0 +1,3 @@
+utilization.gpu [%], memory.used [MiB], clocks.current.sm [MHz], pstate
+34 %, 1858 MiB, 345 MHz, P5
+pid, process_name, used_gpu_memory [MiB]
