@@ -14,6 +14,7 @@ from .pml import (
     pml_face_descriptors,
     pml_phi_element_count,
 )
+from .sampling import recommended_sampling_interval, source_max_frequency
 from .storage import (
     WavefieldStorageConfig,
     decompress_wavefield_history,
@@ -40,5 +41,7 @@ __all__ = [
     "int8_history_layout",
     "pml_face_descriptors",
     "pml_phi_element_count",
+    "recommended_sampling_interval",
+    "source_max_frequency",
     "zero_field",
 ]

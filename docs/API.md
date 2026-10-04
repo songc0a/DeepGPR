@@ -101,7 +101,7 @@ This section defines the geometric observation system (coordinates) and the exci
 | Parameter | Data Type | Format | Description |
 | :--- | :--- | :--- | :--- |
 | **`pmlthick`** | `int` / `list` / `Tensor`| Scalar or list of 4/6 | External PML thickness in grid cells, added by edge replication.<br>- Integer `p`: All active boundaries have thickness `p` (no Z padding in 2D).<br>- `[x0, xm, y0, ym]`: X/Y faces with no Z PML.<br>- `[x0, xm, y0, ym, z0, zm]`: Six independent faces; Z values must be zero in 2D.<br>- Zero disables that face. |
-| **`model_gradient_sampling_interval`**| `int` | Scalar | Wavefield sampling interval during forward propagation (Default: 1).<br>A larger integer reduces VRAM use for `E_saved` and `R_saved`, but uses an explicitly approximate model gradient. The last incomplete sampling block is weighted by its actual length. |
+| **`model_gradient_sampling_interval`**| `int` / `"auto"` | Scalar | Wavefield sampling interval during forward propagation (Default: 1).<br>A larger integer reduces VRAM use for `E_saved` and `R_saved`, but uses an explicitly approximate model gradient. The last incomplete sampling block is weighted by its actual length.<br>`"auto"` selects `floor(1 / (4 f_max dt))` from the source spectrum; an explicit value above that bound raises a `RuntimeWarning` stating the bound. See [4.4](#44-temporal-sampling-interval). |
 | **`save_wavefield_history`** | `bool` | Scalar | Independently controls allocation and native writes of the E/R histories used by adjoint model-gradient backward (Default: `True`). `False` still executes the complete FDTD, CPML, source-injection, and receiver-recording path, returns an empty `E_saved`, and raises a clear error if history-dependent backward is attempted. |
 | **`wavefield_storage_dtype`** | `torch.dtype` / `str` | `float32`, `float16`, or `bfloat16` | Storage format for saved `E_saved` and `R_saved` model-gradient wavefields. FDTD propagation remains float32. `float16` and `bfloat16` halve saved-wavefield memory at the cost of gradient accuracy; `bfloat16` has the safer dynamic range. String aliases such as `"fp16"` and `"bf16"` are accepted. |
 | **`wavefield_conversion_backend`** | `str` | `"auto"`, `"legacy"`, `"native_scalar"`, or `"native_vec2"` | CUDA FP16/BF16 history conversion. The audited default `"auto"` uses NVIDIA scalar intrinsics for CUDA FP16 and the legacy path otherwise. Explicit values retain the correctness/performance A/B paths; vec2 is not the default because it was slower on RTX 4090. |
@@ -155,6 +155,50 @@ tree for other supported power-of-two tile volumes.
 For diagnostics only, reconstruct it with
 `DeepGPR.decompress_wavefield_history(E_saved, original_shape, block_size)`.
 This helper materializes FP32 and is never called by autograd backward.
+
+### 4.4 Temporal sampling interval
+
+`model_gradient_sampling_interval = S > 1` stores every `S`-th forward step and
+weights it by the length of its sampling block. This is an **approximation** of
+the exact discrete gradient (`S = 1`). Its error stays small while the history
+is sampled at least four times per period of the highest frequency in the
+forward wavefield, giving the empirical bound
+
+`S <= floor(1 / (4 f_max dt))`,
+
+where `f_max` is the highest frequency at which the amplitude spectrum of the
+source waveform still exceeds `SOURCE_SPECTRUM_CUTOFF_FRACTION = 3e-3` of its
+peak (about `3 f_peak` for a Ricker wavelet). Several waveforms use the most
+conservative (smallest) value.
+
+- `model_gradient_sampling_interval="auto"` uses this bound (logged at INFO
+  level). The default remains `1`.
+- An explicit `S > 1` inside the bound is logged at INFO level; an explicit `S`
+  above the bound raises a `RuntimeWarning` that states the bound.
+- Segmented or checkpointed runs should evaluate
+  `DeepGPR.recommended_sampling_interval(full_source_waveform, dt)` once on the
+  complete waveform and pass that integer to every segment: a short segment of
+  a waveform has a different spectrum. `DeepGPR.source_max_frequency` returns
+  the underlying `f_max`.
+
+Measured relative L2 error of the ε gradient against `S = 1` (FP32):
+
+| configuration | loss | S=5 | S=8 (auto) | S=10 | S=16 | S=20 |
+|---|---|---:|---:|---:|---:|---:|
+| `examples/2.2DFWI.ipynb` (200 MHz Ricker, dt=5e-11; CPU) | MSE | 9e-6 | 1.4e-5 | 2.8e-5 | 4.9e-4 | 5.8e-3 |
+| same | L1 | 8e-4 | 2.2e-3 | 3.4e-3 | 4.6e-2 | 0.11 |
+| 90x60 two-layer model, surface antennas, nt=700 (CPU) | MSE | 3.7e-5 | 2.4e-4 | 1.8e-4 | 3.0e-2 | 3.4e-2 |
+| same | L1 | 1.7e-3 | 3.5e-3 | 6.5e-3 | 0.18 | 0.16 |
+
+The error grows quickly once `S` exceeds the bound. It is concentrated within a
+few cells of the sources and receivers, where the wavefield contains the most
+high-frequency energy: in the two-layer case above, cells farther than six
+cells from every antenna carry a relative error of 4e-7 (MSE) and 3e-5 (L1) at
+`S = 8`; in a small 3D `mode=3` case at `S = 8` the L1 gradient error is 29 %
+over the whole model but 1.8e-6 beyond six cells from the antennas. The bound looks only at the **forward source spectrum**. The adjoint
+source of a non-smooth misfit such as L1 (`sign(residual)`) is much broader
+band, which is why the L1 rows are one to two orders of magnitude worse at the
+same `S`. Use `S = 1` with `float32` storage for gradient checks.
 
 ### 5. Field Variable States (Checkpoints / Initial Fields)
 

@@ -35,6 +35,7 @@ from .autograd import DeepGPR, SolverConfig, SolverTensors
 from .fields import create_or_separate
 from .memory import format_compute_preview
 from .pml import build_pml_coeffs, build_pml_phi
+from .sampling import AUTO_SAMPLING_INTERVAL, recommended_sampling_interval, source_max_frequency
 from .storage import (
     WavefieldStorageConfig,
     normalize_compression_block_size,
@@ -163,6 +164,57 @@ def _resolve_int8_block(
     return resolved_block, reduction_backend
 
 
+def _resolve_sampling_interval(
+    requested: Any, automatic: bool, source_amplitudes: torch.Tensor, dt: Any, report: bool
+) -> int:
+    """Resolve ``"auto"`` and report intervals relative to the empirical bound.
+
+    An explicit interval above ``floor(1 / (4 f_max dt))`` raises a
+    :class:`RuntimeWarning` that states the bound; intervals inside it (and the
+    automatic choice) are only logged at INFO level.
+
+    Args:
+        requested: Positive ``int`` or ``"auto"`` (already validated).
+        automatic: Whether ``requested`` is ``"auto"``.
+        source_amplitudes: ``(nsr, nt, 1)`` source waveforms.
+        dt: Time step [s].
+        report: Whether a material gradient will use the history.
+    """
+    if not automatic and (requested == 1 or not report):
+        return int(requested)
+    max_frequency = source_max_frequency(source_amplitudes, dt)
+    bound = recommended_sampling_interval(source_amplitudes, dt)
+    if automatic:
+        if report:
+            _LOGGER.info(
+                "model_gradient_sampling_interval='auto' selected %d "
+                "(source f_max=%.4e Hz, dt=%.4e s).",
+                bound,
+                max_frequency,
+                float(dt),
+            )
+        return bound
+    if requested > bound:
+        warnings.warn(
+            f"model_gradient_sampling_interval={requested} exceeds the recommended bound "
+            f"{bound} = floor(1 / (4 f_max dt)) for the source spectrum (f_max="
+            f"{max_frequency:.4e} Hz, dt={float(dt):.4e} s). The temporal-sampling gradient "
+            "approximation degrades quickly above this bound; use "
+            "model_gradient_sampling_interval='auto' or an interval <= the bound.",
+            RuntimeWarning,
+            stacklevel=3,
+        )
+    else:
+        _LOGGER.info(
+            "model_gradient_sampling_interval=%d uses the weighted temporal-sampling "
+            "approximation (recommended bound %d for source f_max=%.4e Hz).",
+            requested,
+            bound,
+            max_frequency,
+        )
+    return int(requested)
+
+
 def compute(
     device,
     dx=None,
@@ -229,7 +281,10 @@ def compute(
         source_direction: Source polarisation (0: Ex, 1: Ey, 2: Ez).
         reciever_direction: Deprecated alias of ``receiver_component``.
         model_gradient_sampling_interval: Store every n-th forward step for
-            the gradient; values > 1 give an approximate gradient.
+            the gradient; values > 1 give an approximate gradient. ``"auto"``
+            selects ``floor(1 / (4 f_max dt))`` from the source spectrum (see
+            :func:`DeepGPR.recommended_sampling_interval`); explicit values
+            above that bound raise a :class:`RuntimeWarning`.
         wavefield_storage_dtype: History dtype: float32, float16, bfloat16
             (or ``"fp32"``, ``"fp16"``, ``"bf16"``, ...).
         use_async_offload: CUDA only: offload histories to pinned host memory.
@@ -279,12 +334,16 @@ def compute(
     require_bool("save_wavefield_history", save_wavefield_history)
     output_directory = normalize_forward_wavefield_directory(save_forward_wavefield_path)
     run_time = datetime.now() if output_directory is not None else None
-    if (
+    automatic_sampling = (
+        isinstance(model_gradient_sampling_interval, str)
+        and model_gradient_sampling_interval.lower() == AUTO_SAMPLING_INTERVAL
+    )
+    if not automatic_sampling and (
         isinstance(model_gradient_sampling_interval, bool)
         or not isinstance(model_gradient_sampling_interval, int)
         or model_gradient_sampling_interval < 1
     ):
-        raise ValueError("model_gradient_sampling_interval must be a positive integer.")
+        raise ValueError("model_gradient_sampling_interval must be a positive integer or 'auto'.")
     (
         wavefield_storage_dtype,
         wavefield_compression,
@@ -344,13 +403,13 @@ def compute(
     )
 
     needs_model_gradient = eps_r.requires_grad or sigma.requires_grad
-    if save_wavefield_history and needs_model_gradient and model_gradient_sampling_interval > 1:
-        warnings.warn(
-            "model_gradient_sampling_interval > 1 uses a weighted temporal-sampling "
-            "approximation; use interval 1 with float32 storage for exact gradients.",
-            RuntimeWarning,
-            stacklevel=2,
-        )
+    model_gradient_sampling_interval = _resolve_sampling_interval(
+        model_gradient_sampling_interval,
+        automatic_sampling,
+        source_amplitudes,
+        dt,
+        save_wavefield_history and needs_model_gradient,
+    )
     if (
         save_wavefield_history
         and needs_model_gradient

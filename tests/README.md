@@ -29,6 +29,12 @@ curl operators, native field updates, all-face CPML state transposes, source
 waveform gradients, material Taylor tests, incomplete temporal sampling, and
 optional CPU/CUDA parity.
 
+`test_gradient_sampling.py` checks `model_gradient_sampling_interval="auto"`:
+the Ricker spectrum bound (`f_max ~= 3 f_peak`, `S = 8` for the 2D FWI example),
+the most conservative choice for several waveforms, that only intervals above
+the bound warn, and that the automatic gradient stays within `2e-3` relative
+L2 of `S = 1` (measured 4.1e-4 on its CPU case).
+
 `test_external_pml.py` verifies automatic edge replication against an explicitly
 extended native-grid reference in 2D and 3D, asymmetric and disabled faces,
 orders 2/4/8, model-edge gradients, physical coordinate validation, and state

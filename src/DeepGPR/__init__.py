@@ -66,6 +66,7 @@ from .preprocessing.stability import max_stable_time_step
 from .solver.autograd import DeepGPR
 from .solver.modeling import compute
 from .solver.memory import estimate_compute_memory
+from .solver.sampling import recommended_sampling_interval, source_max_frequency
 from .solver.storage import decompress_wavefield_history
 from .utils.exceptions import (
     CFLConditionError,
@@ -122,10 +123,12 @@ __all__ = [
     "pmlthick_revert",
     "postprocessing",
     "preprocessing",
+    "recommended_sampling_interval",
     "ricker",
     "set_library_fdtd_order",
     "sine_burst",
     "solver",
+    "source_max_frequency",
     "utils",
     "visualization",
     "wavelet",

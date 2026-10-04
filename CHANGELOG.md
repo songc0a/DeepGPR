@@ -4,6 +4,27 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased] — History memory and CUDA adjoint performance
+
+Measurements, protocol and per-item decisions:
+[`tests/profiling_results/history_adjoint_gpu_report.md`](tests/profiling_results/history_adjoint_gpu_report.md).
+
+### Added
+
+- `model_gradient_sampling_interval="auto"` selects
+  `S = max(1, floor(1 / (4 f_max dt)))`, with `f_max` the highest frequency at
+  which the source amplitude spectrum exceeds `3e-3` of its peak (about
+  `3 f_peak` for a Ricker wavelet; several waveforms use the smallest `S`).
+  `DeepGPR.recommended_sampling_interval` and `DeepGPR.source_max_frequency`
+  expose the bound so segmented/checkpointed runs can evaluate it once on the
+  full waveform. The default stays `1`.
+
+### Changed
+
+- An explicit `model_gradient_sampling_interval > 1` no longer always raises a
+  `RuntimeWarning`; it warns (and states the bound) only above
+  `floor(1 / (4 f_max dt))`. Intervals inside the bound are logged at INFO.
+
 ## [0.1.0] — Structural refactor and numerical fixes
 
 This release reorganises the Python package into a layered, typed and

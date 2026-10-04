@@ -102,6 +102,17 @@ CPML_PHI_TENSOR_COUNT: Final[int] = CPML_FACE_COUNT * CPML_PHI_TENSORS_PER_FACE
 CPML_FACE_NAMES: Final[Tuple[str, ...]] = ("x0", "xm", "y0", "ym", "z0", "zm")
 
 # ---------------------------------------------------------------------------
+# Temporal sampling of the gradient history
+# ---------------------------------------------------------------------------
+
+#: Relative amplitude at which a source spectrum counts as decayed when
+#: ``model_gradient_sampling_interval="auto"`` locates ``f_max``. For a Ricker
+#: wavelet ``|W(f)| / |W(f_peak)| = (f/f_peak)^2 exp(1 - (f/f_peak)^2)`` equals
+#: 3.0e-3 at ``f ~= 3 f_peak``, so the recommended interval is
+#: ``floor(1 / (12 f_peak dt))``.
+SOURCE_SPECTRUM_CUTOFF_FRACTION: Final[float] = 3.0e-3
+
+# ---------------------------------------------------------------------------
 # Native library ABI
 # ---------------------------------------------------------------------------
 
@@ -219,6 +230,7 @@ __all__ = [
     "MIN_RELATIVE_PERMITTIVITY",
     "NATIVE_ABI_VERSION",
     "PEC_CONDUCTIVITY_THRESHOLD",
+    "SOURCE_SPECTRUM_CUTOFF_FRACTION",
     "SPEED_OF_LIGHT",
     "SUPPORTED_FDTD_ORDERS",
     "SUPPORTED_GRADIENT_MODES",

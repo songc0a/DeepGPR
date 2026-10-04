@@ -95,3 +95,57 @@ Gradient accuracy of the baseline storage modes against FP32 (relative L2;
 identical in both batches): 2D fp16 2.34e-5 / 2.21e-5 (ε / σ), bf16
 1.59e-4 / 1.51e-4, int8 4.46e-4 / 3.50e-4; 3D fp16 3.10e-5 / 4.42e-4, bf16
 2.57e-4 / 3.89e-3, int8 7.14e-3 / 3.20e-2.
+
+## 1. Automatic gradient sampling interval (`model_gradient_sampling_interval="auto"`)
+
+**Default:** unchanged (`1`). `"auto"` is opt-in.
+
+Implementation (`solver/sampling.py`): `source_max_frequency` takes the
+zero-padded (4x) amplitude spectrum of every source waveform and returns the
+highest frequency at which it still reaches
+`SOURCE_SPECTRUM_CUTOFF_FRACTION = 3e-3` of that waveform's peak (linear
+interpolation between bins; largest value over waveforms).
+`recommended_sampling_interval` returns `max(1, floor(1 / (4 f_max dt)))`
+(1 for an all-zero source). For a Ricker wavelet
+`|W(f)|/|W(f_p)| = (f/f_p)^2 exp(1 - (f/f_p)^2)` equals 3.0e-3 at `3 f_p`;
+measured `f_max / f_p` = 3.004-3.009 for 100/200/400 MHz and nt = 500/2000.
+The `examples/2.2DFWI.ipynb` source (200 MHz, dt = 5e-11) gives `S = 8`, the
+benchmark source (400 MHz, dt = 1.5e-11) gives 13.
+
+Warning policy: an explicit `S > 1` above the bound raises one
+`RuntimeWarning` that names the bound; an explicit `S` inside the bound and the
+automatic choice are logged at INFO. Previously every `S > 1` with a material
+gradient warned.
+
+Gradient error against `S = 1` (FP32, CPU, 90 x 60 two-layer model with a
+buried anomaly, 3 shots, 90 surface receivers, 200 MHz Ricker, dt = 5e-11,
+nt = 700; `.worktrees`-local script, numbers reproducible from the test case
+below):
+
+| loss | S=2 | S=5 | S=8 (auto) | S=10 | S=16 | S=20 |
+|---|---:|---:|---:|---:|---:|---:|
+| MSE ε | 4.5e-6 | 3.7e-5 | 2.4e-4 | 1.8e-4 | 3.0e-2 | 3.4e-2 |
+| MSE σ | 3.5e-6 | 2.9e-5 | 1.7e-4 | 1.4e-4 | 2.3e-2 | 2.9e-2 |
+| L1 ε | 3.6e-4 | 1.7e-3 | 3.5e-3 | 6.5e-3 | 0.18 | 0.16 |
+| L1 σ | 4.5e-4 | 2.7e-3 | 4.9e-3 | 8.8e-3 | 0.13 | 0.17 |
+
+At `S = 8` all of the error lies within six cells of an antenna (receivers
+cover the whole surface row): beyond that band the relative error is 4.0e-7
+(MSE) and 3.0e-5 (L1). This agrees with the reported 3D `mode=3` observation.
+The jump between 10 and 16 matches the bound; the L1 rows show that the
+non-smooth misfit's broadband adjoint source is not covered by a bound that
+only sees the forward source spectrum. `docs/API.md` §4.4 documents both
+tables (the 2.2DFWI numbers are the previously reported CPU measurements).
+
+Tests (`tests/test_gradient_sampling.py`, 8 tests): Ricker `f_max ~= 3 f_p`
+(±1 %), the cutoff constant matches the Ricker spectrum at `3 f_p`, `S = 8` for
+the 2.2DFWI source, the most conservative interval for two waveforms, zero
+source / invalid input handling, warning only above the bound (with the bound
+in the message), INFO inside the bound, and the automatic gradient within
+**2e-3** relative L2 of `S = 1` on a 48 x 36 two-layer CPU case (measured
+4.1e-4, about 5x margin; `S = 16` measured 8.7e-2 on the same case). The
+automatic and explicit `S = 8` gradients are bitwise identical.
+
+Full suite after this item: 113 tests, all passed (1 skipped, two-GPU test);
+validated on the staged snapshot with the baseline native libraries (item 1 is
+Python-only).
