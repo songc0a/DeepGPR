@@ -34,7 +34,7 @@ from ..preprocessing.model_setup import PreparedModel, _shift_locations, initial
 from ..native.loader import get_deepgpr_lib, library_supports
 from ..utils.logger import get_logger
 from ..utils.validators import require_bool
-from .autograd import DeepGPR, SolverConfig, SolverTensors
+from .autograd import TM2D_INACTIVE_STATE_INDICES, DeepGPR, SolverConfig, SolverTensors
 from .fields import create_or_separate
 from .memory import format_compute_preview
 from .pml import build_pml_coeffs, build_pml_phi
@@ -220,6 +220,41 @@ def _resolve_sampling_interval(
             max_frequency,
         )
     return int(requested)
+
+
+def _tm2d_fast_path_applies(
+    device: torch.device,
+    spatial_mode: int,
+    source_direction: int,
+    states: Tuple[torch.Tensor, ...],
+    user_supplied_states: bool,
+) -> bool:
+    """Whether the CUDA 2D Ez-TM fast path reproduces the general solver.
+
+    In 2D (nz = 1) Ex, Ey and Hz are driven only by themselves (through the
+    CPML) and by an Ex/Ey source; they never feed back into Ez, Hx and Hy
+    except through z-derivatives of Ex and Ey. With an Ez source and zero
+    Ex/Ey/Hz states (including the CPML auxiliaries that couple them) they
+    therefore stay exactly zero, and updating only Ez/Hx/Hy gives bitwise the
+    same forward result. Any other call keeps the general path.
+
+    Args:
+        device: Execution device (CUDA only).
+        spatial_mode: 2 for 2D models.
+        source_direction: Source component.
+        states: The 30 initial state tensors (E, H, 24 CPML).
+        user_supplied_states: Whether any initial state came from the caller;
+            only then the inactive states are checked (one device sync).
+    """
+    if device.type != "cuda" or spatial_mode != 2 or source_direction != 2:
+        return False
+    if not library_supports(get_deepgpr_lib(device), "deepgpr_supports_tm2d_fast_path"):
+        return False
+    if not user_supplied_states:
+        return True
+    inactive = [states[index] for index in TM2D_INACTIVE_STATE_INDICES]
+    nonzero = sum(tensor.detach().count_nonzero() for tensor in inactive if tensor.numel())
+    return int(nonzero) == 0
 
 
 def compute(
@@ -516,6 +551,13 @@ def compute(
     )
     descriptors, coefficients = pml_arrays[:6], pml_arrays[6:]
     phi = build_pml_phi(*descriptors, nstep, PML, device)
+    tm2d_fast_path = _tm2d_fast_path_applies(
+        device,
+        prepared.mode,
+        source_direction,
+        (*electric, *magnetic, *phi),
+        E is not None or H is not None or PML is not None,
+    )
 
     config = SolverConfig(
         device=device,
@@ -547,6 +589,7 @@ def compute(
         debug=bool(debug),
         reconstruct_rhs=reconstruct_rhs,
         history_region=wavefield_history_region,
+        tm2d_fast_path=tm2d_fast_path,
     )
     tensors = SolverTensors(
         mu_r_pad=mu_r_pad,

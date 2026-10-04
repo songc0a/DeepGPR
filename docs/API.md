@@ -265,6 +265,34 @@ cells `[px0, Nx - px1) x [py0, Ny - py1) x [pz0, Nz - pz1)` of the extended grid
 - Requires native libraries with `deepgpr_supports_physical_history`; older
   libraries are rejected for `"physical"`.
 
+### 4.7 CUDA 2D TM fast path
+
+In 2D (`nz = 1`) the grid still stores all six field components with a halo
+layer (`(nstep, Nx+1, Ny+1, 2)`). Ex, Ey and Hz form a subsystem that is driven
+only by itself (through the CPML) and by an Ex/Ey source; it reaches Ez, Hx and
+Hy only through z-derivatives of Ex and Ey. With an Ez source and zero
+Ex/Ey/Hz they therefore stay exactly zero.
+
+The CUDA backend uses this automatically: when the model is 2D,
+`source_direction=2`, and Ex, Ey, Hz and the CPML auxiliaries that couple them
+(`x0/xm/y0/ym` E-phi1 and H-phi2) are zero, the forward and adjoint kernels
+launch only for the `k = 0` layer and only update/transpose Ez, Hx and Hy;
+CPML kernels skip the z faces. States created by DeepGPR (`E`, `H`, `PML` left
+as `None`) qualify without a check; caller-supplied states are checked once
+(one device synchronisation). Every other call — a non-Ez source, or a
+non-zero Ex/Ey/Hz state or coupled CPML auxiliary — silently uses the general
+kernels, so its results are unchanged.
+
+- Receiver data and the final Ez/Hx/Hy states are bitwise identical to the
+  general kernels (the zero z-derivative terms are kept in the arithmetic).
+- On the fast path the gradients with respect to the initial Ex, Ey, Hz and
+  the coupled CPML auxiliaries are returned as zero: on that path they cannot
+  influence any output except their own (identically zero) values. Material
+  and source gradients are unaffected.
+- The CPU backend always uses its general loops.
+- CUDA kernels index at most `2^31 - 1` field cells per shot (cells of all
+  shots together may exceed that); larger grids raise `NativeLibraryError`.
+
 ### 5. Field Variable States (Checkpoints / Initial Fields)
 
 For starting a forward simulation from scratch ($t=0$), these three parameters should be passed as `None` (the system will automatically initialize zero-tensors).

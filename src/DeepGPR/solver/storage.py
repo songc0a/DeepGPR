@@ -15,6 +15,7 @@ import torch
 
 from ..config.constants import (
     FLOAT32_BYTES,
+    SOLVER_TM2D,
     INT8_BLOCK_DIM_MASK,
     INT8_BLOCK_X_SHIFT,
     INT8_BLOCK_Y_SHIFT,
@@ -323,6 +324,7 @@ def encode_storage_type(
     save_wavefield_history: bool,
     rhs_from_e: bool = False,
     physical_history: bool = False,
+    tm2d: bool = False,
 ) -> int:
     """Return the complete native ``storage_type`` argument.
 
@@ -333,6 +335,7 @@ def encode_storage_type(
             (:data:`WAVEFIELD_RHS_FROM_E`).
         physical_history: Restrict histories to the physical model cells
             (:data:`WAVEFIELD_PHYSICAL_HISTORY`).
+        tm2d: Select the CUDA 2D Ez-TM fast path (:data:`SOLVER_TM2D`).
     """
     if config.compression == "int8":
         assert config.block_size is not None
@@ -348,6 +351,8 @@ def encode_storage_type(
             storage_type |= WAVEFIELD_RHS_FROM_E
         if physical_history:
             storage_type |= WAVEFIELD_PHYSICAL_HISTORY
+    if tm2d:
+        storage_type |= SOLVER_TM2D
     return storage_type
 
 

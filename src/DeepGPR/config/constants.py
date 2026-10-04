@@ -143,6 +143,14 @@ WAVEFIELD_RHS_FROM_E: Final[int] = 1 << 4
 #: Only set when the library reports ``deepgpr_supports_physical_history``.
 WAVEFIELD_PHYSICAL_HISTORY: Final[int] = 1 << 5
 
+#: Solver flag: 2D Ez-TM fast path (CUDA). Set only for nz = 1, an Ez source
+#: and zero Ex/Ey/Hz states and when ``deepgpr_supports_tm2d_fast_path`` is 1.
+SOLVER_TM2D: Final[int] = 1 << 6
+
+#: Indices of the CPML auxiliary arrays (in the 24-array native order) that
+#: couple only Ex, Ey and Hz in 2D: x0/xm/y0/ym E-phi1 and H-phi2.
+TM2D_INACTIVE_PHI_INDICES: Final[Tuple[int, ...]] = (0, 3, 4, 7, 8, 11, 12, 15)
+
 #: Accepted values of ``wavefield_history_region``.
 WAVEFIELD_HISTORY_REGIONS: Final[Tuple[str, ...]] = ("extended", "physical")
 
@@ -248,10 +256,12 @@ __all__ = [
     "MIN_RELATIVE_PERMITTIVITY",
     "NATIVE_ABI_VERSION",
     "PEC_CONDUCTIVITY_THRESHOLD",
+    "SOLVER_TM2D",
     "SOURCE_SPECTRUM_CUTOFF_FRACTION",
     "SPEED_OF_LIGHT",
     "SUPPORTED_FDTD_ORDERS",
     "SUPPORTED_GRADIENT_MODES",
+    "TM2D_INACTIVE_PHI_INDICES",
     "TV_ISOTROPIC_EPSILON",
     "VACUUM_PERMEABILITY",
     "VACUUM_PERMITTIVITY",

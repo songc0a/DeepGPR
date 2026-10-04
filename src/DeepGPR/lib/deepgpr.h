@@ -69,6 +69,13 @@ DEEPGPR_API int deepgpr_supports_rhs_reconstruction(void);
  * the CPML faces), ordered z-fastest like the full-grid frames.
  */
 DEEPGPR_API int deepgpr_supports_physical_history(void);
+/*
+ * 1 when storage_type may carry SOLVER_TM2D (bit 6, CUDA only): 2D Ez-TM fast
+ * path for nz = 1, an Ez source and zero Ex/Ey/Hz states (and their CPML
+ * auxiliaries). Only Ez, Hx and Hy are updated and transposed; the Ex, Ey and
+ * Hz cotangents are left untouched by backward.
+ */
+DEEPGPR_API int deepgpr_supports_tm2d_fast_path(void);
 DEEPGPR_API void deepgpr_test_wavefield_conversion(
     const float* input, void* encoded, float* decoded, long long count,
     int storage_kind, int conversion_backend);

@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 
-from ..config.constants import CPML_FACE_NAMES
+from ..config.constants import CPML_FACE_NAMES, TM2D_INACTIVE_PHI_INDICES
 from ..native.abi import LAMBDA_PHI_PARAMETER_NAMES, PHI_PARAMETER_NAMES
 from ..native.bridge import invoke, native_stream_scope, require_capability
 from ..native.loader import get_deepgpr_lib
@@ -54,6 +54,11 @@ STATE_GRADIENT_NAMES: Tuple[str, ...] = (
 
 _UPDATE_COEFFICIENT_NAMES = ("ce_hist", "ce_curl", "ce_rhs", "ch_hist", "ch_curl", "ch_rhs")
 
+#: State indices (Ex, Ey, Hz and their CPML auxiliaries) inactive on the 2D TM path.
+TM2D_INACTIVE_STATE_INDICES: Tuple[int, ...] = (0, 1, 5) + tuple(
+    6 + index for index in TM2D_INACTIVE_PHI_INDICES
+)
+
 
 @dataclass(frozen=True)
 class SolverConfig:
@@ -82,6 +87,9 @@ class SolverConfig:
             gradient uses the history.
         history_region: ``"extended"`` (whole grid) or ``"physical"`` (saved
             frames cover only the physical model cells).
+        tm2d_fast_path: Use the CUDA 2D Ez-TM fast path (decided by
+            :func:`DeepGPR.solver.modeling.compute` from the geometry, the
+            source component and the initial states).
     """
 
     device: torch.device
@@ -107,6 +115,7 @@ class SolverConfig:
     debug: bool
     reconstruct_rhs: bool = False
     history_region: str = "extended"
+    tm2d_fast_path: bool = False
 
     @property
     def pml(self) -> List[int]:
@@ -332,6 +341,12 @@ def _check_forward_capabilities(c_lib: Any, config: SolverConfig) -> None:
             "Rebuild the CPU/CUDA shared libraries from the current sources.",
         )
     storage = config.storage
+    if config.tm2d_fast_path:
+        require_capability(
+            c_lib,
+            "deepgpr_supports_tm2d_fast_path",
+            "The loaded native library has no 2D TM fast path. Rebuild deepgpr.cu.",
+        )
     if config.history_region == "physical":
         require_capability(
             c_lib,
@@ -517,6 +532,7 @@ class DeepGPR(torch.autograd.Function):
             config.save_wavefield_history,
             rhs_from_e=reconstruct_rhs,
             physical_history=config.history_region == "physical",
+            tm2d=config.tm2d_fast_path,
         )
 
         if config.save_wavefield_history:
@@ -683,6 +699,12 @@ class DeepGPR(torch.autograd.Function):
         c_lib = get_deepgpr_lib(device)
         with native_stream_scope(device):
             invoke(c_lib, "backward", config.fdtd_order, arguments)
+        if config.tm2d_fast_path:
+            # The 2D TM path never couples Ex, Ey, Hz (and their CPML
+            # auxiliaries) back into Ez, Hx, Hy: their initial-state
+            # cotangents are zero by construction.
+            for index in TM2D_INACTIVE_STATE_INDICES:
+                lambdas[index].zero_()
 
         # needs_input_grad: (config, tensors, eps_r, sigma, source, *states)
         state_needs_grad = ctx.needs_input_grad[5 : 5 + STATE_TENSOR_COUNT]
@@ -723,6 +745,7 @@ __all__ = [
     "STATE_GRADIENT_NAMES",
     "STATE_NAMES",
     "STATE_TENSOR_COUNT",
+    "TM2D_INACTIVE_STATE_INDICES",
     "SolverConfig",
     "SolverTensors",
     "build_backward_arguments",

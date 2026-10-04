@@ -348,3 +348,98 @@ covering 84^3 instead of 100^3 tiles.
 
 New `tests/test_history_region.py` (7 tests). Full suite: 132 tests, all
 passed (1 skipped).
+
+## 4. CUDA: index decode and 2D TM fast path
+
+**Default:** yes (both are internal; the fast path is selected automatically
+when it reproduces the general solver).
+
+### 4a. Experiment: are the z-transpose atomics the adjoint cost?
+
+Patch (not committed): in `adjoint_h_gpu` the two z-direction transposes
+(`lambda_ey` from Hx, `lambda_ex` from Hy, 4 `atomicAdd` per cell in 2D) were
+guarded with `NZ > 2`. Same build otherwise (item-3 tree), 2D 512x384 full
+iteration, `--keep-allocator-cache`, two interleaved rounds
+(`history_adjoint_ab/exp4a_*`):
+
+| mode | backward ms without guard (b1 / b2) | with guard (b1 / b2) | change |
+|---|---:|---:|---:|
+| fp32 | 132.59 / 127.31 | 110.70 / 107.23 | -16.5 % / -15.8 % |
+| fp16 | 128.67 / 126.02 | 111.55 / 107.13 | -13.3 % / -15.0 % |
+
+About 18 µs per step, matching the ~16 µs/step estimated from the
+`adjoint_h`/`adjoint_e` difference: the atomic scatter, not arithmetic, is the
+main adjoint cost. (The guard alone changes the λEx/λEy state cotangents, so
+it was only a measurement; the fast path below handles them properly.)
+
+### Implementation
+
+- `FastDivmod` (round-up multiply-high division, exact for dividends and
+  divisors below 2^31) and `CellGrid`: the E/H update and adjoint kernels use
+  `blockIdx.y` as the shot and a 32-bit per-shot flat index; `(i, j, k)` costs
+  two `__umulhi` instead of five 64-bit `/`/`%`. The field offset
+  `shot * cells + flat` stays 64-bit, so the total over all shots may exceed
+  2^31; a single shot above `2^31 - 1` cells now fails with a clear
+  `NativeLibraryError` in forward and backward.
+- `SOLVER_TM2D` (`storage_type` bit 6) and probe
+  `deepgpr_supports_tm2d_fast_path` (CUDA only). Kernels take a `TM2D`
+  template parameter: update/adjoint kernels launch `NX * NY` threads per shot
+  (k = 0 only) and touch only Ez, Hx, Hy; the z-derivative terms of Hx/Hy are
+  literal zeros so the forward arithmetic (and FMA contraction) is that of the
+  general kernels; CPML kernels map only the four x/y regions on k = 0
+  (`grid.y = 4`) and skip the Ey/Ex/Hz corrections.
+- Enabling rule (`modeling._tm2d_fast_path_applies`): CUDA, 2D model,
+  `source_direction == 2`, library probe, and — only if the caller passed
+  `E`/`H`/`PML` — Ex, Ey, Hz and the eight coupling CPML arrays all zero
+  (one `count_nonzero` sync). Otherwise the general path runs (no error). The
+  native side rejects the flag for `nz != 1`, a non-Ez source or z PML.
+- Backward on the fast path zeroes the cotangents of Ex, Ey, Hz and the eight
+  coupled CPML arrays (they are inactive by construction).
+
+### Correctness
+
+| check | result |
+|---|---|
+| CUDA 2D, orders 2/4/8, PML 0 and `[3, 5, 4, 2]`, two shots, fast path vs baseline | receiver data and final Ez/Hx/Hy **bitwise identical**; ε/σ/source gradients 1.0-2.7e-7 relative (baseline vs baseline noise 1-3e-7) |
+| fast path vs general kernels (same build, rule forced off) | receiver data and all six final fields bitwise identical |
+| 2D state dot product, orders 2/4/8, PML 0/2 | CPU < 3e-5 and CUDA < 2e-4 (the existing CPU/CUDA thresholds); inactive cotangents exactly 0 |
+| CUDA material Taylor test (copy of the CPU test, same thresholds) | passed with and without CPML |
+| existing CPU/CUDA consistency (2D, now on the fast path) and 3D CUDA dot products | passed unchanged |
+| benchmark data vs baseline | bitwise for every mode, 2D and 3D |
+
+No existing test needed a narrower check: none of them compared Ex/Ey/Hz
+cotangents of a 2D CUDA run.
+
+### Performance (formal protocol, current vs item 3 vs baseline, two interleaved rounds)
+
+Raw: `history_adjoint_ab/item4_{cur,prev,base}_b{1,2}`; Nsight:
+`history_adjoint_ab/nsys/item4_*`.
+
+| case | mode | metric | item 3 (b1 / b2) | item 4 (b1 / b2) | vs item 3 | vs baseline |
+|---|---|---|---:|---:|---:|---:|
+| 2D fwd-only | fdtd | forward | 64.08 / 65.30 | 48.37 / 48.22 | -24.5 % / -26.2 % | -24.6 % / -26.5 % |
+| 2D full | fp32 | forward | 79.32 / 82.20 | 63.92 / 66.05 | -19.4 % / -19.7 % | -32.4 % / -31.2 % |
+| | | backward | 127.48 / 132.00 | 96.40 / 100.65 | -24.4 % / -23.7 % | -28.7 % / -25.0 % |
+| | | total | 206.90 / 214.05 | 160.45 / 166.80 | -22.5 % / -22.1 % | -29.9 % / -27.6 % |
+| 2D full | fp16 | total | 221.12 / 227.94 | 174.25 / 177.58 | -21.2 % / -22.1 % | -22.2 % / -21.0 % |
+| 2D full | bf16 | total | 219.74 / 227.62 | 171.57 / 175.00 | -21.9 % / -23.1 % | -23.5 % / -23.0 % |
+| 2D full | int8 | total | 244.64 / 251.97 | 197.05 / 200.98 | -19.5 % / -20.2 % | -20.0 % / -19.7 % |
+| 3D fwd-only | fdtd | forward | 32.88 / 33.37 | 32.17 / 32.24 | -2.2 % / -3.4 % | -1.2 % / -1.5 % |
+| 3D full | fp32 | total | 138.23 / 141.63 | 140.52 / 142.34 | +1.7 % / +0.5 % | -57.3 % / -57.2 % |
+| 3D full | fp16 / bf16 / int8 | total | | | -1.4 % to +1.6 % | -0.7 % to +1.9 % |
+
+3D shows no formal-protocol gain; its fp32 forward was +4.6 %/+3.7 % in the
+formal batches. With `--keep-allocator-cache` the same comparison gives
+45.16/45.37 → 44.63/44.52 ms forward and 126.91/127.43 → 125.84/126.51 ms total
+(-0.8 %/-0.7 %), and Nsight shows the kernels faster (`update_h` 13.79 →
+11.95 µs, `update_e` 12.58 → 12.91 µs, kernel sum of the forward −2 ms), so the
+formal 3D difference is allocation noise around a 5.7 GiB `cudaMalloc`, not a
+kernel regression. The 3D adjoint kernels are unchanged (≈42 µs each, still
+atomic-bound).
+
+Nsight, 2D fp32 full iteration, average µs per launch (item 3 → item 4):
+`adjoint_h` 49.23 → 33.24, `adjoint_e` 28.72 → 25.24, `update_h` 17.24 → 15.71,
+`update_e` 15.08 → 11.63, `cpml_e` 9.10 → 4.26, `cpml_h` 8.43 → 4.50,
+`adjoint_cpml_e` 9.35 → 4.37, `adjoint_cpml_h` 8.98 → 4.53.
+
+Full suite: 136 tests, all passed (1 skipped).

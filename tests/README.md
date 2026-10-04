@@ -50,6 +50,13 @@ memory estimate, the saved-file metadata, bitwise-identical CPU gradients and
 E-only, 2D/3D with asymmetric CPML), the same on CUDA with async offload, and
 INT8 histories whose decoded physical cells equal the extended history.
 
+`test_discrete_adjoint.py` also covers the CUDA 2D TM fast path: 2D state
+dot products for orders 2/4/8 with and without CPML (CPU and CUDA, original
+thresholds; inactive Ex/Ey/Hz cotangents must be exactly zero), a CUDA copy of
+the material Taylor test, and the fast-path selection rules (non-Ez source,
+non-zero Ey, non-zero coupled CPML auxiliary) with bitwise forward identity
+against the general kernels.
+
 `test_external_pml.py` verifies automatic edge replication against an explicitly
 extended native-grid reference in 2D and 3D, asymmetric and disabled faces,
 orders 2/4/8, model-edge gradients, physical coordinate validation, and state

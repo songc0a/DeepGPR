@@ -1,0 +1,2 @@
+mode,forward_mean_ms,forward_median_ms,backward_mean_ms,backward_median_ms,total_mean_ms,total_median_ms,peak_MiB,history_MiB,wall_median_ms,eps_rel,eps_cos,sigma_rel,sigma_cos
+fp32,44.74704647064209,44.52454376220703,81.69240226745606,81.67731094360352,126.44874229431153,126.51315307617188,5849.33984375,5733.489990234375,126.61233596736565,0.0,1.0,0.0,1.0

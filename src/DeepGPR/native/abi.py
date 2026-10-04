@@ -170,6 +170,7 @@ NATIVE_FUNCTIONS: Dict[str, Tuple[Signature, object]] = {
     "deepgpr_supports_int8_reduction_backends": ((), INT),
     "deepgpr_supports_rhs_reconstruction": ((), INT),
     "deepgpr_supports_physical_history": ((), INT),
+    "deepgpr_supports_tm2d_fast_path": ((), INT),
     "deepgpr_test_wavefield_conversion": (
         (
             ("input", FLOAT_PTR),

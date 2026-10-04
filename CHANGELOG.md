@@ -35,6 +35,18 @@ Measurements, protocol and per-item decisions:
   full-grid tiling so tiles and scales are identical to `"extended"`. New probe
   `deepgpr_supports_physical_history`; saved files record the region.
 
+### Performance
+
+- CUDA full-grid kernels (E/H update and adjoint) take the shot from
+  `blockIdx.y` and decode `(i, j, k)` from a 32-bit per-shot index with a
+  multiply-high divider instead of four 64-bit `/` and `%` per thread. Grids
+  above `2^31 - 1` cells per shot are rejected explicitly.
+- CUDA 2D TM fast path: for 2D models with an Ez source and zero Ex/Ey/Hz
+  states the solver launches only the `k = 0` layer and updates/transposes
+  only Ez, Hx and Hy (probe `deepgpr_supports_tm2d_fast_path`). Receiver data
+  is bitwise unchanged; initial-state gradients of Ex/Ey/Hz are zero on this
+  path. Other calls use the general kernels.
+
 ### Changed
 
 - An explicit `model_gradient_sampling_interval > 1` no longer always raises a

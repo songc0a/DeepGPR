@@ -137,7 +137,71 @@ def _state_problem(order, pml, device="cpu"):
     return abs(output_value - input_value) / scale
 
 
-def _material_case(pml):
+# State indices (Ex, Ey, Hz and their CPML auxiliaries) that the CUDA 2D TM
+# fast path treats as inactive; they must start at zero for the path to apply.
+_TM2D_INACTIVE = (0, 1, 5) + tuple(6 + index for index in (0, 3, 4, 7, 8, 11, 12, 15))
+
+
+def _state_problem_2d_tm(order, pml, device="cpu"):
+    """Dot-product test of the 2D Ez-TM state map (Ez, Hx, Hy and their CPML).
+
+    Ex, Ey, Hz and the CPML arrays that couple them start at zero, so on CUDA
+    the 2D TM fast path is selected. Their input perturbations are zero and
+    their cotangents must come back as zero; all outputs get random duals.
+    """
+    torch.manual_seed(3100 + order + pml)
+    device = torch.device(device)
+    nx, ny = 11, 12
+    x = torch.linspace(0.0, 1.0, nx, device=device)[:, None]
+    y = torch.linspace(0.0, 1.0, ny, device=device)[None, :]
+    eps_r = 3.5 + 0.7 * x + 0.2 * y
+    sigma = 1.0e-4 + 1.0e-4 * (x + y) / 2.0
+    mu_r = 1.0 + 0.15 * x + 0.05 * y
+    location = torch.tensor([[[5, 6, 0]]], dtype=torch.int32, device=device)
+    source = torch.zeros((1, 1, 1), dtype=torch.float32, device=device)
+    spacing = (0.020, 0.017, 0.013)
+    dt = 1.0e-11
+    initial_e, initial_h, initial_cpml = DeepGPR.checkpoint_initial_field(
+        device=device, dx=spacing, dt=dt, source_amplitudes=source,
+        source_location=location, receiver_location=location,
+        er=eps_r, se=sigma, mr=mu_r, pmlthick=pml, fdtd_order=order,
+    )
+    base_state = [
+        torch.randn_like(tensor) * 1.0e-3
+        for tensor in (*initial_e, *initial_h, *initial_cpml)
+    ]
+    for index in _TM2D_INACTIVE:
+        base_state[index] = torch.zeros_like(base_state[index])
+    state = [tensor.clone().requires_grad_(True) for tensor in base_state]
+    result = DeepGPR.compute(
+        device=device, dx=spacing, dt=dt, source_amplitudes=source,
+        source_location=location, receiver_location=location,
+        er=eps_r, se=sigma, mr=mu_r,
+        E=tuple(state[:3]), H=tuple(state[3:6]), PML=tuple(state[6:]),
+        pmlthick=pml, source_direction=2, reciever_direction=2,
+        fdtd_order=order, mode=2,
+    )
+    tm2d = bool(getattr(result[-1].grad_fn.config, "tm2d_fast_path", False))
+    outputs = [*result[1], *result[2], *result[3], result[-1]]
+    output_duals = [torch.randn_like(tensor) for tensor in outputs]
+    output_dot = sum((value * dual).sum() for value, dual in zip(outputs, output_duals))
+    output_dot.backward()
+    input_dot = sum(
+        (base * variable.grad).sum()
+        for index, (base, variable) in enumerate(zip(base_state, state))
+        if index not in _TM2D_INACTIVE
+    )
+    inactive_gradient = max(
+        float(state[index].grad.abs().max()) if state[index].numel() else 0.0
+        for index in _TM2D_INACTIVE
+    )
+    output_value = float(output_dot.detach())
+    input_value = float(input_dot.detach())
+    scale = max(abs(output_value), abs(input_value), 1.0e-20)
+    return abs(output_value - input_value) / scale, tm2d, inactive_gradient
+
+
+def _material_case(pml, device="cpu"):
     torch.manual_seed(2100 + pml)
     nx, ny, nt = 14, 17, 100
     x = torch.linspace(0.0, 1.0, nx)[:, None]
@@ -148,13 +212,15 @@ def _material_case(pml):
     source = DeepGPR.wavelet.ricker(3.5e8, nt, 2.5e-11, 2.0e-9).reshape(1, nt, 1)
     source_location = torch.tensor([[[6, 6, 0]]], dtype=torch.int32)
     receiver_location = torch.tensor([[[6, 10, 0], [7, 12, 0]]], dtype=torch.int32)
+    device = torch.device(device)
+    eps_base, sigma_base, mu_r = eps_base.to(device), sigma_base.to(device), mu_r.to(device)
     arguments = dict(
-        device="cpu",
+        device=device,
         dx=(0.020, 0.016, 0.012),
         dt=2.5e-11,
-        source_amplitudes=source,
-        source_location=source_location,
-        receiver_location=receiver_location,
+        source_amplitudes=source.to(device),
+        source_location=source_location.to(device),
+        receiver_location=receiver_location.to(device),
         mr=mu_r,
         pmlthick=pml,
         fdtd_order=4,
@@ -199,6 +265,8 @@ def _material_case(pml):
     }
     for name, (d_eps, d_sigma) in directions.items():
         directional_adjoint = float((eps_r.grad * d_eps).sum() + (sigma.grad * d_sigma).sum())
+        d_eps = d_eps.to(device)
+        d_sigma = d_sigma.to(device)
         case_rows = []
         for step in (1.0, 0.5, 0.25):
             with torch.no_grad():
@@ -488,6 +556,86 @@ class DiscreteAdjointTests(unittest.TestCase):
         torch.testing.assert_close(
             duplicate_gradient, 2.0 * single_gradient, rtol=2.0e-4, atol=1.0e-6
         )
+
+    def test_native_2d_tm_state_dot_products_orders_2_4_8(self):
+        for order in (2, 4, 8):
+            for pml in (0, 2):
+                with self.subTest(order=order, pml=pml):
+                    error, _, _ = _state_problem_2d_tm(order, pml)
+                    self.assertLess(error, 3.0e-5)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is not available")
+    def test_cuda_2d_tm_fast_path_state_dot_products_orders_2_4_8(self):
+        for order in (2, 4, 8):
+            for pml in (0, 2):
+                with self.subTest(order=order, pml=pml):
+                    error, tm2d, inactive_gradient = _state_problem_2d_tm(order, pml, "cuda")
+                    self.assertTrue(tm2d)
+                    self.assertLess(error, 2.0e-4)
+                    self.assertEqual(inactive_gradient, 0.0)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is not available")
+    def test_cuda_material_taylor_checks_without_and_with_cpml(self):
+        for pml in (0, 3):
+            rows = _material_case(pml, "cuda")
+            for name, case_rows in rows.items():
+                errors = [row[1] for row in case_rows]
+                remainders = [row[2] for row in case_rows]
+                with self.subTest(pml=pml, parameter=name):
+                    self.assertLess(min(errors), 1.5e-2)
+                    if name == "sigma":
+                        self.assertLess(min(remainders), 2.0e-6)
+                    else:
+                        self.assertLess(remainders[-1], remainders[0] * 0.2)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is not available")
+    def test_cuda_2d_tm_fast_path_selection_and_forward_identity(self):
+        from DeepGPR.solver import modeling
+
+        device = torch.device("cuda")
+        nx, ny, nt = 16, 18, 40
+        eps_r = torch.full((nx, ny), 4.0, device=device)
+        sigma = torch.full_like(eps_r, 2.0e-4)
+        source = DeepGPR.wavelet.ricker(4.0e8, nt, 2.5e-11, 1.5e-9).reshape(1, nt, 1).to(device)
+        location = torch.tensor([[[7, 6, 0]]], dtype=torch.int32, device=device)
+        receivers = torch.tensor([[[7, 12, 0], [9, 13, 0]]], dtype=torch.int32, device=device)
+        common = dict(
+            device=device, dx=0.02, dt=2.5e-11, source_amplitudes=source,
+            source_location=location, receiver_location=receivers,
+            eps_r=eps_r, sigma=sigma, pmlthick=[3, 2, 2, 4], fdtd_order=4, mode=2,
+        )
+
+        fast = DeepGPR.compute(**common)
+        original = modeling._tm2d_fast_path_applies
+        modeling._tm2d_fast_path_applies = lambda *args, **kwargs: False
+        try:
+            general = DeepGPR.compute(**common)
+        finally:
+            modeling._tm2d_fast_path_applies = original
+        torch.cuda.synchronize()
+        self.assertTrue(torch.equal(fast[-1], general[-1]))
+        for a, b in zip((*fast[1], *fast[2]), (*general[1], *general[2])):
+            self.assertTrue(torch.equal(a, b))
+
+        def selected(**extra):
+            eps = eps_r.clone().requires_grad_(True)
+            result = DeepGPR.compute(**{**common, "eps_r": eps, **extra})
+            return result[-1].grad_fn.config.tm2d_fast_path
+
+        self.assertTrue(selected())
+        self.assertFalse(selected(source_direction=0, receiver_component=0, mode=3))
+        state_e, state_h, state_pml = DeepGPR.checkpoint_initial_field(
+            device=device, dx=0.02, dt=2.5e-11, source_amplitudes=source,
+            source_location=location, receiver_location=receivers,
+            er=eps_r, se=sigma, pmlthick=[3, 2, 2, 4], fdtd_order=4,
+        )
+        self.assertTrue(selected(E=state_e, H=state_h, PML=state_pml))
+        nonzero_ey = (state_e[0].clone(), state_e[1].clone(), state_e[2].clone())
+        nonzero_ey[1][0, 5, 5, 0] = 1.0e-3
+        self.assertFalse(selected(E=nonzero_ey))
+        nonzero_phi = [tensor.clone() for tensor in state_pml]
+        nonzero_phi[0].fill_(1.0e-6)
+        self.assertFalse(selected(PML=nonzero_phi))
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA is not available")
     def test_cuda_large_3d_all_face_cpml_async_bounds(self):
