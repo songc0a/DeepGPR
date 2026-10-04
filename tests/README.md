@@ -35,6 +35,14 @@ the most conservative choice for several waveforms, that only intervals above
 the bound warn, and that the automatic gradient stays within `2e-3` relative
 L2 of `S = 1` (measured 4.1e-4 on its CPU case).
 
+`test_rhs_history.py` covers the E-only history (`wavefield_rhs_history`):
+the resolution rules (float32-only `"auto"`, fallback for libraries without
+`deepgpr_supports_rhs_reconstruction`, rejection of `"reconstructed"` with
+`S > 1`), the memory estimate, bitwise-identical CPU float32 gradients in 2D
+and 3D, bitwise equality of a stored `R^n` with its rebuild from `E^n`/`E^(n+1)`,
+independence from in-place changes of the returned states, low-precision and
+INT8 rebuilds (CPU and CUDA, with async offload), and CPU/CUDA agreement.
+
 `test_external_pml.py` verifies automatic edge replication against an explicitly
 extended native-grid reference in 2D and 3D, asymmetric and disabled faces,
 orders 2/4/8, model-edge gradients, physical coordinate validation, and state

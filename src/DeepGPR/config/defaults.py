@@ -30,6 +30,10 @@ DEFAULT_GRADIENT_SAMPLING_INTERVAL: Final[int] = 1
 #: Saved-history compression mode.
 DEFAULT_WAVEFIELD_COMPRESSION: Final[str] = "none"
 
+#: Storage of the electric right-hand-side history R^n ("auto": rebuilt from
+#: consecutive E frames when the sampling interval is 1).
+DEFAULT_WAVEFIELD_RHS_HISTORY: Final[str] = "auto"
+
 #: CUDA FP16/BF16 conversion backend selector.
 DEFAULT_CONVERSION_BACKEND: Final[str] = "auto"
 
@@ -67,6 +71,7 @@ __all__ = [
     "DEFAULT_TV_WEIGHT_CONDUCTIVITY",
     "DEFAULT_TV_WEIGHT_PERMITTIVITY",
     "DEFAULT_WAVEFIELD_COMPRESSION",
+    "DEFAULT_WAVEFIELD_RHS_HISTORY",
     "DEFAULT_WAVELET_CYCLES",
     "FIR_TAPS_PER_PERIOD",
     "FORWARD_WAVEFIELD_PREFIX",

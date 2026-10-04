@@ -47,6 +47,7 @@ def estimate_compute_memory(
     save_wavefield_history: bool = True,
     wavefield_compression: str = "none",
     compression_block_size: Optional[BlockSize] = None,
+    reconstruct_rhs: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """Estimate the tensor payload of one :func:`compute` call.
 
@@ -65,6 +66,10 @@ def estimate_compute_memory(
         save_wavefield_history: Whether histories are stored at all.
         wavefield_compression: ``"none"`` or ``"int8"``.
         compression_block_size: INT8 block, default chosen from ``nz``.
+        reconstruct_rhs: Whether the E-only history (``wavefield_rhs_history``)
+            is used. ``None`` assumes the default ``"auto"`` with current native
+            libraries: E-only for uncompressed float32 storage at
+            ``sampling_interval == 1``.
 
     Returns:
         Byte counts per category plus peaks, recommended capacities (with a
@@ -96,21 +101,38 @@ def estimate_compute_memory(
     )
 
     needs_backward = save_wavefield_history and (er_requires_grad or se_requires_grad)
+    if reconstruct_rhs is None:
+        reconstruct_rhs = (
+            sampling_interval == 1
+            and wavefield_compression == "none"
+            and storage_dtype == torch.float32
+        )
+    reconstruct_rhs = bool(reconstruct_rhs and needs_backward)
+    # E-only histories keep one extra (final) E frame on the device instead of R.
+    final_frame_bytes = 0
     if not save_wavefield_history:
         packed_history_bytes = 0
         saved_wavefield_bytes = 0
     elif wavefield_compression == "int8":
         block_size = compression_block_size or default_compression_block_size(2 if nz == 1 else 3)
-        history_shape = saved_history_shape(
-            3 if components == 3 else 2, nt_saved, nstep, nx, ny, nz
-        )
+        history_mode = 3 if components == 3 else 2
+        history_shape = saved_history_shape(history_mode, nt_saved, nstep, nx, ny, nz)
         packed_history_bytes = int8_history_layout(history_shape, block_size)["packed_bytes"]
-        saved_wavefield_bytes = (1 + int(needs_backward)) * packed_history_bytes
+        if reconstruct_rhs:
+            final_frame_bytes = int8_history_layout(
+                saved_history_shape(history_mode, 1, nstep, nx, ny, nz), block_size
+            )["packed_bytes"]
+            saved_wavefield_bytes = packed_history_bytes + final_frame_bytes
+        else:
+            saved_wavefield_bytes = (1 + int(needs_backward)) * packed_history_bytes
     else:
         packed_history_bytes = 0
-        saved_wavefield_bytes = (
-            (1 + int(needs_backward)) * components * nt_saved * snapshot_cells * storage_bytes
-        )
+        one_history = components * nt_saved * snapshot_cells * storage_bytes
+        if reconstruct_rhs:
+            final_frame_bytes = components * snapshot_cells * storage_bytes
+            saved_wavefield_bytes = one_history + final_frame_bytes
+        else:
+            saved_wavefield_bytes = (1 + int(needs_backward)) * one_history
     update_coefficient_bytes = 6 * field_cells * float_bytes
     receiver_bytes = nstep * nt * nrx * float_bytes
     gradient_bytes = (int(er_requires_grad) + int(se_requires_grad)) * model_cells * float_bytes
@@ -127,15 +149,16 @@ def estimate_compute_memory(
         components * snapshot_cells * float_bytes
         if save_wavefield_history
         and needs_backward
+        and not reconstruct_rhs
         and (storage_dtype != torch.float32 or wavefield_compression == "int8")
         else 0
     )
     effective_async = bool(use_async_offload and device.type == "cuda")
 
     if device.type == "cuda" and effective_async:
-        forward_transfer_bytes = (
-            (2 + 2 * int(needs_backward)) * components * snapshot_cells * storage_bytes
-        )
+        # Two E staging slots, plus two R slots unless R is rebuilt from E.
+        stored_r = int(needs_backward and not reconstruct_rhs)
+        forward_transfer_bytes = (2 + 2 * stored_r) * components * snapshot_cells * storage_bytes
         backward_transfer_bytes = (
             2 * int(needs_backward) * components * snapshot_cells * storage_bytes
         )
@@ -145,6 +168,7 @@ def estimate_compute_memory(
             + receiver_bytes
             + exact_old_bytes
             + forward_transfer_bytes
+            + final_frame_bytes
         )
         backward_device_peak = (
             core_bytes
@@ -154,9 +178,10 @@ def estimate_compute_memory(
             + adjoint_state_bytes
             + receiver_adjoint_bytes
             + backward_transfer_bytes
+            + final_frame_bytes
         )
         device_peak_bytes = max(forward_device_peak, backward_device_peak)
-        host_peak_bytes = saved_wavefield_bytes
+        host_peak_bytes = saved_wavefield_bytes - final_frame_bytes
         transfer_buffer_bytes = max(forward_transfer_bytes, backward_transfer_bytes)
     else:
         transfer_buffer_bytes = 0
@@ -190,6 +215,7 @@ def estimate_compute_memory(
         "cpml_coefficients": pml_coefficient_bytes,
         "source_and_locations": acquisition_bytes,
         "saved_gradient_wavefields": saved_wavefield_bytes,
+        "final_e_frame": final_frame_bytes,
         "packed_history_per_quantity": packed_history_bytes,
         "fdtd_update_coefficients": update_coefficient_bytes,
         "receiver_data": receiver_bytes,
@@ -205,6 +231,7 @@ def estimate_compute_memory(
         "recommended_host_capacity": int(host_peak_bytes * MEMORY_SAFETY_MARGIN),
         "nt_saved": nt_saved,
         "components_saved": components,
+        "reconstruct_rhs": reconstruct_rhs,
         "effective_async_offload": effective_async,
     }
 
@@ -216,6 +243,7 @@ _BREAKDOWN_LABELS = (
     ("CPML coefficients", "cpml_coefficients"),
     ("source and acquisition locations", "source_and_locations"),
     ("saved E_saved and R_saved wavefields", "saved_gradient_wavefields"),
+    ("  of which final E frame (E-only history)", "final_e_frame"),
     ("FDTD update coefficients", "fdtd_update_coefficients"),
     ("receiver data", "receiver_data"),
     ("material gradients", "material_gradients"),
@@ -261,6 +289,7 @@ def format_compute_preview(
     mode: int,
     debug: bool,
     save_forward_wavefield_path: Any,
+    reconstruct_rhs: bool = False,
     E: Any,
     H: Any,
     PML: Any,
@@ -291,6 +320,7 @@ def format_compute_preview(
         use_async_offload=use_async_offload,
         er_requires_grad=er.requires_grad,
         se_requires_grad=se.requires_grad,
+        reconstruct_rhs=reconstruct_rhs,
     )
     er_min = float(er.detach().amin().item())
     er_max = float(er.detach().amax().item())
@@ -331,6 +361,16 @@ def format_compute_preview(
         "  gradient sampling interval / saved time steps: "
         f"{model_gradient_sampling_interval} / {estimate['nt_saved']}",
         f"  saved components / compression: {estimate['components_saved']} / {wavefield_compression}",
+        "  R history: "
+        + (
+            "rebuilt from consecutive E frames (E-only history)"
+            if estimate["reconstruct_rhs"]
+            else (
+                "stored with E"
+                if save_wavefield_history and (er.requires_grad or se.requires_grad)
+                else "not stored (no material gradient)"
+            )
+        ),
     ]
     if wavefield_compression == "int8":
         lines += [

@@ -75,6 +75,10 @@ class SolverConfig:
         fdtd_order: 2, 4 or 8.
         mode: Gradient mode 2 or 3.
         debug: Whether to run the expensive NaN/Inf checks.
+        reconstruct_rhs: Store only E (sampling interval 1) and rebuild R^n
+            from consecutive E frames in the adjoint; requested by
+            ``wavefield_rhs_history`` and applied only when a material
+            gradient uses the history.
     """
 
     device: torch.device
@@ -98,6 +102,7 @@ class SolverConfig:
     fdtd_order: int
     mode: int
     debug: bool
+    reconstruct_rhs: bool = False
 
     @property
     def pml(self) -> List[int]:
@@ -198,7 +203,8 @@ def build_forward_arguments(
         pml_coefficients: 12 CPML coefficient arrays (``x0_e, x0_h, ...``).
         states: 30 state arrays (Ex, Ey, Ez, Hx, Hy, Hz, 24 CPML arrays).
         update_coefficients: Six scratch arrays keyed ``ce_hist`` ... ``ch_rhs``.
-        e_saved, r_saved: History buffers.
+        e_saved, r_saved: History buffers (``r_saved`` holds the final E
+            frame when ``storage_type`` carries the E-only flag).
         receiver_data: ``(nstep, nt, nrx)`` output buffer.
         source_location, receiver_location: ``int32`` extended-grid indices.
         source_waveform: ``(nsr, nt, 1)`` waveforms.
@@ -314,6 +320,13 @@ def _check_forward_capabilities(c_lib: Any, config: SolverConfig) -> None:
             "Rebuild the CPU/CUDA shared libraries from the current sources.",
         )
     storage = config.storage
+    if config.reconstruct_rhs:
+        require_capability(
+            c_lib,
+            "deepgpr_supports_rhs_reconstruction",
+            "The loaded native library cannot rebuild R^n from the E history. "
+            "Rebuild the CPU/CUDA shared libraries from the current sources.",
+        )
     if config.save_wavefield_history and storage.conversion_backend != "legacy":
         require_capability(
             c_lib,
@@ -337,12 +350,33 @@ def _check_forward_capabilities(c_lib: Any, config: SolverConfig) -> None:
             )
 
 
+def _allocate_final_frame(config: SolverConfig) -> torch.Tensor:
+    """Device buffer for the final E^nt frame of an E-only history.
+
+    It closes the last ``E^(n+1) - E^n`` pair. The frame is kept inside the
+    autograd context (never the returned state tensors, which callers may
+    advance in place) and stays on the device even with async offload.
+    """
+    storage = config.storage
+    shape = saved_history_shape(config.mode, 1, config.nstep, config.nx, config.ny, config.nz)
+    if storage.compression == "int8":
+        assert storage.block_size is not None
+        packed_bytes = int8_history_layout(shape, storage.block_size)["packed_bytes"]
+        return torch.empty(packed_bytes, device=config.device, dtype=torch.int8)
+    return torch.empty(shape, device=config.device, dtype=storage.dtype)
+
+
 def _allocate_histories(
-    config: SolverConfig, needs_model_gradient: bool, use_async_offload: bool
+    config: SolverConfig,
+    needs_model_gradient: bool,
+    use_async_offload: bool,
+    reconstruct_rhs: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor, Tuple[int, ...]]:
     """Allocate ``E_saved`` and ``R_saved`` for the configured storage mode.
 
     ``R_saved`` is only materialised when a material gradient is requested.
+    With ``reconstruct_rhs`` it is the one-frame final-E buffer instead of an
+    R history.
     """
     device = config.device
     storage = config.storage
@@ -354,16 +388,28 @@ def _allocate_histories(
     if not config.save_wavefield_history:
         empty = torch.empty(0, device=device, dtype=storage.dtype)
         return empty, torch.empty(0, device=device, dtype=storage.dtype), shape
+    if reconstruct_rhs and needs_model_gradient:
+        final_frame = _allocate_final_frame(config)
+    else:
+        final_frame = None
     if storage.compression == "int8":
         assert storage.block_size is not None
         packed_bytes = int8_history_layout(shape, storage.block_size)["packed_bytes"]
         e_saved = torch.empty(packed_bytes, device=device, dtype=torch.int8)
+        if final_frame is not None:
+            return e_saved, final_frame, shape
         r_saved = (
             torch.empty(packed_bytes, device=device, dtype=torch.int8)
             if needs_model_gradient
             else torch.empty(0, device=device, dtype=torch.int8)
         )
         return e_saved, r_saved, shape
+    if final_frame is not None:
+        if use_async_offload:
+            e_saved = torch.empty(shape, device="cpu", dtype=storage.dtype, pin_memory=True)
+        else:
+            e_saved = torch.empty(shape, device=device, dtype=storage.dtype)
+        return e_saved, final_frame, shape
     if use_async_offload:
         e_saved = torch.empty(shape, device="cpu", dtype=storage.dtype, pin_memory=True)
         r_saved = (
@@ -446,7 +492,12 @@ class DeepGPR(torch.autograd.Function):
         sigma_requires_grad = bool(sigma.requires_grad)
         needs_model_gradient = eps_r_requires_grad or sigma_requires_grad
         use_async_offload = bool(config.use_async_offload and device.type == "cuda")
-        storage_type = encode_storage_type(config.storage, config.save_wavefield_history)
+        reconstruct_rhs = bool(
+            config.reconstruct_rhs and config.save_wavefield_history and needs_model_gradient
+        )
+        storage_type = encode_storage_type(
+            config.storage, config.save_wavefield_history, rhs_from_e=reconstruct_rhs
+        )
 
         if config.save_wavefield_history:
             ctx.save_for_backward(
@@ -466,12 +517,13 @@ class DeepGPR(torch.autograd.Function):
         ctx.source_requires_grad = bool(source_amplitudes.requires_grad)
         ctx.source_shape = tuple(source_amplitudes.shape)
         ctx.storage_type = storage_type
+        ctx.reconstruct_rhs = reconstruct_rhs
         ctx.use_async_offload = use_async_offload
         ctx.state_shapes = tuple(state.shape for state in states)
         ctx.receiver_shape = (config.nstep, config.nt, config.nrx)
 
         e_saved, r_saved, history_shape = _allocate_histories(
-            config, needs_model_gradient, use_async_offload
+            config, needs_model_gradient, use_async_offload, reconstruct_rhs
         )
         receiver_amplitudes = torch.empty(
             (config.nstep, config.nt, config.nrx), device=device, dtype=config.dtype
@@ -505,8 +557,13 @@ class DeepGPR(torch.autograd.Function):
                 if int8 and config.save_wavefield_history
                 else e_saved
             )
+            r_shape = (
+                saved_history_shape(config.mode, 1, config.nstep, config.nx, config.ny, config.nz)
+                if reconstruct_rhs
+                else history_shape
+            )
             diagnostic_r = (
-                decompress_wavefield_history(r_saved, history_shape, block)
+                decompress_wavefield_history(r_saved, r_shape, block)
                 if int8 and r_saved.numel()
                 else r_saved
             )
@@ -519,7 +576,9 @@ class DeepGPR(torch.autograd.Function):
             check_nonzero_source_created_fields(c_lib, source_amplitudes, *states[:6])
 
         ctx.E_saved = e_saved
-        ctx.R_saved = r_saved
+        # With reconstruct_rhs the second buffer is the internal final E frame.
+        ctx.R_saved = None if reconstruct_rhs else r_saved
+        ctx.E_final = r_saved if reconstruct_rhs else None
         ctx.mark_non_differentiable(e_saved)
         return (*states, e_saved, receiver_amplitudes)
 
@@ -556,7 +615,7 @@ class DeepGPR(torch.autograd.Function):
         eps_r_pad, sigma_pad = saved[15:17]
 
         e_saved = ctx.E_saved.contiguous()
-        r_saved = ctx.R_saved.contiguous()
+        r_saved = (ctx.E_final if ctx.reconstruct_rhs else ctx.R_saved).contiguous()
         lambdas = [
             _own_state_gradient(gradient, shape, device, dtype)
             for gradient, shape in zip(state_cotangents, ctx.state_shapes)
@@ -624,6 +683,7 @@ class DeepGPR(torch.autograd.Function):
         # Release the (potentially very large) histories as early as possible.
         ctx.E_saved = None
         ctx.R_saved = None
+        ctx.E_final = None
 
         return (
             None,

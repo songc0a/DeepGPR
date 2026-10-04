@@ -57,6 +57,12 @@ DEEPGPR_API int deepgpr_supports_external_pml(void);
 DEEPGPR_API int deepgpr_supports_int8_wavefield(void);
 DEEPGPR_API int deepgpr_supports_conversion_backends(void);
 DEEPGPR_API int deepgpr_supports_int8_reduction_backends(void);
+/*
+ * 1 when storage_type may carry WAVEFIELD_RHS_FROM_E (bit 4): with sampling
+ * interval 1 only E^n is stored, R_saved receives the final E^nt frame, and
+ * the adjoint rebuilds R^n = (E^(n+1) - ca E^n) / cb.
+ */
+DEEPGPR_API int deepgpr_supports_rhs_reconstruction(void);
 DEEPGPR_API void deepgpr_test_wavefield_conversion(
     const float* input, void* encoded, float* decoded, long long count,
     int storage_kind, int conversion_backend);

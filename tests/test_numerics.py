@@ -454,9 +454,10 @@ class NumericsValidationTests(unittest.TestCase):
         )
 
         self.assertTrue(offloaded["effective_async_offload"])
+        # The final E frame of an E-only history stays on the device.
         self.assertEqual(
             offloaded["estimated_host_peak"],
-            offloaded["saved_gradient_wavefields"],
+            offloaded["saved_gradient_wavefields"] - offloaded["final_e_frame"],
         )
         self.assertGreater(offloaded["cuda_transfer_buffers"], 0)
         self.assertLess(

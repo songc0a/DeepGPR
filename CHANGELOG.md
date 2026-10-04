@@ -18,12 +18,28 @@ Measurements, protocol and per-item decisions:
   `DeepGPR.recommended_sampling_interval` and `DeepGPR.source_max_frequency`
   expose the bound so segmented/checkpointed runs can evaluate it once on the
   full waveform. The default stays `1`.
+- `wavefield_rhs_history` (`"auto"`, `"stored"`, `"reconstructed"`). With
+  sampling interval 1 the adjoint rebuilds `R^n = (E^(n+1) - ca E^n) / cb` from
+  consecutive saved E frames, so only E is stored (plus one internal final
+  frame). The default `"auto"` does this for uncompressed `float32` histories:
+  history memory halves, the forward no longer runs the R-snapshot kernel, and
+  gradients are unchanged (bitwise on CPU). Low-precision and INT8 histories
+  keep E+R by default (rebuilding from two rounded frames was measurably less
+  accurate in some cases) and can opt in with `"reconstructed"`. New native
+  capability probe `deepgpr_supports_rhs_reconstruction` (ABI 6 unchanged);
+  older libraries fall back to E+R.
 
 ### Changed
 
 - An explicit `model_gradient_sampling_interval > 1` no longer always raises a
   `RuntimeWarning`; it warns (and states the bound) only above
   `floor(1 / (4 f_max dt))`. Intervals inside the bound are logged at INFO.
+- **Default history layout:** float32 histories at sampling interval 1 no
+  longer allocate `R_saved`; pass `wavefield_rhs_history="stored"` to restore
+  the previous layout. `estimate_compute_memory` gained `reconstruct_rhs` and a
+  `final_e_frame` entry; `print_parameters` reports the R-history mode.
+- The native `storage_type` argument reserves bits 4-7 for history flags (the
+  storage kind now uses bits 0-3).
 
 ## [0.1.0] — Structural refactor and numerical fixes
 

@@ -28,7 +28,8 @@ def compute(device, dx=None, dt=None,
             wavefield_compression_block_size=None,
             wavefield_conversion_backend="auto",
             int8_reduction_backend="auto",
-            wavefield_compression_rate=None):
+            wavefield_compression_rate=None,
+            wavefield_rhs_history="auto"):
 ```
 
 `eps_r`, `sigma`, `mu_r` and `receiver_component` are the canonical names;
@@ -109,6 +110,7 @@ This section defines the geometric observation system (coordinates) and the exci
 | **`wavefield_compression_block_size`** | sequence / `None` | 2D or 3D spatial block | INT8 block shape; defaults to `(8, 8)` in 2D and `(4, 4, 4)` in 3D. The block volume must be a power of two no larger than 256. Partial boundary blocks are supported. |
 | **`int8_reduction_backend`** | `str` | `"auto"`, `"current"`, `"cub_block"`, or `"warp_shuffle"` | Tile maximum reduction. The audited default `"auto"` selects NVIDIA CUB `BlockReduce` for 64-voxel tiles and preserves the prior shared-memory tree for other valid tile sizes. Explicit values expose the retained A/B implementations. |
 | **`wavefield_compression_rate`** | scalar / `None` | Optional ZFP setting | Reserved for an optional ZFP backend. It is rejected unless that backend is selected and available. |
+| **`wavefield_rhs_history`** | `str` | `"auto"`, `"stored"`, or `"reconstructed"` | Storage of the right-hand-side history `R^n` used by the material gradient (see [4.5](#45-e-only-history-at-sampling-interval-1)). `"auto"` (default) stores only `E^n` for uncompressed `float32` histories with `model_gradient_sampling_interval=1` and rebuilds `R^n` in the adjoint, halving history memory with unchanged gradients; other storage modes keep `E^n` and `R^n`. `"stored"` always keeps both (reproduces earlier results bit for bit); `"reconstructed"` requests the E-only history for any storage mode and requires interval 1. |
 | **`use_async_offload`** | `bool` | Scalar | CUDA-only VRAM optimization flag (Default: `False`).<br>If `True`, `E_saved` and `R_saved` are asynchronously offloaded to page-locked host memory (`pin_memory` CPU RAM). This reduces GPU VRAM consumption at the cost of PCIe transfers. On CPU this option is ignored. |
 
 ### 4.1 FWI Gradient Mode
@@ -136,7 +138,10 @@ Only the sampled forward state used by the material adjoint is compressed. The
 live Ex/Ey/Ez/Hx/Hy/Hz and CPML states remain float32. The executed discrete
 update requires `E^n` and `R^n`, where `E^(n+1) = ca E^n + cb R^n`; consequently
 `mode=2` stores compressed Ez/Rz and `mode=3` stores compressed Ex/Ey/Ez and all
-three corresponding RHS components. Magnetic histories are not stored.
+three corresponding RHS components. With `wavefield_rhs_history="reconstructed"`
+only the E components are compressed (plus one packed final frame) and the
+fused kernel decodes `E^n` and `E^(n+1)` to rebuild `R^n`. Magnetic histories
+are not stored.
 
 The packed tensor contains a contiguous signed-INT8 payload followed by a
 four-byte-aligned contiguous FP32 scale array. Backward maps one CUDA block to
@@ -200,6 +205,38 @@ source of a non-smooth misfit such as L1 (`sign(residual)`) is much broader
 band, which is why the L1 rows are one to two orders of magnitude worse at the
 same `S`. Use `S = 1` with `float32` storage for gradient checks.
 
+### 4.5 E-only history at sampling interval 1
+
+The executed electric update is `E^(n+1) = ca E^n + cb R^n`, so with
+`model_gradient_sampling_interval=1` the stored `R^n` is redundant: the adjoint
+can rebuild `R^n = (E^(n+1) - ca E^n) / cb` from two consecutive saved frames
+with the same arithmetic the forward solver used to store it. With
+`wavefield_rhs_history="auto"` and uncompressed `float32` storage DeepGPR
+therefore stores only `E^n`:
+
+- History memory halves (one E history plus one extra frame instead of E and
+  R). `float32` gradients are unchanged: bitwise on CPU; on CUDA the remaining
+  differences come from the atomic adjoint scatter.
+- The last step needs `E^nt`, the field at the end of the forward run. It is
+  kept in an internal one-frame buffer of the autograd context (on the device,
+  also with `use_async_offload=True`), never taken from the returned `(Ex, Ey,
+  Ez)` states, which callers may advance in place.
+- `E_saved` keeps its documented meaning, shape and dtype.
+- With `use_async_offload=True` the backward pass reads one E frame per step
+  instead of an E and an R frame.
+
+For `float16`, `bfloat16` and INT8 histories `"auto"` keeps the E+R pair. The
+permittivity integrand is `-eps0 cb / dt (E^(n+1) - E^n)`; rebuilding it from
+two independently rounded E frames has an error proportional to `|E|` instead
+of `|E^(n+1) - E^n|`, which was up to 3.5x larger in some measured cases (mostly
+comparable; see `tests/profiling_results/history_adjoint_gpu_report.md`).
+`wavefield_rhs_history="reconstructed"` enables the E-only history for these
+modes as well when memory matters more. `"stored"` reproduces earlier results
+in every mode. Native libraries without the
+`deepgpr_supports_rhs_reconstruction` capability (for example older prebuilt
+Windows/macOS binaries) fall back to E+R under `"auto"` and reject
+`"reconstructed"`.
+
 ### 5. Field Variable States (Checkpoints / Initial Fields)
 
 For starting a forward simulation from scratch ($t=0$), these three parameters should be passed as `None` (the system will automatically initialize zero-tensors).
@@ -239,7 +276,7 @@ The function returns a tuple of 5 elements. These are used to extract synthetic 
 return E_saved, (Ex, Ey, Ez), (Hx, Hy, Hz), (x0EPhi1...zmHPhi2), receiver_amplitudes
 ```
 
-1.  **`E_saved`**: The pre-update electric field history `E^n` saved for gradient calculation and diagnostics. An internal `R_saved` tensor stores the corresponding discrete right-hand side `R^n`.
+1.  **`E_saved`**: The pre-update electric field history `E^n` saved for gradient calculation and diagnostics. Depending on `wavefield_rhs_history`, an internal `R_saved` tensor stores the corresponding discrete right-hand side `R^n`, or an internal one-frame buffer stores the final `E^nt` from which the adjoint rebuilds `R^n` (§4.5).
     *   With `save_wavefield_history=False`, `E_saved` is a zero-length tensor and neither E nor R history storage/compression kernels are launched.
     *   **Shape when `mode=2`**: `(nt_saved, nstep, Nx, Ny, Nz)`, storing Ez only.
     *   **Shape when `mode=3`**: `(3, nt_saved, nstep, Nx, Ny, Nz)`, storing components in `[Ex, Ey, Ez]` order.

@@ -71,26 +71,29 @@ DEEPGPR_API int deepgpr_deterministic_adjoint(void)
     return 1;
 }
 
+/* storage_type: bits 0-3 storage kind, bits 4-7 history flags (see deepgpr.cu). */
 enum {
     WAVEFIELD_FLOAT32 = 0,
     WAVEFIELD_FLOAT16 = 1,
     WAVEFIELD_BFLOAT16 = 2,
+    WAVEFIELD_KIND_MASK = 0x0f,
+    WAVEFIELD_RHS_FROM_E = 1 << 4,
     WAVEFIELD_HISTORY_DISABLED = 1 << 26
 };
 
-static size_t wavefield_element_size(int storage_type)
+static size_t wavefield_element_size(int storage_kind)
 {
-    return storage_type == WAVEFIELD_FLOAT32 ? sizeof(float) : sizeof(uint16_t);
+    return storage_kind == WAVEFIELD_FLOAT32 ? sizeof(float) : sizeof(uint16_t);
 }
 
-static void* wavefield_offset(void* pointer, long long offset, int storage_type)
+static void* wavefield_offset(void* pointer, long long offset, int storage_kind)
 {
-    return (void*)((unsigned char*)pointer + offset * (long long)wavefield_element_size(storage_type));
+    return (void*)((unsigned char*)pointer + offset * (long long)wavefield_element_size(storage_kind));
 }
 
-static const void* wavefield_const_offset(const void* pointer, long long offset, int storage_type)
+static const void* wavefield_const_offset(const void* pointer, long long offset, int storage_kind)
 {
-    return (const void*)((const unsigned char*)pointer + offset * (long long)wavefield_element_size(storage_type));
+    return (const void*)((const unsigned char*)pointer + offset * (long long)wavefield_element_size(storage_kind));
 }
 
 static uint16_t float_to_half_bits(float value)
@@ -184,23 +187,23 @@ static float bfloat16_bits_to_float(uint16_t value)
     return result;
 }
 
-static void store_wavefield_value(void* pointer, long long index, float value, int storage_type)
+static void store_wavefield_value(void* pointer, long long index, float value, int storage_kind)
 {
-    if (storage_type == WAVEFIELD_FLOAT16) {
+    if (storage_kind == WAVEFIELD_FLOAT16) {
         ((uint16_t*)pointer)[index] = float_to_half_bits(value);
-    } else if (storage_type == WAVEFIELD_BFLOAT16) {
+    } else if (storage_kind == WAVEFIELD_BFLOAT16) {
         ((uint16_t*)pointer)[index] = float_to_bfloat16_bits(value);
     } else {
         ((float*)pointer)[index] = value;
     }
 }
 
-static float load_wavefield_value(const void* pointer, long long index, int storage_type)
+static float load_wavefield_value(const void* pointer, long long index, int storage_kind)
 {
-    if (storage_type == WAVEFIELD_FLOAT16) {
+    if (storage_kind == WAVEFIELD_FLOAT16) {
         return half_bits_to_float(((const uint16_t*)pointer)[index]);
     }
-    if (storage_type == WAVEFIELD_BFLOAT16) {
+    if (storage_kind == WAVEFIELD_BFLOAT16) {
         return bfloat16_bits_to_float(((const uint16_t*)pointer)[index]);
     }
     return ((const float*)pointer)[index];
@@ -217,6 +220,12 @@ DEEPGPR_API int deepgpr_supports_external_pml(void)
 DEEPGPR_API int deepgpr_abi_version(void)
 {
     return DEEPGPR_ABI_VERSION;
+}
+
+/* E-only history with sampling interval 1 (WAVEFIELD_RHS_FROM_E). */
+DEEPGPR_API int deepgpr_supports_rhs_reconstruction(void)
+{
+    return 1;
 }
 
 /*
@@ -1496,7 +1505,7 @@ static void save_rhs_snapshot_cpu(
     const float* RESTRICT E, const void* RESTRICT Eold_ptr,
     const float* RESTRICT exact_Eold,
     const float* RESTRICT ca, const float* RESTRICT cb,
-    int step, int NX, int NY, int NZ, int storage_type)
+    int step, int NX, int NY, int NZ, int storage_kind)
 {
     long long nx1 = NX - 1, ny1 = NY - 1, nz1 = NZ - 1;
     long long total = nx1 * ny1 * nz1;
@@ -1519,11 +1528,11 @@ static void save_rhs_snapshot_cpu(
 
         float e_old = exact_Eold != NULL
             ? exact_Eold[work]
-            : load_wavefield_value(Eold_ptr, saved_idx, storage_type);
+            : load_wavefield_value(Eold_ptr, saved_idx, storage_kind);
         float rhs = cb_value != 0.0f
             ? (E[field_idx] - ca[i * NY * NZ + j * NZ + k] * e_old) / cb_value
             : 0.0f;
-        store_wavefield_value(dst_ptr, saved_idx, rhs, storage_type);
+        store_wavefield_value(dst_ptr, saved_idx, rhs, storage_kind);
     }
 }
 
@@ -1540,7 +1549,7 @@ static void save_rhs_snapshot_cpu(
 static void save_e_snapshot_cpu(
     void* RESTRICT dst_ptr, int t_idx, const float* RESTRICT E,
     float* RESTRICT exact_Eold,
-    int step, int NX, int NY, int NZ, int storage_type)
+    int step, int NX, int NY, int NZ, int storage_kind)
 {
     long long nx1 = NX - 1, ny1 = NY - 1, nz1 = NZ - 1;
     long long total = nx1 * ny1 * nz1;
@@ -1560,7 +1569,7 @@ static void save_e_snapshot_cpu(
         long long src_idx = (long long)s * field_stride + i * NY * NZ + j * NZ + k;
         long long dst_idx = (long long)t_idx * step * total + (long long)s * total + idx;
         float value = E[src_idx];
-        store_wavefield_value(dst_ptr, dst_idx, value, storage_type);
+        store_wavefield_value(dst_ptr, dst_idx, value, storage_kind);
         if (exact_Eold != NULL) exact_Eold[work] = value;
     }
 }
@@ -1570,39 +1579,38 @@ static void save_e_snapshot_cpu(
  *
  * Parameters:
  *   lambda_ex, lambda_ey, lambda_ez: Adjoint electric field component arrays.
- *   E_saved: Saved pre-update electric field E^n.
- *   R_saved: Saved effective right-hand side R^n.
+ *   e_frame: Saved pre-update electric field E^n of this step (component 0).
+ *   e_component_stride: Element offset between components of e_frame.
+ *   second_frame: R^n, or E^(n+1) when rhs_from_e is set.
+ *   second_component_stride: Element offset between components of second_frame.
  *   ca, cb: Discrete electric update coefficients.
  *   grad_eps_r: Output relative permittivity gradient array.
  *   grad_sigma: Output conductivity gradient array.
- *   i: Current reverse time-step index.
  *   step: Number of shots or simulations in the batch.
  *   NX, NY, NZ: Padded field grid sizes.
  *   pml0..pml5: CPML thicknesses; gradients are excluded from these cells.
  *   dt: Time step size.
  *   eps_r_requires_grad: Whether to accumulate grad_eps_r.
  *   sigma_requires_grad: Whether to accumulate grad_sigma.
- *   S: Forward wavefield sampling interval.
- *   nt_saved: Number of saved forward snapshots.
+ *   sample_weight: Length of the sampling block represented by this step.
  *   fwi_mode: Gradient mode; 2 uses lambda_ez only, 3 uses lambda_ex, lambda_ey, and lambda_ez.
+ *   rhs_from_e: Rebuild R^n = (E^(n+1) - ca E^n) / cb exactly as save_rhs_snapshot_cpu did.
  */
 static void accumulate_material_gradients_cpu(
     const float* RESTRICT lambda_ex, const float* RESTRICT lambda_ey, const float* RESTRICT lambda_ez,
-    const void* RESTRICT E_saved, const void* RESTRICT R_saved,
+    const void* RESTRICT e_frame, long long e_component_stride,
+    const void* RESTRICT second_frame, long long second_component_stride,
     const float* RESTRICT ca, const float* RESTRICT cb,
     const float* RESTRICT sigma_pad,
     float* RESTRICT grad_eps_r, float* RESTRICT grad_sigma,
-    int i, int step, int NX, int NY, int NZ,
+    int step, int NX, int NY, int NZ,
     int pml0, int pml1, int pml2, int pml3, int pml4, int pml5,
     float dt,
-    int eps_r_requires_grad, int sigma_requires_grad, int S, int sample_weight,
-    int nt_saved, int fwi_mode,
-    int storage_type)
+    int eps_r_requires_grad, int sigma_requires_grad, int sample_weight,
+    int fwi_mode, int storage_kind, int rhs_from_e)
 {
     long long sx = NX - 1, sy = NY - 1, sz = NZ - 1;
     long long total_cells = sx * sy * sz;
-    long long snap_stride = (long long)step * total_cells;
-    long long component_stride = (long long)nt_saved * snap_stride;
     long long idx;
 
     DEEPGPR_OMP_PARALLEL_FOR
@@ -1636,15 +1644,21 @@ static void accumulate_material_gradients_cpu(
             };
 
             for (int c = 0; c < components; ++c) {
-                long long comp_offset = (fwi_mode == 3) ? (long long)c * component_stride : 0;
-                long long saved_idx = comp_offset + (long long)(i / S) * snap_stride + base_idx;
-                float e_old = load_wavefield_value(E_saved, saved_idx, storage_type);
-                float rhs = load_wavefield_value(R_saved, saved_idx, storage_type);
+                float e_old = load_wavefield_value(
+                    e_frame, (long long)c * e_component_stride + base_idx, storage_kind);
+                float second = load_wavefield_value(
+                    second_frame, (long long)c * second_component_stride + base_idx, storage_kind);
                 float adjoint_val = adjoint_values[(fwi_mode == 3) ? c : 2];
-                float grad_ca = adjoint_val * e_old * (float)sample_weight;
-                float grad_cb = adjoint_val * rhs * (float)sample_weight;
                 float ca_value = ca[material_idx];
                 float cb_value = cb[material_idx];
+                float rhs = second;
+                if (rhs_from_e) {
+                    rhs = cb_value != 0.0f
+                        ? (second - ca_value * e_old) / cb_value
+                        : 0.0f;
+                }
+                float grad_ca = adjoint_val * e_old * (float)sample_weight;
+                float grad_cb = adjoint_val * rhs * (float)sample_weight;
 
                 if (sigma_pad[material_idx] <= DEEPGPR_PEC_SIGMA_THRESHOLD_F) {
                     if (eps_r_requires_grad == 1) {
@@ -1735,6 +1749,11 @@ DEEPGPR_API void forward(const float* RESTRICT eps_r_pad, const float* RESTRICT 
 {
     (void)use_async_offload;
     int save_wavefield_history = (storage_type & WAVEFIELD_HISTORY_DISABLED) == 0;
+    int storage_kind = storage_type & WAVEFIELD_KIND_MASK;
+    /* E-only history: R^n is rebuilt in the adjoint from E^n and E^(n+1). */
+    int rhs_from_e = save_wavefield_history && save_model_history
+        && (storage_type & WAVEFIELD_RHS_FROM_E) != 0;
+    int store_rhs = save_model_history && !rhs_from_e;
     int fdtd_order = g_fdtd_order;
     int e_components = (fwi_mode == 3) ? 3 : 1;
     int has_cpml = pml0 || pml1 || pml2 || pml3 || pml4 || pml5;
@@ -1744,7 +1763,11 @@ DEEPGPR_API void forward(const float* RESTRICT eps_r_pad, const float* RESTRICT 
     float* exact_Eold = NULL;
 
     deepgpr_clear_last_error();
-    if (save_wavefield_history && save_model_history && storage_type != WAVEFIELD_FLOAT32) {
+    if (rhs_from_e && sampling_interval != 1) {
+        deepgpr_set_error("deepgpr_cpu forward: E-only wavefield history requires sampling interval 1");
+        return;
+    }
+    if (save_wavefield_history && store_rhs && storage_kind != WAVEFIELD_FLOAT32) {
         size_t bytes;
         if (snap_size < 0 || (unsigned long long)snap_size > SIZE_MAX / ((size_t)e_components * sizeof(float))) {
             deepgpr_set_error("deepgpr_cpu forward: snapshot size overflows the address space");
@@ -1770,13 +1793,13 @@ DEEPGPR_API void forward(const float* RESTRICT eps_r_pad, const float* RESTRICT 
         if (save_wavefield_history && i % sampling_interval == 0) {
             int t_saved = i / sampling_interval;
             if (fwi_mode == 3) {
-                save_e_snapshot_cpu(E_saved, t_saved, Ex, exact_Eold, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, storage_type);
-                save_e_snapshot_cpu(wavefield_offset(E_saved, component_stride, storage_type), t_saved, Ey,
-                    exact_Eold != NULL ? exact_Eold + snap_size : NULL, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, storage_type);
-                save_e_snapshot_cpu(wavefield_offset(E_saved, 2 * component_stride, storage_type), t_saved, Ez,
-                    exact_Eold != NULL ? exact_Eold + 2 * snap_size : NULL, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, storage_type);
+                save_e_snapshot_cpu(E_saved, t_saved, Ex, exact_Eold, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, storage_kind);
+                save_e_snapshot_cpu(wavefield_offset(E_saved, component_stride, storage_kind), t_saved, Ey,
+                    exact_Eold != NULL ? exact_Eold + snap_size : NULL, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, storage_kind);
+                save_e_snapshot_cpu(wavefield_offset(E_saved, 2 * component_stride, storage_kind), t_saved, Ez,
+                    exact_Eold != NULL ? exact_Eold + 2 * snap_size : NULL, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, storage_kind);
             } else {
-                save_e_snapshot_cpu(E_saved, t_saved, Ez, exact_Eold, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, storage_type);
+                save_e_snapshot_cpu(E_saved, t_saved, Ez, exact_Eold, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, storage_kind);
             }
         }
 
@@ -1803,24 +1826,37 @@ DEEPGPR_API void forward(const float* RESTRICT eps_r_pad, const float* RESTRICT 
         inject_sources_cpu(step, i, dx, dy, dz, sourcelocation, srcwaveforms,
             Ex, Ey, Ez, ce_rhs, NX_FIELDS, NY_FIELDS, NZ_FIELDS, nsrc, polarisation, nt);
 
-        if (save_wavefield_history && save_model_history && i % sampling_interval == 0) {
+        if (save_wavefield_history && store_rhs && i % sampling_interval == 0) {
             int t_saved = i / sampling_interval;
             if (fwi_mode == 3) {
                 save_rhs_snapshot_cpu(R_saved, t_saved, Ex, E_saved, exact_Eold, ce_hist, ce_rhs,
-                    step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, storage_type);
-                save_rhs_snapshot_cpu(wavefield_offset(R_saved, component_stride, storage_type), t_saved, Ey,
-                    wavefield_const_offset(E_saved, component_stride, storage_type), exact_Eold != NULL ? exact_Eold + snap_size : NULL,
-                    ce_hist, ce_rhs, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, storage_type);
-                save_rhs_snapshot_cpu(wavefield_offset(R_saved, 2 * component_stride, storage_type), t_saved, Ez,
-                    wavefield_const_offset(E_saved, 2 * component_stride, storage_type), exact_Eold != NULL ? exact_Eold + 2 * snap_size : NULL,
-                    ce_hist, ce_rhs, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, storage_type);
+                    step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, storage_kind);
+                save_rhs_snapshot_cpu(wavefield_offset(R_saved, component_stride, storage_kind), t_saved, Ey,
+                    wavefield_const_offset(E_saved, component_stride, storage_kind), exact_Eold != NULL ? exact_Eold + snap_size : NULL,
+                    ce_hist, ce_rhs, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, storage_kind);
+                save_rhs_snapshot_cpu(wavefield_offset(R_saved, 2 * component_stride, storage_kind), t_saved, Ez,
+                    wavefield_const_offset(E_saved, 2 * component_stride, storage_kind), exact_Eold != NULL ? exact_Eold + 2 * snap_size : NULL,
+                    ce_hist, ce_rhs, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, storage_kind);
             } else {
                 save_rhs_snapshot_cpu(R_saved, t_saved, Ez, E_saved, exact_Eold, ce_hist, ce_rhs,
-                    step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, storage_type);
+                    step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, storage_kind);
             }
         }
 
         sample_receivers_cpu(step, nrx, i, receiverlocation, rxs, Ex, Ey, Ez, NX_FIELDS, NY_FIELDS, NZ_FIELDS, nt, receiver_component);
+    }
+
+    if (rhs_from_e) {
+        /* E^nt closes the last E^(n+1) - E^n pair; R_saved holds this frame. */
+        if (fwi_mode == 3) {
+            save_e_snapshot_cpu(R_saved, 0, Ex, NULL, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, storage_kind);
+            save_e_snapshot_cpu(wavefield_offset(R_saved, snap_size, storage_kind), 0, Ey, NULL,
+                step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, storage_kind);
+            save_e_snapshot_cpu(wavefield_offset(R_saved, 2 * snap_size, storage_kind), 0, Ez, NULL,
+                step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, storage_kind);
+        } else {
+            save_e_snapshot_cpu(R_saved, 0, Ez, NULL, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS, storage_kind);
+        }
     }
     }
 
@@ -1904,11 +1940,20 @@ DEEPGPR_API void backward(const float* RESTRICT eps_r_pad, const float* RESTRICT
     int fdtd_order = g_fdtd_order;
     int nt_saved = (nt + sampling_interval - 1) / sampling_interval;
     int has_cpml = pml0 || pml1 || pml2 || pml3 || pml4 || pml5;
+    int storage_kind = storage_type & WAVEFIELD_KIND_MASK;
+    int rhs_from_e = (eps_r_requires_grad || sigma_requires_grad)
+        && (storage_type & WAVEFIELD_RHS_FROM_E) != 0;
+    long long snap_size = (long long)step * (NX_FIELDS - 1) * (NY_FIELDS - 1) * (NZ_FIELDS - 1);
+    long long component_stride = (long long)nt_saved * snap_size;
     long long total_work = (long long)step * NX_FIELDS * NY_FIELDS * NZ_FIELDS;
     size_t weight_bytes;
     float* adjoint_weights;
 
     deepgpr_clear_last_error();
+    if (rhs_from_e && sampling_interval != 1) {
+        deepgpr_set_error("deepgpr_cpu backward: E-only wavefield history requires sampling interval 1");
+        return;
+    }
     if (total_work < 0 || (unsigned long long)total_work > SIZE_MAX / (ADJOINT_CHANNELS * sizeof(float))) {
         deepgpr_set_error("deepgpr_cpu backward: field size overflows the address space");
         return;
@@ -1942,12 +1987,26 @@ DEEPGPR_API void backward(const float* RESTRICT eps_r_pad, const float* RESTRICT
 
         if ((eps_r_requires_grad || sigma_requires_grad) && i % sampling_interval == 0) {
             int sample_weight = sampling_interval;
+            int t_saved = i / sampling_interval;
+            const void* e_frame = wavefield_const_offset(E_saved, (long long)t_saved * snap_size, storage_kind);
+            const void* second_frame;
+            long long second_stride = component_stride;
+            if (!rhs_from_e) {
+                second_frame = wavefield_const_offset(R_saved, (long long)t_saved * snap_size, storage_kind);
+            } else if (t_saved + 1 < nt_saved) {
+                second_frame = wavefield_const_offset(E_saved, (long long)(t_saved + 1) * snap_size, storage_kind);
+            } else {
+                second_frame = R_saved;  /* final E^nt frame */
+                second_stride = snap_size;
+            }
             if (i + sample_weight > nt) sample_weight = nt - i;
-            accumulate_material_gradients_cpu(lambda_ex, lambda_ey, lambda_ez, E_saved, R_saved, ce_hist, ce_rhs, sigma_pad,
-                grad_eps_r, grad_sigma, i, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
+            accumulate_material_gradients_cpu(lambda_ex, lambda_ey, lambda_ez,
+                e_frame, component_stride, second_frame, second_stride,
+                ce_hist, ce_rhs, sigma_pad,
+                grad_eps_r, grad_sigma, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
                 pml0, pml1, pml2, pml3, pml4, pml5, dt,
-                eps_r_requires_grad, sigma_requires_grad, sampling_interval, sample_weight,
-                nt_saved, fwi_mode, storage_type);
+                eps_r_requires_grad, sigma_requires_grad, sample_weight,
+                fwi_mode, storage_kind, rhs_from_e);
         }
 
         /* Strict reverse-mode order for the executed forward time step:

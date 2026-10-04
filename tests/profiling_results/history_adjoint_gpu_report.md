@@ -149,3 +149,132 @@ automatic and explicit `S = 8` gradients are bitwise identical.
 Full suite after this item: 113 tests, all passed (1 skipped, two-GPU test);
 validated on the staged snapshot with the baseline native libraries (item 1 is
 Python-only).
+
+## 2. E-only history at sampling interval 1 (`wavefield_rhs_history`)
+
+**Default:** yes for uncompressed float32 histories (`"auto"`); **no** for
+float16/bfloat16/INT8 (they keep E+R under `"auto"`, opt in with
+`"reconstructed"`). `"stored"` restores the previous layout in every mode.
+
+### Implementation
+
+- Native flag `WAVEFIELD_RHS_FROM_E` (`storage_type` bit 4; the storage kind
+  now uses bits 0-3, bits 4-7 are history flags) and capability probe
+  `deepgpr_supports_rhs_reconstruction` in both backends (`deepgpr.h`,
+  `native/abi.py`). No function signature changed, ABI stays 6. Python only
+  sets the flag after the probe returns 1, so an older prebuilt library never
+  sees it: `"auto"` falls back to E+R and `"reconstructed"` raises
+  `NativeLibraryError`.
+- Forward: with the flag, the R snapshot (`save_rhs_snapshot*`,
+  `quantize_rhs_int8_snapshot_gpu`), the `exact_Eold` scratch and the async R
+  staging buffers are not used. After the last step the final `E^nt` is written
+  with the ordinary E snapshot/quantizer into the `R_saved` pointer, which now
+  addresses an internal one-frame buffer (`ctx.E_final`, device-resident also
+  with async offload). The returned `(Ex, Ey, Ez)` states are never read by the
+  adjoint.
+- Backward: the material-gradient kernels (CPU, CUDA float/fp16/bf16, CUDA
+  INT8) now take frame pointers plus component strides for `E^n` and for a
+  second frame (`R^n`, or `E^(n+1)` / the final frame). With the flag they
+  rebuild `R = cb != 0 ? (E^(n+1) - ca E^n) / cb : 0` with the expression of
+  the forward R snapshot, so float32 R is bit-identical (verified on CPU; on
+  CUDA both expressions are contracted to the same FMA). Async offload uses two
+  E slots: step `t` copies `E^t` into slot `t % 2` and reads `E^(t+1)` from the
+  other slot (or the final frame), i.e. one H2D frame per step instead of E+R.
+- Python: `wavefield_rhs_history` option; `SolverConfig.reconstruct_rhs`;
+  `estimate_compute_memory(reconstruct_rhs=...)` with a `final_e_frame` entry
+  (async: the final frame is device memory); `print_parameters` prints the
+  R-history mode.
+
+### Correctness
+
+| check | result |
+|---|---|
+| CPU float32, mode 2 (2 shots) and mode 3 (asymmetric CPML), E-only vs E+R | receiver data, `E_saved`, ε/σ/source gradients **bitwise identical** (`test_rhs_history.py`) |
+| stored `R^n` vs rebuild from `E_saved[t]`, `E_saved[t+1]` / final `Ez` (CPU) | **bitwise equal** for every saved step |
+| returned states advanced in place (`mul_(-3).add_(1)`) before backward | gradients bitwise unchanged |
+| CUDA float32 E-only vs E+R, mode 2/3, async on/off | data and `E_saved` bitwise; gradients 2-5e-7 relative (`< 2e-6` test bound), same as E+R run-to-run atomic noise |
+| benchmark 2D fp32, baseline vs current | data bitwise; ε 1.3e-7, σ 1.3e-7 relative (baseline vs baseline: 2.0e-7 / 1.3e-7) |
+| benchmark 3D fp32, baseline vs current | data bitwise; ε 2.2e-7, σ 7.9e-6 relative (baseline vs baseline: 2.8e-7 / 5.0e-6) |
+| low-precision defaults (fp16/bf16/int8) | unchanged layout; gradients equal to baseline up to the same atomic noise |
+
+### Low-precision accuracy: E-only vs E+R (relative L2 against float32)
+
+The gate "not worse than baseline E+R" is **not met uniformly**, so `"auto"`
+does not enable E-only for these modes:
+
+| case | storage | ε: E+R → E-only | σ: E+R → E-only |
+|---|---|---|---|
+| 2D benchmark (512x384, 400 MHz, dt 1.5e-11, MSE) | fp16 | 2.34e-5 → 2.24e-5 | 2.21e-5 → 2.24e-5 |
+| | bf16 | 1.59e-4 → **2.27e-4** | 1.51e-4 → 1.50e-4 |
+| | int8 | 4.46e-4 → 4.70e-4 | 3.50e-4 → 3.43e-4 |
+| 3D benchmark (80^3, mode 3, MSE) | fp16 | 3.09e-5 → 2.52e-5 | 4.41e-4 → 4.43e-4 |
+| | bf16 | 2.57e-4 → 1.41e-4 | 3.889e-3 → 3.889e-3 |
+| | int8 | 7.14e-3 → 6.31e-3 | 3.20e-2 → 3.25e-2 |
+| 2D FWI-like (200x120, 200 MHz, dt 5e-11, 10 shots), MSE | fp16 | 1.61e-5 → 1.59e-5 | 1.60e-5 → 1.59e-5 |
+| | bf16 | 1.39e-4 → 1.33e-4 | 1.18e-4 → 1.19e-4 |
+| | int8 | 3.39e-4 → 3.27e-4 | 3.18e-4 → 3.19e-4 |
+| same, L1 loss | fp16 | 1.97e-5 → **2.78e-5** | 1.85e-5 → 1.83e-5 |
+| | bf16 | 1.40e-4 → **2.57e-4** | 1.50e-4 → 1.52e-4 |
+| | int8 | 4.55e-4 → **6.55e-4** | 5.12e-4 → 5.16e-4 |
+| small 2D test case (18x21, nt 60, CPU) | fp16 | 1.38e-4 → **2.08e-4** | 4.31e-5 → 4.30e-5 |
+| | bf16 | 1.04e-3 → **2.08e-3** | 2.99e-4 → 3.00e-4 |
+| small 3D test case (12x13x11, nt 60, CPU) | fp16 | 5.82e-5 → **1.13e-4** | 4.17e-5 → 4.27e-5 |
+| | bf16 | 2.82e-4 → **9.99e-4** | 2.50e-4 → 2.55e-4 |
+| same, CUDA | int8 (2D / 3D) | 4.75e-3 / 6.07e-3 → **1.16e-2 / 8.46e-3** | 1.23e-3 / 4.25e-3 → 1.25e-3 / 4.25e-3 |
+
+Cause: the ε integrand is `-eps0 cb / dt (E^(n+1) - E^n)`. A stored `R^n`
+carries a rounding error relative to `|E^(n+1) - ca E^n|`, whereas the
+difference of two independently rounded E frames carries an error relative to
+`|E|`. The σ integrand `-cb/2 (E^(n+1) + E^n)` is unaffected, as observed.
+With MSE on realistic cases the two are comparable (the earlier CPU
+observation); with an L1 misfit or short, finely sampled runs E-only is up to
+3.5x worse in ε. All values stay in the same order of magnitude, so this is
+listed as a decision for the maintainer rather than treated as a defect.
+
+### Performance (formal protocol, two interleaved rounds, medians)
+
+Raw: `history_adjoint_ab/item2_{base,cur}_b{1,2}` (and `_cached_`).
+
+| case | metric | baseline (b1 / b2) | E-only (b1 / b2) | change |
+|---|---|---:|---:|---:|
+| 2D fwd-only fp32 | forward ms | 118.61 / 118.08 | 78.50 / 77.95 | -33.8 % / -34.0 % |
+| 2D full fp32 | forward ms | 94.98 / 93.98 | 78.05 / 78.63 | -17.8 % / -16.3 % |
+| | backward ms | 131.54 / 127.99 | 124.92 / 124.77 | -5.0 % / -2.5 % |
+| | total ms | 225.97 / 222.45 | 203.29 / 203.37 | -10.0 % / -8.6 % |
+| | history / peak MiB | 8571 / 8687 | 4289 / 4407 | -50.0 % / -49.3 % |
+| 3D fwd-only fp32 | forward ms | 255.78 / 256.03 | 63.55 / 63.16 | -75.2 % / -75.3 % |
+| 3D full fp32 | forward ms | 246.37 / 248.63 | 56.84 / 59.56 | -76.9 % / -76.0 % |
+| | backward ms | 78.70 / 79.38 | 78.93 / 78.85 | +0.3 % / -0.7 % (noise) |
+| | total ms | 324.72 / 327.82 | 135.85 / 138.54 | -58.2 % / -57.7 % |
+| | history / peak MiB | 11444 / 11559 | 5733 / 5849 | -49.9 % / -49.4 % |
+
+With `--keep-allocator-cache` (no `cudaMalloc` inside the timed window):
+2D full fp32 total 209.58/223.16 → 194.30/205.59 ms (-7.3 %/-7.9 %), forward
+-14.3 %/-17.6 %; 3D full fp32 forward 81.57/83.08 → 44.17/44.83 ms
+(-45.9 %/-46.0 %), total -23.8 %/-22.7 %. The formal 3D numbers are therefore
+mostly allocation savings (11.4 GiB → 5.7 GiB of `cudaMalloc` per call); the
+cached numbers are the kernel/bandwidth part. fp16/bf16/int8 (unchanged
+default layout) moved by -3.5 % to +2.1 % in the formal batches without a
+consistent sign; the second cached round drifted by up to +6 % for every mode
+including FDTD-only, i.e. clock/thermal state, not code.
+
+Nsight Systems, 2D fp32 forward, kernel time per 1200-step run
+(`history_adjoint_ab/nsys/item2_*_fp32_fwd_cuda_gpu_kern_sum.csv`):
+
+| kernel | baseline ms (avg µs) | E-only ms (avg µs) |
+|---|---:|---:|
+| `save_rhs_snapshot_gpu<float32>` | 11.12 (9.27) | **removed** |
+| `save_e_snapshot_gpu<float32>` | 7.37 (6.14), 1200 calls | 7.59 (6.32), 1201 calls (+ final frame) |
+| `update_h_gpu<2>` / `update_e_gpu<2>` | 22.64 / 19.48 | 20.24 / 19.55 |
+| `cpml_h_gpu<2>` / `cpml_e_gpu<2>` | 10.97 / 11.00 | 10.58 / 10.35 |
+| sum of all kernels | 85.34 | 70.96 |
+
+### Tests
+
+New `tests/test_rhs_history.py` (12 tests: policy, memory estimate, stale
+library rejection, CPU bitwise checks, rebuild identity, in-place state
+mutation, low-precision/INT8 rebuild with and without async offload, CPU/CUDA
+agreement). Changed: `test_numerics.test_cuda_async_memory_estimate_splits_host_and_device_payload`
+now expects the host peak to exclude the device-resident final frame
+(`saved_gradient_wavefields - final_e_frame`); exact equality is kept. Full
+suite: 125 tests, all passed (1 skipped, two-GPU test).

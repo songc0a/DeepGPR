@@ -28,11 +28,15 @@ from ..config.constants import (
     WAVEFIELD_CONVERSION_BACKENDS,
     WAVEFIELD_CONVERSION_SHIFT,
     WAVEFIELD_HISTORY_DISABLED,
+    WAVEFIELD_RHS_FROM_E,
+    WAVEFIELD_RHS_HISTORY_MODES,
     WAVEFIELD_STORAGE_BFLOAT16,
     WAVEFIELD_STORAGE_FLOAT16,
     WAVEFIELD_STORAGE_FLOAT32,
     WAVEFIELD_STORAGE_INT8,
 )
+
+from ..utils.exceptions import NativeLibraryError
 
 BlockSize = Tuple[int, int, int]
 
@@ -129,6 +133,72 @@ def normalize_int8_reduction_backend(value: Any) -> str:
     return value
 
 
+def normalize_wavefield_rhs_history(value: Any) -> str:
+    """Normalise ``wavefield_rhs_history`` (``"auto"``, ``"stored"``, ``"reconstructed"``)."""
+    message = "wavefield_rhs_history must be 'auto', 'stored', or 'reconstructed'."
+    if not isinstance(value, str):
+        raise TypeError(message)
+    value = value.lower()
+    if value not in WAVEFIELD_RHS_HISTORY_MODES:
+        raise ValueError(message)
+    return value
+
+
+def resolve_rhs_reconstruction(
+    requested: str,
+    *,
+    sampling_interval: int,
+    stores_model_history: bool,
+    library_supported: bool,
+    lossless_storage: bool = True,
+) -> bool:
+    """Decide whether R^n is rebuilt from consecutive E frames.
+
+    ``"auto"`` selects the E-only history only for lossless (float32,
+    uncompressed) storage: there R^n is rebuilt bitwise as the forward solver
+    computed it. With float16/bfloat16/INT8 storage the difference of two
+    independently rounded E frames can be markedly less accurate than a stored
+    R^n (measured up to 3.5x larger permittivity-gradient errors), so those
+    modes keep the E+R pair unless ``"reconstructed"`` is requested.
+
+    Args:
+        requested: Normalised ``wavefield_rhs_history``.
+        sampling_interval: Resolved ``model_gradient_sampling_interval``.
+        stores_model_history: Whether a material gradient will read the history.
+        library_supported: Whether the native library reports
+            ``deepgpr_supports_rhs_reconstruction``.
+        lossless_storage: Whether the history is stored as uncompressed float32.
+
+    Returns:
+        ``True`` for the E-only history (only possible at sampling interval 1).
+
+    Raises:
+        ValueError: ``"reconstructed"`` with a sampling interval above 1.
+        NativeLibraryError: ``"reconstructed"`` with a library that lacks the
+            capability.
+    """
+    if requested == "stored":
+        return False
+    if requested == "reconstructed":
+        if sampling_interval != 1:
+            raise ValueError(
+                "wavefield_rhs_history='reconstructed' requires "
+                "model_gradient_sampling_interval=1 (R^n is rebuilt from E^n and E^(n+1))."
+            )
+        if not stores_model_history:
+            return False
+        if not library_supported:
+            raise NativeLibraryError(
+                "The loaded native library cannot rebuild R^n from the E history "
+                "(deepgpr_supports_rhs_reconstruction). Rebuild the CPU/CUDA libraries "
+                "or use wavefield_rhs_history='stored'."
+            )
+        return True
+    return (
+        sampling_interval == 1 and lossless_storage and library_supported and stores_model_history
+    )
+
+
 def default_compression_block_size(spatial_mode: int) -> BlockSize:
     """Default INT8 block for a 2D (``spatial_mode == 2``) or 3D model."""
     return INT8_DEFAULT_BLOCK_2D if spatial_mode == 2 else INT8_DEFAULT_BLOCK_3D
@@ -186,12 +256,16 @@ def encode_int8_storage_type(block_size: BlockSize, reduction_backend: str = "cu
     )
 
 
-def encode_storage_type(config: WavefieldStorageConfig, save_wavefield_history: bool) -> int:
+def encode_storage_type(
+    config: WavefieldStorageConfig, save_wavefield_history: bool, rhs_from_e: bool = False
+) -> int:
     """Return the complete native ``storage_type`` argument.
 
     Args:
         config: Resolved storage options.
         save_wavefield_history: ``False`` sets the history-disabled flag.
+        rhs_from_e: Store only E and rebuild R^n in the adjoint
+            (:data:`WAVEFIELD_RHS_FROM_E`).
     """
     if config.compression == "int8":
         assert config.block_size is not None
@@ -202,6 +276,8 @@ def encode_storage_type(config: WavefieldStorageConfig, save_wavefield_history: 
         )
     if not save_wavefield_history:
         storage_type |= WAVEFIELD_HISTORY_DISABLED
+    elif rhs_from_e:
+        storage_type |= WAVEFIELD_RHS_FROM_E
     return storage_type
 
 
@@ -323,7 +399,9 @@ __all__ = [
     "normalize_int8_reduction_backend",
     "normalize_wavefield_compression",
     "normalize_wavefield_conversion_backend",
+    "normalize_wavefield_rhs_history",
     "normalize_wavefield_storage_dtype",
+    "resolve_rhs_reconstruction",
     "saved_history_shape",
     "saved_time_steps",
 ]

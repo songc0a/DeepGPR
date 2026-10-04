@@ -131,6 +131,17 @@ WAVEFIELD_STORAGE_FLOAT16: Final[int] = 1
 WAVEFIELD_STORAGE_BFLOAT16: Final[int] = 2
 WAVEFIELD_STORAGE_INT8: Final[int] = 3
 
+#: Bits 0-3 of ``storage_type`` hold the storage code; bits 4-7 are history flags.
+WAVEFIELD_STORAGE_KIND_MASK: Final[int] = 0x0F
+
+#: History flag: store only E^n (sampling interval 1). ``R_saved`` receives the
+#: final E^nt frame and the adjoint rebuilds R^n = (E^(n+1) - ca E^n) / cb.
+#: Only set when the library reports ``deepgpr_supports_rhs_reconstruction``.
+WAVEFIELD_RHS_FROM_E: Final[int] = 1 << 4
+
+#: Accepted values of ``wavefield_rhs_history``.
+WAVEFIELD_RHS_HISTORY_MODES: Final[Tuple[str, ...]] = ("auto", "stored", "reconstructed")
+
 #: Bit offsets and mask of the INT8 block shape inside ``storage_type``.
 INT8_BLOCK_X_SHIFT: Final[int] = 8
 INT8_BLOCK_Y_SHIFT: Final[int] = 14
@@ -240,8 +251,11 @@ __all__ = [
     "WAVEFIELD_CONVERSION_BACKENDS",
     "WAVEFIELD_CONVERSION_SHIFT",
     "WAVEFIELD_HISTORY_DISABLED",
+    "WAVEFIELD_RHS_FROM_E",
+    "WAVEFIELD_RHS_HISTORY_MODES",
     "WAVEFIELD_STORAGE_BFLOAT16",
     "WAVEFIELD_STORAGE_FLOAT16",
     "WAVEFIELD_STORAGE_FLOAT32",
     "WAVEFIELD_STORAGE_INT8",
+    "WAVEFIELD_STORAGE_KIND_MASK",
 ]

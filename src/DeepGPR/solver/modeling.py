@@ -25,10 +25,12 @@ from ..config.defaults import (
     DEFAULT_RECEIVER_COMPONENT,
     DEFAULT_SOURCE_COMPONENT,
     DEFAULT_WAVEFIELD_COMPRESSION,
+    DEFAULT_WAVEFIELD_RHS_HISTORY,
 )
 from ..postprocessing.io import normalize_forward_wavefield_directory, save_forward_wavefield
 from ..preprocessing.grid import normalize_grid_spacing
 from ..preprocessing.model_setup import PreparedModel, _shift_locations, initialization
+from ..native.loader import get_deepgpr_lib, library_supports
 from ..utils.logger import get_logger
 from ..utils.validators import require_bool
 from .autograd import DeepGPR, SolverConfig, SolverTensors
@@ -42,7 +44,9 @@ from .storage import (
     normalize_int8_reduction_backend,
     normalize_wavefield_compression,
     normalize_wavefield_conversion_backend,
+    normalize_wavefield_rhs_history,
     normalize_wavefield_storage_dtype,
+    resolve_rhs_reconstruction,
     saved_history_shape,
     saved_time_steps,
 )
@@ -250,6 +254,7 @@ def compute(
     wavefield_conversion_backend=DEFAULT_CONVERSION_BACKEND,
     int8_reduction_backend=DEFAULT_INT8_REDUCTION_BACKEND,
     wavefield_compression_rate=None,
+    wavefield_rhs_history=DEFAULT_WAVEFIELD_RHS_HISTORY,
 ):
     """Run 2D/3D FDTD forward modelling of Maxwell's equations with autograd.
 
@@ -310,6 +315,13 @@ def compute(
         int8_reduction_backend: CUDA INT8 reduction: ``"auto"``,
             ``"current"``, ``"cub_block"`` or ``"warp_shuffle"``.
         wavefield_compression_rate: Reserved for an optional ZFP backend.
+        wavefield_rhs_history: ``"auto"`` (default) stores only the E history
+            for float32 storage with sampling interval 1 and rebuilds
+            ``R^n = (E^(n+1) - ca E^n) / cb`` in the adjoint (half the history
+            memory; gradients unchanged up to rounding). Low-precision and INT8
+            histories keep the E+R pair. ``"stored"`` always keeps E+R;
+            ``"reconstructed"`` requests the E-only history for any storage
+            (sampling interval 1).
 
     Returns:
         ``(E_saved, (Ex, Ey, Ez), (Hx, Hy, Hz), PML, receiver_amplitudes)``
@@ -361,6 +373,7 @@ def compute(
         use_async_offload,
         output_directory is not None,
     )
+    wavefield_rhs_history = normalize_wavefield_rhs_history(wavefield_rhs_history)
     if source_direction not in FIELD_COMPONENTS or receiver_component not in FIELD_COMPONENTS:
         raise ValueError("source_direction and receiver_component must be 0, 1, or 2.")
     if getattr(mu_r, "requires_grad", False):
@@ -410,6 +423,26 @@ def compute(
         dt,
         save_wavefield_history and needs_model_gradient,
     )
+    stores_model_history = save_wavefield_history and needs_model_gradient
+    lossless_storage = (
+        wavefield_compression == "none" and wavefield_storage_dtype == torch.float32
+    )
+    probe_library = (
+        stores_model_history
+        and model_gradient_sampling_interval == 1
+        and (
+            wavefield_rhs_history == "reconstructed"
+            or (wavefield_rhs_history == "auto" and lossless_storage)
+        )
+    )
+    reconstruct_rhs = resolve_rhs_reconstruction(
+        wavefield_rhs_history,
+        sampling_interval=model_gradient_sampling_interval,
+        stores_model_history=stores_model_history,
+        library_supported=probe_library
+        and library_supports(get_deepgpr_lib(device), "deepgpr_supports_rhs_reconstruction"),
+        lossless_storage=lossless_storage,
+    )
     if (
         save_wavefield_history
         and needs_model_gradient
@@ -451,6 +484,7 @@ def compute(
                 wavefield_compression=wavefield_compression,
                 wavefield_compression_block_size=compression_block_size,
                 save_wavefield_history=save_wavefield_history,
+                reconstruct_rhs=reconstruct_rhs,
                 use_async_offload=use_async_offload,
                 fdtd_order=fdtd_order,
                 mode=mode,
@@ -500,6 +534,7 @@ def compute(
         fdtd_order=fdtd_order,
         mode=mode,
         debug=bool(debug),
+        reconstruct_rhs=reconstruct_rhs,
     )
     tensors = SolverTensors(
         mu_r_pad=mu_r_pad,
