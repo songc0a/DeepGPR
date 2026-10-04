@@ -1,0 +1,40 @@
+3D forward-only medians (ms), CUDA events, 3 warmups + 10 runs, order 4, mode 3, uniform eps_r=4,
+sigma=1e-3, 1 shot, 16 receivers; script fwd_time_pml.py (args: SRC PML MODES N NT).
+prev = item 5 tree (separate update / CPML / snapshot kernels); allfused = first item-6 build
+(CPML and E-snapshot fused into the update kernels on every path). Two interleaved batches each.
+
+N=80 physical, nt=500, CPML faces x/y only (pml 10,10,10,10,0,0)
+pml=10,10,10,10,0,0 prev b1 fdtd=24.60 fp32=33.13 fp16=45.05 int8=74.91
+pml=10,10,10,10,0,0 allfused b1 fdtd=21.47 fp32=25.03 fp16=38.69 int8=71.95
+pml=10,10,10,10,0,0 prev b2 fdtd=24.63 fp32=33.12 fp16=45.15 int8=74.84
+pml=10,10,10,10,0,0 allfused b2 fdtd=21.31 fp32=24.55 fp16=38.34 int8=71.77
+N=80, nt=500, CPML faces z only (pml 0,0,0,0,10,10)
+pml=0,0,0,0,10,10 prev b1 fdtd=19.81 fp32=26.97 fp16=36.88 int8=61.72
+pml=0,0,0,0,10,10 allfused b1 fdtd=18.36 fp32=21.19 fp16=32.37 int8=60.32
+pml=0,0,0,0,10,10 prev b2 fdtd=19.74 fp32=27.17 fp16=37.04 int8=61.65
+pml=0,0,0,0,10,10 allfused b2 fdtd=18.65 fp32=21.15 fp16=32.45 int8=60.37
+N=80, nt=500, all six faces (pml 10)
+pml=10,10,10,10,10,10 prev b1 fdtd=35.89 fp32=48.71 fp16=76.58 int8=108.47
+pml=10,10,10,10,10,10 allfused b1 fdtd=31.95 fp32=42.35 fp16=85.50 int8=111.63
+pml=10,10,10,10,10,10 prev b2 fdtd=35.70 fp32=48.74 fp16=76.48 int8=108.19
+pml=10,10,10,10,10,10 allfused b2 fdtd=32.15 fp32=42.63 fp16=85.61 int8=111.94
+N=120 (140^3 cells), nt=300, all six faces (pml 10)
+120^3 prev b1 fdtd=120.17 fp32=142.03 fp16=187.77 int8=225.48
+120^3 allfused b1 fdtd=127.90 fp32=153.28 fp16=182.39 int8=233.51
+120^3 prev b2 fdtd=121.92 fp32=143.08 fp16=188.69 int8=229.08
+120^3 allfused b2 fdtd=126.89 fp32=146.51 fp16=184.70 int8=230.56
+N=60 (80^3 cells), nt=500, all six faces (pml 10)
+60^3 prev b1 fdtd=23.84 fp32=30.68 fp16=40.17 int8=59.22
+60^3 allfused b1 fdtd=20.68 fp32=22.94 fp16=32.72 int8=57.25
+60^3 prev b2 fdtd=24.30 fp32=30.71 fp16=38.86 int8=59.82
+60^3 allfused b2 fdtd=20.81 fp32=23.14 fp16=32.83 int8=56.11
+
+Formal 3D case (benchmark_wavefield_compression.py, 80^3 + PML 10, order 2, nt 500, forward-only,
+default protocol), separating the two forward fusions; nosave = allfused with the E-snapshot
+fusion disabled (CPML fusion only):
+prev b1 fdtd=31.84 fp32=60.08 fp16=91.80 int8=119.47
+allfused b1 fdtd=28.20 fp32=63.42 fp16=103.02 int8=125.34
+nosave b1 fdtd=28.09 fp32=62.54 fp16=100.27 int8=124.79
+prev b2 fdtd=31.84 fp32=63.29 fp16=91.05 int8=119.14
+allfused b2 fdtd=28.03 fp32=62.77 fp16=102.01 int8=125.80
+nosave b2 fdtd=28.08 fp32=61.41 fp16=101.67 int8=125.27

@@ -1,0 +1,11 @@
+native_library=/home/ll/下载/DeepGPR-dev/src/DeepGPR/lib/deepgpr.so
+case nx=80 ny=80 nt=500 shots=1 receivers=16 sampling_interval=1
+case_extra nz=80 gradient_mode=3 order=2 pml=10 compute_kwargs={}
+mode,forward_mean_ms,forward_median_ms,forward_min_ms,forward_std_ms,wall_median_ms,peak_MiB,history_MiB
+fdtd,27.964346,27.980801,27.470848,0.226585,28.047465,81.01,0.00
+fp32,63.138451,62.795233,52.661377,7.807237,62.866797,5815.06,5733.49
+fp16,102.769893,102.852608,101.377213,0.675051,102.965031,5805.01,5722.05
+int8,125.654473,125.724670,124.383522,0.695412,125.814934,3121.01,3039.84
+fdtd_vs_fp32_data_relative_l2=0.000000000e+00
+fdtd_vs_fp32_data_max_abs=0.000000000e+00
+fp32_history_overhead_ms=34.814432 percentage=124.423%

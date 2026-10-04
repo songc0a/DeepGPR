@@ -277,7 +277,7 @@ The CUDA backend uses this automatically: when the model is 2D,
 `source_direction=2`, and Ex, Ey, Hz and the CPML auxiliaries that couple them
 (`x0/xm/y0/ym` E-phi1 and H-phi2) are zero, the forward and adjoint kernels
 launch only for the `k = 0` layer and only update/transpose Ez, Hx and Hy;
-CPML kernels skip the z faces. States created by DeepGPR (`E`, `H`, `PML` left
+the CPML corrections skip the z faces. States created by DeepGPR (`E`, `H`, `PML` left
 as `None`) qualify without a check; caller-supplied states are checked once
 (one device synchronisation). Every other call — a non-Ez source, or a
 non-zero Ex/Ey/Hz state or coupled CPML auxiliary — silently uses the general

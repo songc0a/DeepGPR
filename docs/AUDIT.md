@@ -273,7 +273,10 @@ structure (several variants: phi-sized scratch, on-the-fly CPML weights,
 per-component threads, interior fast path) was correct but 5-25 % slower than
 the atomic scatter on the RTX 4090, so the general path keeps the scatter and
 `deepgpr_deterministic_adjoint()` stays 0. Measurements:
-`tests/profiling_results/history_adjoint_gpu_report.md` §5.
+`tests/profiling_results/history_adjoint_gpu_report.md` §5. The scatter path
+now applies each cell's CPML transpose inside `adjoint_e_gpu` /
+`adjoint_h_gpu` (§6), which removes two launches per reverse step but keeps
+the atomics.
 
 ### N-8 Per-call CUDA resources (Performance, Recommended)
 The async-offload path creates two streams, four events and staging buffers

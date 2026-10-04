@@ -64,6 +64,18 @@ the material Taylor test, and the fast-path selection rules (non-Ez source,
 non-zero Ey, non-zero coupled CPML auxiliary) with bitwise forward identity
 against the general kernels.
 
+`test_cuda_fused_kernels.py` covers the fused CUDA kernels (2D TM path: CPML
+corrections inside the update kernels and E history written by
+`update_h_gpu`; general path: CPML transposes inside the scatter adjoint) and
+the separate kernels of the general forward: every saved float32 frame equals the
+E field of a separate run stopped after that many steps (2D/3D with
+asymmetric CPML, resident and async histories, extended and physical regions,
+sampling intervals 1 and 3); fused float16/bfloat16 histories equal those of
+the separate `native_vec2` writer bitwise; final fields and receiver data do
+not depend on the history writer (none, fp32, fp16 async, INT8, physical E+R);
+and a run split in two segments reproduces the full run's data and all 30
+states bitwise.
+
 `test_external_pml.py` verifies automatic edge replication against an explicitly
 extended native-grid reference in 2D and 3D, asymmetric and disabled faces,
 orders 2/4/8, model-edge gradients, physical coordinate validation, and state

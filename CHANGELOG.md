@@ -56,6 +56,22 @@ Measurements, protocol and per-item decisions:
   the atomic scatter, which measured faster than a gather there;
   `deepgpr_deterministic_adjoint()` stays 0. Gradients differ from the
   previous release at rounding level only.
+- CUDA kernel fusion on the 2D TM fast path: each cell's CPML corrections run
+  inside `update_e_gpu` / `update_h_gpu` right after its base update (same
+  face order and arithmetic; the other field is read only), and float32 /
+  float16 / bfloat16 E histories are written by `update_h_gpu`, where E is not
+  modified. Forward launches per time step drop from 6 to 3 (2D forward
+  11-18 % faster; with INT8 histories 6-10 %). INT8 and `native_vec2`
+  histories and the stored-R snapshot keep their own kernels. The general
+  (3D) forward keeps separate CPML and snapshot kernels: fused, it was faster
+  on small 3D grids but up to 8 % slower on a 140^3 grid. The general scatter
+  adjoint applies the CPML transposes inside `adjoint_e_gpu` /
+  `adjoint_h_gpu` (6 to 4 launches per reverse step; 3D fp32 backward about
+  3.5 % faster, other storage modes within noise). Receiver data, states and
+  histories are bitwise unchanged; 2D TM gradients are bitwise unchanged, 3D
+  gradients change at atomic-ordering level only. The material-gradient
+  kernel stays separate (it reduces over shots per cell in a fixed order and
+  runs only every `S` steps).
 
 ### Changed
 

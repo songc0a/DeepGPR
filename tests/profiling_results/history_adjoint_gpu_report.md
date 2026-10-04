@@ -539,3 +539,163 @@ the 3D gather competitive would need shared-memory tiling of the source
 lines; that is left as a follow-up.
 
 Full suite: 138 tests, all passed (1 skipped).
+
+## 6. CUDA: kernel fusion
+
+**Default:** yes on the 2D TM fast path forward (CPML corrections and the E
+snapshot run inside the update kernels) and on the general (scatter) adjoint
+(CPML transposes inside `adjoint_e_gpu` / `adjoint_h_gpu`). **No** for the
+general (3D) forward, which keeps its separate CPML and snapshot kernels: fused,
+it was faster on small 3D grids but slower on the formal 3D case for
+low-precision/INT8 histories and on a larger 3D grid for every mode (see
+"Variant measured and rejected"). The material-gradient kernel is not fused.
+
+### Implementation
+
+- `cpml_e_cell` / `cpml_h_cell` hold the per-cell body of the former
+  `cpml_e_gpu` / `cpml_h_gpu`: faces in the order x0, xm, y0, ym, z0, zm, the
+  other field read only. `update_e_gpu<ORDER, 1>` and
+  `update_h_gpu<ORDER, 1, SAVE>` call them right after the base update of the
+  same cell; the thread owns the cell and the CPML reads only the field the
+  kernel does not write, so the result equals the former two-pass order. The
+  general path launches `cpml_e_gpu` / `cpml_h_gpu`, now thin wrappers that map
+  the six disjoint CPML boxes to cells and call the same functions (a single
+  CPML implementation for both paths).
+- E history on the 2D TM path: `update_h_gpu<..., SAVE = 1>` stores `E^n`
+  (scalar float32 / float16 / bfloat16, resident history or async staging
+  slot, extended or physical box, plus the float32 exact copy that low-precision
+  E+R histories need). E is not written during the H half step, so this is the
+  value the former `save_e_snapshot_gpu`, launched just before `update_h_gpu`,
+  stored. INT8 (tile reductions), `native_vec2` (two cells per thread) and the
+  stored-R snapshot (needs `E^(n+1)`) keep their kernels.
+- Source injection and receiver sampling stay in `inject_sources_and_sample_gpu`
+  after `update_e_gpu`, i.e. after the E CPML corrections.
+- Scatter adjoint: `adjoint_cpml_e_cell` / `adjoint_cpml_h_cell` run before the
+  base transpose of the same cell. They read only the cell's own cotangent
+  (which that thread scales afterwards) and add onto the other field with the
+  same `atomicAdd`s as before, only in a different order. The 2D TM gather path
+  is unchanged: its CPML weights must be complete before neighbours gather them.
+- Not fused: `accumulate_material_gradients_*` runs one thread per history cell
+  and sums the shots in a fixed loop (deterministic), only every `S` steps; the
+  INT8 variant uses tile-mapped threads. The adjoint kernels run one thread per
+  (cell, shot), so fusing would need atomics over shots or per-shot gradient
+  buffers (losing the 2D TM determinism or adding memory) for a kernel that is
+  not launched at every step when `S > 1`.
+- Rounding: a first version that kept the field values in registers across the
+  base update and the CPML corrections changed which product the compiler
+  contracted into an FMA in `ue0 * E + ue1 * dH - ...` (both are legal), and the
+  forward differed by up to 3e-4 even without CPML. The final kernels keep the
+  memory form of the old expressions; every forward comparison below is
+  bitwise.
+
+Kernel launches per time step (forward / reverse), from the Nsight instance
+counts:
+
+| path | item 5 | item 6 |
+|---|---:|---:|
+| 2D TM, fp32 E-only history (`update_h`, `cpml_h`, `update_e`, `cpml_e`, inject, `save_e` → `update_h`+save, `update_e`+CPML, inject) | 6 / 6 | 3 / 6 |
+| 3D general, mode 3 fp32 (reverse: receivers, gradient, `adjoint_cpml_e`, `adjoint_e`, `adjoint_cpml_h`, `adjoint_h`) | 8 / 6 | 8 / 4 |
+
+### Correctness
+
+| check | result |
+|---|---|
+| 114-case dump vs item 5 (2D/3D, orders 2/4/8, fp32/fp16/bf16/int8/fp16 `native_vec2`, resident/async/physical/stored R) | receiver data, all 30 final states and the E/R/final-E histories bitwise; 2D gradients bitwise; 3D gradients ≤ 3.7e-7 relative (atomic order) |
+| formal benchmark captures, current vs item 5 and vs baseline, both batches | data bitwise in every mode; 2D gradients bitwise vs item 5 (1.2-1.8e-7 vs baseline, item 5's gather); 3D gradients 3e-7 (ε) / 6e-6 to 1.5e-5 (σ), the same as current b1 vs b2 |
+| new `test_cuda_fused_kernels.py` | every saved fp32 frame equals the E field of a run stopped after that many steps (2D/3D, asymmetric CPML, resident/async, extended/physical, S = 1 and 3); fused fp16/bf16 histories equal the `native_vec2` writer bitwise; final fields and data independent of the history writer; a two-segment run reproduces the full run's data and 30 states bitwise |
+| existing dot-product (2D/3D, all faces, asymmetric), Taylor (CPU/CUDA), CPU/CUDA consistency, 2D TM determinism and selection tests | pass at the original thresholds; no existing test was changed |
+
+### Performance (formal protocol, current vs item 5 vs baseline, two interleaved rounds)
+
+Raw: `history_adjoint_ab/item6_{cur,prev,base}_b{1,2}`.
+
+| case | mode | metric | item 5 (b1 / b2) | item 6 (b1 / b2) | vs item 5 | vs baseline |
+|---|---|---|---:|---:|---:|---:|
+| 2D fwd-only | fdtd | forward | 49.76 / 48.02 | 42.12 / 41.99 | -15.4 % / -12.6 % | -34.5 % / -34.4 % |
+| 2D fwd-only | fp32 | forward | 64.93 / 63.73 | 53.27 / 52.95 | -18.0 % / -16.9 % | -75.0 % / -74.9 % |
+| 2D fwd-only | fp16 | forward | 80.00 / 77.62 | 68.96 / 69.02 | -13.8 % / -11.1 % | -27.8 % / -27.5 % |
+| 2D fwd-only | int8 | forward | 105.25 / 100.43 | 94.48 / 94.73 | -10.2 % / -5.7 % | -18.4 % / -18.3 % |
+| 2D full | fp32 | forward | 64.58 / 63.71 | 53.90 / 52.76 | -16.5 % / -17.2 % | -74.3 % / -74.9 % |
+| | | backward | 69.08 / 67.70 | 68.10 / 68.18 | -1.4 % / +0.7 % | -48.3 % / -48.3 % |
+| | | total | 133.53 / 131.58 | 122.00 / 120.86 | -8.6 % / -8.1 % | -64.2 % / -64.6 % |
+| 2D full | fp16 | total | 147.65 / 145.22 | 136.99 / 136.62 | -7.2 % / -5.9 % | -38.0 % / -37.9 % |
+| 2D full | bf16 | total | 144.99 / 143.53 | 135.09 / 134.40 | -6.8 % / -6.4 % | -38.9 % / -39.0 % |
+| 2D full | int8 | total | 174.95 / 167.73 | 162.82 / 162.27 | -6.9 % / -3.3 % | -33.2 % / -34.1 % |
+| 3D fwd-only | fdtd / fp32 / fp16 / int8 | forward | (item 5 kernels) | | -2.0 / +0.8, -3.8 / -4.2, -1.1 / +0.7, +3.2 / +1.3 % | |
+| 3D full | fp32 / fp16 / bf16 / int8 | forward | (item 5 kernels) | | -5.1 / +1.0, +0.3 / -0.7, -0.0 / -0.6, -1.6 / -1.8 % | |
+| 3D full | fp32 | backward | 82.18 / 81.01 | 79.15 / 78.30 | -3.7 % / -3.3 % | -1.6 % / -2.9 % |
+| | | total | 142.88 / 140.45 | 136.18 / 138.05 | -4.7 % / -1.7 % | -58.6 % / -58.2 % |
+| 3D full | fp16 / bf16 / int8 | backward | | | -1.4 % to +1.0 % (first all-fused batches: -3.3 % to -4.2 %) | |
+
+The 3D forward runs the item 5 kernels (identical register counts and launch
+sequence; only the update kernels take two extra by-value structs). Its fp32
+forward-only (-3.8 / -4.2 %) and int8 forward-only (+3.2 / +1.3 %) rows agree
+in sign across batches, but the int8 forward of the full-iteration case in the
+same batches moves the other way (-1.6 / -1.8 %), so these are read as
+batch-level noise, not as an effect of this item.
+
+The baseline's 2D fp32 forward is 210-213 ms in these batches against 95-119 ms
+in earlier ones: it allocates an 8.4 GiB E+R history inside the timed window
+(allocation caveat in §0); the current tree allocates half of that.
+
+Nsight Systems, fp32 full iteration, µs per time step (2D: 2400 steps, 3D:
+1000; `history_adjoint_ab/nsys/item6_{prev,final}_{2d,3d}_cuda_gpu_kern_sum.csv`):
+
+| kernel | 2D item 5 | 2D item 6 | 3D item 5 | 3D item 6 |
+|---|---:|---:|---:|---:|
+| `update_h_gpu` (2D: + CPML + E snapshot) | 15.49 | 19.76 | 13.18 | 11.73 |
+| `cpml_h_gpu` | 4.42 | - | 20.70 | 20.71 |
+| `update_e_gpu` (2D: + CPML) | 11.34 | 13.95 | 12.46 | 11.54 |
+| `cpml_e_gpu` | 4.60 | - | 21.28 | 18.68 |
+| `save_e_snapshot_gpu` | 6.10 | - | 21.35 | 19.39 |
+| `inject_sources_and_sample_gpu` | 1.79 | 1.76 | 1.72 | 1.64 |
+| forward kernels | 43.73 | 35.47 | 90.69 | 83.69 |
+| `adjoint_cpml_e_gpu` + `adjoint_e_gpu` | (gather, unchanged) | | 24.65 + 40.38 | 64.10 |
+| `adjoint_cpml_h_gpu` + `adjoint_h_gpu` | | | 22.97 + 40.45 | 60.16 |
+| kernel sum (ms) | 240.06 | 218.62 | 254.65 | 241.85 |
+
+The 3D forward kernels are the item 5 code; their per-step differences in this
+table are run-to-run variation. The fused 3D adjoint kernels take as long as the
+pairs they replace (order 2: 48 / 44 registers, against 26-30 for the base
+and 52-54 for the CPML kernels before);
+the gain is the two launches and the re-read of the cotangent per step.
+
+### Variant measured and rejected: fusion on the general (3D) forward
+
+The first item 6 build fused CPML and the E snapshot on every path. Its formal
+A/B (`history_adjoint_ab/item6_allfused_*`) matched the table above in 2D but
+not in 3D (forward vs item 5, b1 / b2): fdtd -11.4 % / -12.3 %, fp32 -2.1 % /
++4.5 %, fp16 +14.5 % / +12.2 %, int8 +7.5 % / +5.2 %; 3D full totals fp32
+-2.3 % / -2.2 %, fp16/bf16 +4.2 % to +5.2 %, int8 +1.5 % / +1.5 %. Separating
+the two forward fusions on the formal 3D case (CPML fusion only, snapshot kernels
+kept) gave fp16 100.3 / 101.7 ms against 91.8 / 91.1 ms for item 5, so the CPML
+fusion causes it. A size and face sweep (order 4, `item6_size_sweep/`):
+
+| 3D grid (cells incl. CPML), faces | fdtd | fp32 | fp16 | int8 |
+|---|---:|---:|---:|---:|
+| 80^3, all faces | -13.3 % / -14.4 % | -25.2 % / -24.6 % | -18.5 % / -15.5 % | -3.3 % / -6.2 % |
+| 100 x 100 x 80, x/y faces | -12.7 % / -13.5 % | -24.4 % / -25.9 % | -14.1 % / -15.1 % | -4.0 % / -4.1 % |
+| 80 x 80 x 100, z faces | -7.3 % / -5.5 % | -21.4 % / -22.2 % | -12.2 % / -12.4 % | -2.3 % / -2.1 % |
+| 100^3, all faces | -11.0 % / -9.9 % | -13.1 % / -12.5 % | +11.6 % / +11.9 % | +2.9 % / +3.5 % |
+| 140^3, all faces (nt 300) | +6.4 % / +4.1 % | +7.9 % / +2.4 % | -2.9 % / -2.1 % | +3.6 % / +0.6 % |
+
+A large 2D case (1536 x 1152 physical, 4 shots, nt 300) stays faster fused in
+every mode (fdtd -1.7 % / -1.9 %, fp32 -6.7 % / -6.2 %, fp16 -5.8 % / -6.0 %,
+int8 -1.7 % / -1.3 %). Nsight on the formal 3D case shows the fused update
+kernels slowing down with the history traffic while the separate pair does not:
+fused `update_e` 26.0 µs (fdtd) / 35.5 (fp32) / 42.7 (int8) / 55.7 (fp16)
+against `update_e` + `cpml_e` 30.8 / 31.5 / 36.7 / 42.2 µs. The SASS of the
+CPML part is the same in both forms (per face: coefficient loads, reload of
+the field, phi load, two stores), and the effect appears only when the 3D
+working set no longer fits the 72 MB L2, so without hardware counters
+(Nsight Compute is not permitted on this machine) the exact cause stays open.
+Because the general path is mostly used for large 3D models, it keeps the
+separate kernels.
+
+Also measured and rejected: `__launch_bounds__(256, 5)` / `(256, 6)` on the
+fused 3D adjoint kernels (44-48 / 40 registers, no spills) made them 1.2 % /
+1.5 % slower in Nsight (`nsys/item6_exp_launch_bounds{5,6}_3d_*`). On a
+140^3 3D case the adjoint fusion was neutral for fp32 (+0.4 % / -0.8 %) and
+-1.4 % / -1.9 % for fp16 backward (`item6_size_sweep/big3d_*`).
+
+Full suite: 142 tests, all passed (1 skipped).

@@ -631,6 +631,24 @@ struct CpmlArrays {
     } \
 } while (0)
 
+/* Per-component frame pointers of one saved E snapshot (host side). */
+struct Field3Pointers {
+    void* p[3];
+};
+
+/* update_h_gpu: stencil order, 2D TM path and (2D TM only) fused E-history write. */
+#define LAUNCH_ORDER_TM_SAVE_KERNEL(kernel, tm2d, save, grid, block, stream, order, ...) do { \
+    if (tm2d) { \
+        if ((order) == 8) kernel<8, 1, save><<<(grid), (block), 0, (stream)>>>(__VA_ARGS__); \
+        else if ((order) == 4) kernel<4, 1, save><<<(grid), (block), 0, (stream)>>>(__VA_ARGS__); \
+        else kernel<2, 1, save><<<(grid), (block), 0, (stream)>>>(__VA_ARGS__); \
+    } else { \
+        if ((order) == 8) kernel<8, 0, 0><<<(grid), (block), 0, (stream)>>>(__VA_ARGS__); \
+        else if ((order) == 4) kernel<4, 0, 0><<<(grid), (block), 0, (stream)>>>(__VA_ARGS__); \
+        else kernel<2, 0, 0><<<(grid), (block), 0, (stream)>>>(__VA_ARGS__); \
+    } \
+} while (0)
+
 /* Stencil order and 2D TM fast path (see SOLVER_TM2D) as template parameters. */
 #define LAUNCH_ORDER_TM_KERNEL(kernel, tm2d, grid, block, stream, order, ...) do { \
     if (tm2d) { \
@@ -1409,57 +1427,15 @@ __global__ void inject_sources_and_sample_gpu(
 
 
 /*
- * Base electric update. TM2D (2D TM fast path) updates only Ez on the k = 0
- * layer; the expression keeps its general form so the result is bitwise the
- * same as the general path for Ex = Ey = Hz = 0.
+ * Electric CPML corrections of one cell, applied after its base update in face
+ * order x0, xm, y0, ym, z0, zm; H is read only. Called from update_e_gpu on the
+ * 2D TM path and from cpml_e_gpu on the general path.
  */
 template<int ORDER, int TM2D>
-__global__ void update_e_gpu(
-    const float* __restrict__ ce_hist, const float* __restrict__ ce_curl,
-    float* __restrict__ Ex, float* __restrict__ Ey, float* __restrict__ Ez,
+__device__ __forceinline__ void cpml_e_cell(
+    long long s, long long i, long long j, long long k, long long idx, long long id4,
     const float* __restrict__ Hx, const float* __restrict__ Hy, const float* __restrict__ Hz,
-    CellGrid cells, int NX_FIELDS, int NY_FIELDS, int NZ_FIELDS,
-    float dx, float dy, float dz)
-{
-    long long ny_nz = (long long)NY_FIELDS * NZ_FIELDS;
-    long long id4, idx, i, j, k;
-    if (!cell_of_thread<TM2D>(cells, NY_FIELDS, NZ_FIELDS, &id4, &idx, &i, &j, &k)) return;
-
-    float ue0 = ce_hist[idx];
-    float ue1 = ce_curl[idx];
-    float ue_y = dy == dx ? ue1 : ue1 * dx / dy;
-    float ue_z = dz == dx ? ue1 : ue1 * dx / dz;
-
-    bool do_ex = !TM2D && (((NY_FIELDS - 1) != 1 || (NZ_FIELDS - 1) != 1) && i < (NX_FIELDS - 1) && j > 0 && j < (NY_FIELDS - 1) && k > 0 && k < (NZ_FIELDS - 1));
-    bool do_ey = !TM2D && (((NX_FIELDS - 1) != 1 || (NZ_FIELDS - 1) != 1) && i > 0 && i < (NX_FIELDS - 1) && j < (NY_FIELDS - 1) && k > 0 && k < (NZ_FIELDS - 1));
-    bool do_ez = (((NX_FIELDS - 1) != 1 || (NY_FIELDS - 1) != 1) && i > 0 && i < (NX_FIELDS - 1) && j > 0 && j < (NY_FIELDS - 1) && k < (NZ_FIELDS - 1));
-
-    if (do_ex) {
-        float dHz_dy = staggered_backward_diff_static<ORDER>(Hz, id4, NZ_FIELDS, j, NY_FIELDS);
-        float dHy_dz = staggered_backward_diff_static<ORDER>(Hy, id4, 1, k, NZ_FIELDS);
-        Ex[id4] = ue0 * Ex[id4] + ue_y * dHz_dy - ue_z * dHy_dz;
-    }
-    if (do_ey) {
-        float dHx_dz = staggered_backward_diff_static<ORDER>(Hx, id4, 1, k, NZ_FIELDS);
-        float dHz_dx = staggered_backward_diff_static<ORDER>(Hz, id4, ny_nz, i, NX_FIELDS);
-        Ey[id4] = ue0 * Ey[id4] + ue_z * dHx_dz - ue1 * dHz_dx;
-    }
-    if (do_ez) {
-        float dHy_dx = staggered_backward_diff_static<ORDER>(Hy, id4, ny_nz, i, NX_FIELDS);
-        float dHx_dy = staggered_backward_diff_static<ORDER>(Hx, id4, NZ_FIELDS, j, NY_FIELDS);
-        Ez[id4] = ue0 * Ez[id4] + ue1 * dHy_dx - ue_y * dHx_dy;
-    }
-}
-
-/*
- * Apply electric CPML boundary corrections after the base electric-field update.
- */
-template<int ORDER, int TM2D>
-__global__ void cpml_e_gpu(
-    float* __restrict__ Ex, float* __restrict__ Ey, float* __restrict__ Ez,  
-    const float* __restrict__ Hx, const float* __restrict__ Hy, const float* __restrict__ Hz,
-    float dx, float dy, float dz,
-    int step, int NX_FIELDS, int NY_FIELDS, int NZ_FIELDS,
+    float dx, float dy, float dz, int NX_FIELDS, int NY_FIELDS, int NZ_FIELDS,
     int pml0, int pml1, int pml2, int pml3, int pml4, int pml5,
     const float* __restrict__ x0ER, const float* __restrict__ xmER,
     const float* __restrict__ y0ER, const float* __restrict__ ymER,
@@ -1470,21 +1446,10 @@ __global__ void cpml_e_gpu(
     float* __restrict__ y0EPhi1, float* __restrict__ y0EPhi2,
     float* __restrict__ ymEPhi1, float* __restrict__ ymEPhi2,
     float* __restrict__ z0EPhi1, float* __restrict__ z0EPhi2,
-    float* __restrict__ zmEPhi1, float* __restrict__ zmEPhi2)
+    float* __restrict__ zmEPhi1, float* __restrict__ zmEPhi2,
+    float* __restrict__ Ex, float* __restrict__ Ey, float* __restrict__ Ez)
 {
     long long ny_nz = (long long)NY_FIELDS * NZ_FIELDS;
-    long long field_stride = (long long)NX_FIELDS * ny_nz;
-    long long region_work = (long long)blockIdx.x * blockDim.x + threadIdx.x;
-    int region = (int)blockIdx.y;
-    int s = (int)blockIdx.z;
-    long long i, j, k;
-    if (s >= step ||
-        !map_cpml_region_work<1>(region, region_work,
-        NX_FIELDS, NY_FIELDS, TM2D ? 1 : NZ_FIELDS,
-        pml0, pml1, pml2, pml3, pml4, pml5, &i, &j, &k)) return;
-    long long idx = i * ny_nz + j * NZ_FIELDS + k;
-    long long work = (long long)s * field_stride + idx;
-
     bool in_x0 = (pml0 > 0 && i > 0 && i <= pml0 && j < NY_FIELDS && k < NZ_FIELDS);
     bool in_xm = (pml1 > 0 && i >= NX_FIELDS - 1 - pml1 && i < NX_FIELDS - 1 && j < NY_FIELDS && k < NZ_FIELDS);
     bool in_y0 = (pml2 > 0 && i < NX_FIELDS && j > 0 && j <= pml2 && k < NZ_FIELDS);
@@ -1495,7 +1460,6 @@ __global__ void cpml_e_gpu(
 
     float upd = updatecoeffsE[idx];
 
-    long long id4 = work;
 
     {
         if (in_x0) {
@@ -1614,138 +1578,16 @@ __global__ void cpml_e_gpu(
     }
 }
 
-
 /*
- * Base magnetic update. TM2D updates only Hx and Hy on the k = 0 layer; their
- * z-derivative terms (of Ey and Ex, identically zero on that path) are kept
- * as literal zeros so the arithmetic matches the general path bitwise.
+ * Magnetic CPML corrections of one cell, applied after its base update in face
+ * order x0, xm, y0, ym, z0, zm; E is read only. Called from update_h_gpu on the
+ * 2D TM path and from cpml_h_gpu on the general path.
  */
 template<int ORDER, int TM2D>
-__global__ void update_h_gpu(
-    const float* __restrict__ ch_hist, const float* __restrict__ ch_curl,
+__device__ __forceinline__ void cpml_h_cell(
+    long long s, long long i, long long j, long long k, long long idx, long long id4,
     const float* __restrict__ Ex, const float* __restrict__ Ey, const float* __restrict__ Ez,
-    float* __restrict__ Hx, float* __restrict__ Hy, float* __restrict__ Hz,
-    CellGrid cells, int NX_FIELDS, int NY_FIELDS, int NZ_FIELDS,
-    float dx, float dy, float dz)
-{
-    long long ny_nz = (long long)NY_FIELDS * NZ_FIELDS;
-    long long id4, idx, i, j, k;
-    if (!cell_of_thread<TM2D>(cells, NY_FIELDS, NZ_FIELDS, &id4, &idx, &i, &j, &k)) return;
-
-    float uh0 = ch_hist[idx];
-    float uh1 = ch_curl[idx];
-    float uh_y = dy == dx ? uh1 : uh1 * dx / dy;
-    float uh_z = dz == dx ? uh1 : uh1 * dx / dz;
-
-    bool do_hx = ((NX_FIELDS - 1) != 1 && i > 0 && i < (NX_FIELDS - 1) && j < (NY_FIELDS - 1) && k < (NZ_FIELDS - 1));
-    bool do_hy = ((NY_FIELDS - 1) != 1 && i < (NX_FIELDS - 1) && j > 0 && j < (NY_FIELDS - 1) && k < (NZ_FIELDS - 1));
-    bool do_hz = !TM2D && ((NZ_FIELDS - 1) != 1 && i < (NX_FIELDS - 1) && j < (NY_FIELDS - 1) && k > 0 && k < (NZ_FIELDS - 1));
-
-    if (do_hx) {
-        float dEz_dy = staggered_forward_diff_static<ORDER>(Ez, id4, NZ_FIELDS, j, NY_FIELDS);
-        float dEy_dz = TM2D ? 0.0f : staggered_forward_diff_static<ORDER>(Ey, id4, 1, k, NZ_FIELDS);
-        Hx[id4] = uh0 * Hx[id4] - uh_y * dEz_dy + uh_z * dEy_dz;
-    }
-    if (do_hy) {
-        float dEx_dz = TM2D ? 0.0f : staggered_forward_diff_static<ORDER>(Ex, id4, 1, k, NZ_FIELDS);
-        float dEz_dx = staggered_forward_diff_static<ORDER>(Ez, id4, ny_nz, i, NX_FIELDS);
-        Hy[id4] = uh0 * Hy[id4] - uh_z * dEx_dz + uh1 * dEz_dx;
-    }
-    if (do_hz) {
-        float dEy_dx = staggered_forward_diff_static<ORDER>(Ey, id4, ny_nz, i, NX_FIELDS);
-        float dEx_dy = staggered_forward_diff_static<ORDER>(Ex, id4, NZ_FIELDS, j, NY_FIELDS);
-        Hz[id4] = uh0 * Hz[id4] - uh1 * dEy_dx + uh_y * dEx_dy;
-    }
-}
-
-/*
- * Transpose of the base electric update. TM2D transposes only the Ez update:
- * on that path Ex, Ey and Hz never feed back into Ez, Hx or Hy, so their
- * cotangents do not affect material or source gradients (they are returned
- * as zero).
- */
-template<int ORDER, int TM2D>
-__global__ void adjoint_e_gpu(
-    const float* ce_hist, const float* ce_curl,
-    float* lambda_ex, float* lambda_ey, float* lambda_ez, float* lambda_hx, float* lambda_hy, float* lambda_hz,
-    CellGrid cells, int NX, int NY, int NZ, float dx, float dy, float dz)
-{
-    long long ny_nz = (long long)NY * NZ;
-    long long work, idx, i, j, k;
-    if (!cell_of_thread<TM2D>(cells, NY, NZ, &work, &idx, &i, &j, &k)) return;
-    bool do_ex = !TM2D && (((NY - 1) != 1 || (NZ - 1) != 1) && i < NX - 1 && j > 0 && j < NY - 1 && k > 0 && k < NZ - 1);
-    bool do_ey = !TM2D && (((NX - 1) != 1 || (NZ - 1) != 1) && i > 0 && i < NX - 1 && j < NY - 1 && k > 0 && k < NZ - 1);
-    bool do_ez = (((NX - 1) != 1 || (NY - 1) != 1) && i > 0 && i < NX - 1 && j > 0 && j < NY - 1 && k < NZ - 1);
-    float coeff = ce_curl[idx];
-    float coeff_y = dy == dx ? coeff : coeff * dx / dy;
-    float coeff_z = dz == dx ? coeff : coeff * dx / dz;
-
-    if (do_ex) {
-        float value = lambda_ex[work];
-        add_staggered_backward_adjoint<ORDER>(lambda_hz, work, NZ, j, NY, coeff_y * value);
-        add_staggered_backward_adjoint<ORDER>(lambda_hy, work, 1, k, NZ, -coeff_z * value);
-        lambda_ex[work] = ce_hist[idx] * value;
-    }
-    if (do_ey) {
-        float value = lambda_ey[work];
-        add_staggered_backward_adjoint<ORDER>(lambda_hx, work, 1, k, NZ, coeff_z * value);
-        add_staggered_backward_adjoint<ORDER>(lambda_hz, work, ny_nz, i, NX, -coeff * value);
-        lambda_ey[work] = ce_hist[idx] * value;
-    }
-    if (do_ez) {
-        float value = lambda_ez[work];
-        add_staggered_backward_adjoint<ORDER>(lambda_hy, work, ny_nz, i, NX, coeff * value);
-        add_staggered_backward_adjoint<ORDER>(lambda_hx, work, NZ, j, NY, -coeff_y * value);
-        lambda_ez[work] = ce_hist[idx] * value;
-    }
-}
-
-/* Transpose of the base magnetic update; TM2D drops the z-derivative scatter. */
-template<int ORDER, int TM2D>
-__global__ void adjoint_h_gpu(
-    const float* ch_hist, const float* ch_curl,
-    float* lambda_ex, float* lambda_ey, float* lambda_ez, float* lambda_hx, float* lambda_hy, float* lambda_hz,
-    CellGrid cells, int NX, int NY, int NZ, float dx, float dy, float dz)
-{
-    long long ny_nz = (long long)NY * NZ;
-    long long work, idx, i, j, k;
-    if (!cell_of_thread<TM2D>(cells, NY, NZ, &work, &idx, &i, &j, &k)) return;
-    bool do_hx = ((NX - 1) != 1 && i > 0 && i < NX - 1 && j < NY - 1 && k < NZ - 1);
-    bool do_hy = ((NY - 1) != 1 && i < NX - 1 && j > 0 && j < NY - 1 && k < NZ - 1);
-    bool do_hz = !TM2D && ((NZ - 1) != 1 && i < NX - 1 && j < NY - 1 && k > 0 && k < NZ - 1);
-    float coeff = ch_curl[idx];
-    float coeff_y = dy == dx ? coeff : coeff * dx / dy;
-    float coeff_z = dz == dx ? coeff : coeff * dx / dz;
-
-    if (do_hx) {
-        float value = lambda_hx[work];
-        add_staggered_forward_adjoint<ORDER>(lambda_ez, work, NZ, j, NY, -coeff_y * value);
-        if (!TM2D) add_staggered_forward_adjoint<ORDER>(lambda_ey, work, 1, k, NZ, coeff_z * value);
-        lambda_hx[work] = ch_hist[idx] * value;
-    }
-    if (do_hy) {
-        float value = lambda_hy[work];
-        if (!TM2D) add_staggered_forward_adjoint<ORDER>(lambda_ex, work, 1, k, NZ, -coeff_z * value);
-        add_staggered_forward_adjoint<ORDER>(lambda_ez, work, ny_nz, i, NX, coeff * value);
-        lambda_hy[work] = ch_hist[idx] * value;
-    }
-    if (do_hz) {
-        float value = lambda_hz[work];
-        add_staggered_forward_adjoint<ORDER>(lambda_ey, work, ny_nz, i, NX, -coeff * value);
-        add_staggered_forward_adjoint<ORDER>(lambda_ex, work, NZ, j, NY, coeff_y * value);
-        lambda_hz[work] = ch_hist[idx] * value;
-    }
-}
-
-/*
- * Apply magnetic CPML boundary corrections after the base magnetic-field update.
- */
-template<int ORDER, int TM2D>
-__global__ void cpml_h_gpu(
-    const float* __restrict__ Ex, const float* __restrict__ Ey, const float* __restrict__ Ez,
-    float* __restrict__ Hx, float* __restrict__ Hy, float* __restrict__ Hz,
-    float dx, float dy, float dz,
-    int step, int NX_FIELDS, int NY_FIELDS, int NZ_FIELDS,
+    float dx, float dy, float dz, int NX_FIELDS, int NY_FIELDS, int NZ_FIELDS,
     int pml0, int pml1, int pml2, int pml3, int pml4, int pml5,
     const float* __restrict__ x0HR, const float* __restrict__ xmHR,
     const float* __restrict__ y0HR, const float* __restrict__ ymHR,
@@ -1756,21 +1598,10 @@ __global__ void cpml_h_gpu(
     float* __restrict__ y0HPhi1, float* __restrict__ y0HPhi2,
     float* __restrict__ ymHPhi1, float* __restrict__ ymHPhi2,
     float* __restrict__ z0HPhi1, float* __restrict__ z0HPhi2,
-    float* __restrict__ zmHPhi1, float* __restrict__ zmHPhi2)
+    float* __restrict__ zmHPhi1, float* __restrict__ zmHPhi2,
+    float* __restrict__ Hx, float* __restrict__ Hy, float* __restrict__ Hz)
 {
     long long ny_nz = (long long)NY_FIELDS * NZ_FIELDS;
-    long long field_stride = (long long)NX_FIELDS * ny_nz;
-    long long region_work = (long long)blockIdx.x * blockDim.x + threadIdx.x;
-    int region = (int)blockIdx.y;
-    int s = (int)blockIdx.z;
-    long long i, j, k;
-    if (s >= step ||
-        !map_cpml_region_work<0>(region, region_work,
-        NX_FIELDS, NY_FIELDS, TM2D ? 1 : NZ_FIELDS,
-        pml0, pml1, pml2, pml3, pml4, pml5, &i, &j, &k)) return;
-    long long idx = i * ny_nz + j * NZ_FIELDS + k;
-    long long work = (long long)s * field_stride + idx;
-
     bool in_x0 = (pml0 > 0 && i < pml0 && j < NY_FIELDS && k < NZ_FIELDS);
     bool in_xm = (pml1 > 0 && i >= NX_FIELDS - 1 - pml1 && i < NX_FIELDS - 1 && j < NY_FIELDS && k < NZ_FIELDS);
     bool in_y0 = (pml2 > 0 && i < NX_FIELDS && j < pml2 && k < NZ_FIELDS);
@@ -1781,7 +1612,6 @@ __global__ void cpml_h_gpu(
 
     float upd = updatecoeffsH[idx];
 
-    long long id4 = work;
 
     {
         if (in_x0) {
@@ -1900,31 +1730,284 @@ __global__ void cpml_h_gpu(
     }
 }
 
-
-template<int ORDER, int TM2D>
-__global__ void adjoint_cpml_e_gpu(
-    float* lambda_ex, float* lambda_ey, float* lambda_ez, float* lambda_hx, float* lambda_hy, float* lambda_hz,
-    float dx, float dy, float dz, int step, int NX, int NY, int NZ,
+/*
+ * General-path CPML passes: one thread per cell of the six disjoint CPML boxes
+ * (see cpml_max_region_cells), applying the same per-cell corrections after
+ * the base update kernel.
+ */
+template<int ORDER>
+__global__ void cpml_e_gpu(
+    float* __restrict__ Ex, float* __restrict__ Ey, float* __restrict__ Ez,
+    const float* __restrict__ Hx, const float* __restrict__ Hy, const float* __restrict__ Hz,
+    float dx, float dy, float dz, int step, int NX_FIELDS, int NY_FIELDS, int NZ_FIELDS,
     int pml0, int pml1, int pml2, int pml3, int pml4, int pml5,
-    const float* x0R, const float* xmR, const float* y0R, const float* ymR,
-    const float* z0R, const float* zmR, const float* update,
-    float* x0P1, float* x0P2, float* xmP1, float* xmP2,
-    float* y0P1, float* y0P2, float* ymP1, float* ymP2,
-    float* z0P1, float* z0P2, float* zmP1, float* zmP2)
+    const float* __restrict__ x0ER, const float* __restrict__ xmER,
+    const float* __restrict__ y0ER, const float* __restrict__ ymER,
+    const float* __restrict__ z0ER, const float* __restrict__ zmER,
+    const float* __restrict__ updatecoeffsE,
+    float* __restrict__ x0EPhi1, float* __restrict__ x0EPhi2,
+    float* __restrict__ xmEPhi1, float* __restrict__ xmEPhi2,
+    float* __restrict__ y0EPhi1, float* __restrict__ y0EPhi2,
+    float* __restrict__ ymEPhi1, float* __restrict__ ymEPhi2,
+    float* __restrict__ z0EPhi1, float* __restrict__ z0EPhi2,
+    float* __restrict__ zmEPhi1, float* __restrict__ zmEPhi2)
 {
-    long long ny_nz = (long long)NY * NZ;
-    long long field_stride = (long long)NX * ny_nz;
+    long long ny_nz = (long long)NY_FIELDS * NZ_FIELDS;
     long long region_work = (long long)blockIdx.x * blockDim.x + threadIdx.x;
-    int region = (int)blockIdx.y;
     int s = (int)blockIdx.z;
     long long i, j, k;
     if (s >= step ||
-        !map_cpml_region_work<1>(region, region_work,
-        NX, NY, TM2D ? 1 : NZ, pml0, pml1, pml2, pml3, pml4, pml5,
-        &i, &j, &k)) return;
-    long long idx = i * ny_nz + j * NZ + k;
-    long long work = (long long)s * field_stride + idx;
-    float upd = update[idx];
+        !map_cpml_region_work<1>((int)blockIdx.y, region_work, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
+        pml0, pml1, pml2, pml3, pml4, pml5, &i, &j, &k)) return;
+    long long idx = i * ny_nz + j * NZ_FIELDS + k;
+    long long id4 = (long long)s * NX_FIELDS * ny_nz + idx;
+    cpml_e_cell<ORDER, 0>(s, i, j, k, idx, id4, Hx, Hy, Hz, dx, dy, dz,
+        NX_FIELDS, NY_FIELDS, NZ_FIELDS, pml0, pml1, pml2, pml3, pml4, pml5,
+        x0ER, xmER, y0ER, ymER, z0ER, zmER, updatecoeffsE,
+        x0EPhi1, x0EPhi2, xmEPhi1, xmEPhi2, y0EPhi1, y0EPhi2,
+        ymEPhi1, ymEPhi2, z0EPhi1, z0EPhi2, zmEPhi1, zmEPhi2, Ex, Ey, Ez);
+}
+
+template<int ORDER>
+__global__ void cpml_h_gpu(
+    const float* __restrict__ Ex, const float* __restrict__ Ey, const float* __restrict__ Ez,
+    float* __restrict__ Hx, float* __restrict__ Hy, float* __restrict__ Hz,
+    float dx, float dy, float dz, int step, int NX_FIELDS, int NY_FIELDS, int NZ_FIELDS,
+    int pml0, int pml1, int pml2, int pml3, int pml4, int pml5,
+    const float* __restrict__ x0HR, const float* __restrict__ xmHR,
+    const float* __restrict__ y0HR, const float* __restrict__ ymHR,
+    const float* __restrict__ z0HR, const float* __restrict__ zmHR,
+    const float* __restrict__ updatecoeffsH,
+    float* __restrict__ x0HPhi1, float* __restrict__ x0HPhi2,
+    float* __restrict__ xmHPhi1, float* __restrict__ xmHPhi2,
+    float* __restrict__ y0HPhi1, float* __restrict__ y0HPhi2,
+    float* __restrict__ ymHPhi1, float* __restrict__ ymHPhi2,
+    float* __restrict__ z0HPhi1, float* __restrict__ z0HPhi2,
+    float* __restrict__ zmHPhi1, float* __restrict__ zmHPhi2)
+{
+    long long ny_nz = (long long)NY_FIELDS * NZ_FIELDS;
+    long long region_work = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    int s = (int)blockIdx.z;
+    long long i, j, k;
+    if (s >= step ||
+        !map_cpml_region_work<0>((int)blockIdx.y, region_work, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
+        pml0, pml1, pml2, pml3, pml4, pml5, &i, &j, &k)) return;
+    long long idx = i * ny_nz + j * NZ_FIELDS + k;
+    long long id4 = (long long)s * NX_FIELDS * ny_nz + idx;
+    cpml_h_cell<ORDER, 0>(s, i, j, k, idx, id4, Ex, Ey, Ez, dx, dy, dz,
+        NX_FIELDS, NY_FIELDS, NZ_FIELDS, pml0, pml1, pml2, pml3, pml4, pml5,
+        x0HR, xmHR, y0HR, ymHR, z0HR, zmHR, updatecoeffsH,
+        x0HPhi1, x0HPhi2, xmHPhi1, xmHPhi2, y0HPhi1, y0HPhi2,
+        ymHPhi1, ymHPhi2, z0HPhi1, z0HPhi2, zmHPhi1, zmHPhi2, Hx, Hy, Hz);
+}
+
+/*
+ * E history write fused into update_h_gpu on the 2D TM path (E is unchanged
+ * during the H half step). dst[c] point at the current frame of component c (resident history
+ * or async staging slot), exact[c] at the optional float32 copy used by the
+ * R snapshot of low-precision E+R histories. Only scalar float32 / float16 /
+ * bfloat16 conversions are fused; INT8 and vec2 keep their own kernels.
+ */
+struct HistoryStore {
+    void* dst[3];
+    float* exact[3];
+    HistoryBox box;
+    int kind;
+    int backend;
+};
+
+__device__ __forceinline__ void store_history_value(
+    int kind, int backend, void* pointer, long long index, float value)
+{
+    if (kind == WAVEFIELD_FLOAT16) {
+        if (backend == WAVEFIELD_CONVERSION_LEGACY) {
+            store_wavefield_value_device<WAVEFIELD_FLOAT16, WAVEFIELD_CONVERSION_LEGACY>(pointer, index, value);
+        } else {
+            store_wavefield_value_device<WAVEFIELD_FLOAT16, WAVEFIELD_CONVERSION_NATIVE_SCALAR>(pointer, index, value);
+        }
+    } else if (kind == WAVEFIELD_BFLOAT16) {
+        if (backend == WAVEFIELD_CONVERSION_LEGACY) {
+            store_wavefield_value_device<WAVEFIELD_BFLOAT16, WAVEFIELD_CONVERSION_LEGACY>(pointer, index, value);
+        } else {
+            store_wavefield_value_device<WAVEFIELD_BFLOAT16, WAVEFIELD_CONVERSION_NATIVE_SCALAR>(pointer, index, value);
+        }
+    } else {
+        store_wavefield_value_device<WAVEFIELD_FLOAT32, WAVEFIELD_CONVERSION_LEGACY>(pointer, index, value);
+    }
+}
+
+/* CPML state of one field type passed to the fused update / adjoint kernels. */
+struct CpmlState {
+    const float* coeff[6];   /* x0, xm, y0, ym, z0, zm coefficient arrays */
+    float* phi[12];          /* x0P1, x0P2, xmP1, ..., zmP2 */
+    const float* update;     /* ce_rhs or ch_rhs */
+    int pml[6];
+    int active;              /* any face has a non-zero thickness */
+};
+
+/*
+ * Base electric update. TM2D (2D TM fast path) updates only Ez on the k = 0
+ * layer; the expression keeps its general form so the result is bitwise the
+ * same as the general path for Ex = Ey = Hz = 0.
+ */
+template<int ORDER, int TM2D>
+__global__ void update_e_gpu(
+    const float* __restrict__ ce_hist, const float* __restrict__ ce_curl,
+    float* __restrict__ Ex, float* __restrict__ Ey, float* __restrict__ Ez,
+    const float* __restrict__ Hx, const float* __restrict__ Hy, const float* __restrict__ Hz,
+    CellGrid cells, int NX_FIELDS, int NY_FIELDS, int NZ_FIELDS,
+    float dx, float dy, float dz, CpmlState cpml)
+{
+    long long ny_nz = (long long)NY_FIELDS * NZ_FIELDS;
+    long long id4, idx, i, j, k;
+    if (!cell_of_thread<TM2D>(cells, NY_FIELDS, NZ_FIELDS, &id4, &idx, &i, &j, &k)) return;
+
+    float ue0 = ce_hist[idx];
+    float ue1 = ce_curl[idx];
+    float ue_y = dy == dx ? ue1 : ue1 * dx / dy;
+    float ue_z = dz == dx ? ue1 : ue1 * dx / dz;
+
+    bool do_ex = !TM2D && (((NY_FIELDS - 1) != 1 || (NZ_FIELDS - 1) != 1) && i < (NX_FIELDS - 1) && j > 0 && j < (NY_FIELDS - 1) && k > 0 && k < (NZ_FIELDS - 1));
+    bool do_ey = !TM2D && (((NX_FIELDS - 1) != 1 || (NZ_FIELDS - 1) != 1) && i > 0 && i < (NX_FIELDS - 1) && j < (NY_FIELDS - 1) && k > 0 && k < (NZ_FIELDS - 1));
+    bool do_ez = (((NX_FIELDS - 1) != 1 || (NY_FIELDS - 1) != 1) && i > 0 && i < (NX_FIELDS - 1) && j > 0 && j < (NY_FIELDS - 1) && k < (NZ_FIELDS - 1));
+
+    if (do_ex) {
+        float dHz_dy = staggered_backward_diff_static<ORDER>(Hz, id4, NZ_FIELDS, j, NY_FIELDS);
+        float dHy_dz = staggered_backward_diff_static<ORDER>(Hy, id4, 1, k, NZ_FIELDS);
+        Ex[id4] = ue0 * Ex[id4] + ue_y * dHz_dy - ue_z * dHy_dz;
+    }
+    if (do_ey) {
+        float dHx_dz = staggered_backward_diff_static<ORDER>(Hx, id4, 1, k, NZ_FIELDS);
+        float dHz_dx = staggered_backward_diff_static<ORDER>(Hz, id4, ny_nz, i, NX_FIELDS);
+        Ey[id4] = ue0 * Ey[id4] + ue_z * dHx_dz - ue1 * dHz_dx;
+    }
+    if (do_ez) {
+        float dHy_dx = staggered_backward_diff_static<ORDER>(Hy, id4, ny_nz, i, NX_FIELDS);
+        float dHx_dy = staggered_backward_diff_static<ORDER>(Hx, id4, NZ_FIELDS, j, NY_FIELDS);
+        Ez[id4] = ue0 * Ez[id4] + ue1 * dHy_dx - ue_y * dHx_dy;
+    }
+    /* 2D TM path: CPML corrections of this cell right after its base update
+     * (the same thread owns the cell, H is read only). The general path runs
+     * them in cpml_e_gpu, which measured faster on large 3D grids. */
+    if (TM2D && cpml.active) {
+        cpml_e_cell<ORDER, TM2D>(blockIdx.y, i, j, k, idx, id4, Hx, Hy, Hz, dx, dy, dz,
+            NX_FIELDS, NY_FIELDS, NZ_FIELDS,
+            cpml.pml[0], cpml.pml[1], cpml.pml[2], cpml.pml[3], cpml.pml[4], cpml.pml[5],
+            cpml.coeff[0], cpml.coeff[1], cpml.coeff[2], cpml.coeff[3], cpml.coeff[4], cpml.coeff[5],
+            cpml.update,
+            cpml.phi[0], cpml.phi[1], cpml.phi[2], cpml.phi[3], cpml.phi[4], cpml.phi[5],
+            cpml.phi[6], cpml.phi[7], cpml.phi[8], cpml.phi[9], cpml.phi[10], cpml.phi[11],
+            Ex, Ey, Ez);
+    }
+}
+
+/*
+ * Base magnetic update. TM2D updates only Hx and Hy on the k = 0 layer; their
+ * z-derivative terms (of Ey and Ex, identically zero on that path) are kept
+ * as literal zeros so the arithmetic matches the general path bitwise.
+ */
+template<int ORDER, int TM2D, int SAVE>
+__global__ void update_h_gpu(
+    const float* __restrict__ ch_hist, const float* __restrict__ ch_curl,
+    const float* __restrict__ Ex, const float* __restrict__ Ey, const float* __restrict__ Ez,
+    float* __restrict__ Hx, float* __restrict__ Hy, float* __restrict__ Hz,
+    CellGrid cells, int NX_FIELDS, int NY_FIELDS, int NZ_FIELDS,
+    float dx, float dy, float dz, CpmlState cpml, HistoryStore history)
+{
+    long long ny_nz = (long long)NY_FIELDS * NZ_FIELDS;
+    long long id4, idx, i, j, k;
+    if (!cell_of_thread<TM2D>(cells, NY_FIELDS, NZ_FIELDS, &id4, &idx, &i, &j, &k)) return;
+
+    float uh0 = ch_hist[idx];
+    float uh1 = ch_curl[idx];
+    float uh_y = dy == dx ? uh1 : uh1 * dx / dy;
+    float uh_z = dz == dx ? uh1 : uh1 * dx / dz;
+
+    bool do_hx = ((NX_FIELDS - 1) != 1 && i > 0 && i < (NX_FIELDS - 1) && j < (NY_FIELDS - 1) && k < (NZ_FIELDS - 1));
+    bool do_hy = ((NY_FIELDS - 1) != 1 && i < (NX_FIELDS - 1) && j > 0 && j < (NY_FIELDS - 1) && k < (NZ_FIELDS - 1));
+    bool do_hz = !TM2D && ((NZ_FIELDS - 1) != 1 && i < (NX_FIELDS - 1) && j < (NY_FIELDS - 1) && k > 0 && k < (NZ_FIELDS - 1));
+
+    if (SAVE) {
+        /* E^n history (E does not change during the H half step). */
+        long long hi = i - history.box.x0, hj = j - history.box.y0, hk = k - history.box.z0;
+        if (hi >= 0 && hi < history.box.nx && hj >= 0 && hj < history.box.ny
+            && hk >= 0 && hk < history.box.nz) {
+            long long box_cells = (long long)history.box.nx * history.box.ny * history.box.nz;
+            long long work = (long long)blockIdx.y * box_cells
+                + (hi * history.box.ny + hj) * history.box.nz + hk;
+            const float* components[3] = {Ex, Ey, Ez};
+#pragma unroll
+            for (int c = 0; c < 3; ++c) {
+                if (history.dst[c] != nullptr) {
+                    float value = components[c][id4];
+                    store_history_value(history.kind, history.backend, history.dst[c], work, value);
+                    if (history.exact[c] != nullptr) history.exact[c][work] = value;
+                }
+            }
+        }
+    }
+
+    if (do_hx) {
+        float dEz_dy = staggered_forward_diff_static<ORDER>(Ez, id4, NZ_FIELDS, j, NY_FIELDS);
+        float dEy_dz = TM2D ? 0.0f : staggered_forward_diff_static<ORDER>(Ey, id4, 1, k, NZ_FIELDS);
+        Hx[id4] = uh0 * Hx[id4] - uh_y * dEz_dy + uh_z * dEy_dz;
+    }
+    if (do_hy) {
+        float dEx_dz = TM2D ? 0.0f : staggered_forward_diff_static<ORDER>(Ex, id4, 1, k, NZ_FIELDS);
+        float dEz_dx = staggered_forward_diff_static<ORDER>(Ez, id4, ny_nz, i, NX_FIELDS);
+        Hy[id4] = uh0 * Hy[id4] - uh_z * dEx_dz + uh1 * dEz_dx;
+    }
+    if (do_hz) {
+        float dEy_dx = staggered_forward_diff_static<ORDER>(Ey, id4, ny_nz, i, NX_FIELDS);
+        float dEx_dy = staggered_forward_diff_static<ORDER>(Ex, id4, NZ_FIELDS, j, NY_FIELDS);
+        Hz[id4] = uh0 * Hz[id4] - uh1 * dEy_dx + uh_y * dEx_dy;
+    }
+    /* 2D TM path only, as in update_e_gpu (general path: cpml_h_gpu). */
+    if (TM2D && cpml.active) {
+        cpml_h_cell<ORDER, TM2D>(blockIdx.y, i, j, k, idx, id4, Ex, Ey, Ez, dx, dy, dz,
+            NX_FIELDS, NY_FIELDS, NZ_FIELDS,
+            cpml.pml[0], cpml.pml[1], cpml.pml[2], cpml.pml[3], cpml.pml[4], cpml.pml[5],
+            cpml.coeff[0], cpml.coeff[1], cpml.coeff[2], cpml.coeff[3], cpml.coeff[4], cpml.coeff[5],
+            cpml.update,
+            cpml.phi[0], cpml.phi[1], cpml.phi[2], cpml.phi[3], cpml.phi[4], cpml.phi[5],
+            cpml.phi[6], cpml.phi[7], cpml.phi[8], cpml.phi[9], cpml.phi[10], cpml.phi[11],
+            Hx, Hy, Hz);
+    }
+}
+
+/*
+ * Transpose of the electric CPML corrections of one cell (applied before the
+ * transpose of its base update; the former adjoint_cpml_e_gpu pass, now fused
+ * into adjoint_e_gpu). Reads lambda_E of the cell, scatters onto lambda_H and
+ * advances the cell's phi cotangents.
+ */
+template<int ORDER, int TM2D>
+__device__ __forceinline__ void adjoint_cpml_e_cell(
+    long long s, long long i, long long j, long long k, long long idx, long long work,
+    const float* lambda_ex, const float* lambda_ey, const float* lambda_ez,
+    float* lambda_hx, float* lambda_hy, float* lambda_hz,
+    float dx, float dy, float dz, int NX, int NY, int NZ, const CpmlState& cpml)
+{
+    long long ny_nz = (long long)NY * NZ;
+    const int pml0 = cpml.pml[0], pml1 = cpml.pml[1], pml2 = cpml.pml[2];
+    const int pml3 = cpml.pml[3], pml4 = cpml.pml[4], pml5 = cpml.pml[5];
+    bool in_x0 = pml0 > 0 && i > 0 && i <= pml0;
+    bool in_xm = pml1 > 0 && i >= NX - 1 - pml1 && i < NX - 1;
+    bool in_y0 = pml2 > 0 && j > 0 && j <= pml2;
+    bool in_ym = pml3 > 0 && j >= NY - 1 - pml3 && j < NY - 1;
+    bool in_z0 = !TM2D && pml4 > 0 && k > 0 && k <= pml4;
+    bool in_zm = !TM2D && pml5 > 0 && k >= NZ - 1 - pml5 && k < NZ - 1;
+    if (!(in_x0 || in_xm || in_y0 || in_ym || in_z0 || in_zm)) return;
+    const float* x0R = cpml.coeff[0]; const float* xmR = cpml.coeff[1];
+    const float* y0R = cpml.coeff[2]; const float* ymR = cpml.coeff[3];
+    const float* z0R = cpml.coeff[4]; const float* zmR = cpml.coeff[5];
+    float* x0P1 = cpml.phi[0]; float* x0P2 = cpml.phi[1];
+    float* xmP1 = cpml.phi[2]; float* xmP2 = cpml.phi[3];
+    float* y0P1 = cpml.phi[4]; float* y0P2 = cpml.phi[5];
+    float* ymP1 = cpml.phi[6]; float* ymP2 = cpml.phi[7];
+    float* z0P1 = cpml.phi[8]; float* z0P2 = cpml.phi[9];
+    float* zmP1 = cpml.phi[10]; float* zmP2 = cpml.phi[11];
+    float upd = cpml.update[idx];
 
 #define APPLY_E_PML_GPU(R, P, p, q, stride, coord, n, spacing, field, source, sign) \
     do { \
@@ -1934,7 +2017,7 @@ __global__ void adjoint_cpml_e_gpu(
             (R)[2 * (p) + (q)], (R)[3 * (p) + (q)], &(P)[p_idx]); \
     } while (0)
 
-    if (pml0 > 0 && i > 0 && i <= pml0) {
+    if (in_x0) {
         long long q = pml0 - i;
         if (!TM2D && j < NY - 1) {
             long long p_idx = ((long long)s * (pml0 + 1) * (NY - 1) * NZ) + q * (NY - 1) * NZ + j * NZ + k;
@@ -1945,7 +2028,7 @@ __global__ void adjoint_cpml_e_gpu(
             APPLY_E_PML_GPU(x0R, x0P2, pml0, q, ny_nz, i, NX, dx, lambda_ez, lambda_hy, 1.0f);
         }
     }
-    if (pml1 > 0 && i >= NX - 1 - pml1 && i < NX - 1) {
+    if (in_xm) {
         long long q = i - (NX - 1 - pml1);
         if (!TM2D && j < NY - 1 && i > 0) {
             long long p_idx = ((long long)s * (pml1 + 1) * (NY - 1) * NZ) + q * (NY - 1) * NZ + j * NZ + k;
@@ -1956,7 +2039,7 @@ __global__ void adjoint_cpml_e_gpu(
             APPLY_E_PML_GPU(xmR, xmP2, pml1, q, ny_nz, i, NX, dx, lambda_ez, lambda_hy, 1.0f);
         }
     }
-    if (pml2 > 0 && j > 0 && j <= pml2) {
+    if (in_y0) {
         long long q = pml2 - j;
         if (!TM2D && i < NX - 1) {
             long long p_idx = ((long long)s * (NX - 1) * (pml2 + 1) * NZ) + i * (pml2 + 1) * NZ + q * NZ + k;
@@ -1967,7 +2050,7 @@ __global__ void adjoint_cpml_e_gpu(
             APPLY_E_PML_GPU(y0R, y0P2, pml2, q, NZ, j, NY, dy, lambda_ez, lambda_hx, -1.0f);
         }
     }
-    if (pml3 > 0 && j >= NY - 1 - pml3 && j < NY - 1) {
+    if (in_ym) {
         long long q = j - (NY - 1 - pml3);
         if (!TM2D && i < NX - 1 && j > 0) {
             long long p_idx = ((long long)s * (NX - 1) * (pml3 + 1) * NZ) + i * (pml3 + 1) * NZ + q * NZ + k;
@@ -1978,7 +2061,7 @@ __global__ void adjoint_cpml_e_gpu(
             APPLY_E_PML_GPU(ymR, ymP2, pml3, q, NZ, j, NY, dy, lambda_ez, lambda_hx, -1.0f);
         }
     }
-    if (!TM2D && pml4 > 0 && k > 0 && k <= pml4) {
+    if (in_z0) {
         long long q = pml4 - k;
         if (i < NX - 1) {
             long long p_idx = ((long long)s * (NX - 1) * NY * (pml4 + 1)) + i * NY * (pml4 + 1) + j * (pml4 + 1) + q;
@@ -1989,7 +2072,7 @@ __global__ void adjoint_cpml_e_gpu(
             APPLY_E_PML_GPU(z0R, z0P2, pml4, q, 1, k, NZ, dz, lambda_ey, lambda_hx, 1.0f);
         }
     }
-    if (!TM2D && pml5 > 0 && k >= NZ - 1 - pml5 && k < NZ - 1) {
+    if (in_zm) {
         long long q = k - (NZ - 1 - pml5);
         if (i < NX - 1 && k > 0) {
             long long p_idx = ((long long)s * (NX - 1) * NY * (pml5 + 1)) + i * NY * (pml5 + 1) + j * (pml5 + 1) + q;
@@ -2003,30 +2086,34 @@ __global__ void adjoint_cpml_e_gpu(
 #undef APPLY_E_PML_GPU
 }
 
+/* Same for the magnetic CPML corrections (fused into adjoint_h_gpu). */
 template<int ORDER, int TM2D>
-__global__ void adjoint_cpml_h_gpu(
-    float* lambda_ex, float* lambda_ey, float* lambda_ez, float* lambda_hx, float* lambda_hy, float* lambda_hz,
-    float dx, float dy, float dz, int step, int NX, int NY, int NZ,
-    int pml0, int pml1, int pml2, int pml3, int pml4, int pml5,
-    const float* x0R, const float* xmR, const float* y0R, const float* ymR,
-    const float* z0R, const float* zmR, const float* update,
-    float* x0P1, float* x0P2, float* xmP1, float* xmP2,
-    float* y0P1, float* y0P2, float* ymP1, float* ymP2,
-    float* z0P1, float* z0P2, float* zmP1, float* zmP2)
+__device__ __forceinline__ void adjoint_cpml_h_cell(
+    long long s, long long i, long long j, long long k, long long idx, long long work,
+    float* lambda_ex, float* lambda_ey, float* lambda_ez,
+    const float* lambda_hx, const float* lambda_hy, const float* lambda_hz,
+    float dx, float dy, float dz, int NX, int NY, int NZ, const CpmlState& cpml)
 {
     long long ny_nz = (long long)NY * NZ;
-    long long field_stride = (long long)NX * ny_nz;
-    long long region_work = (long long)blockIdx.x * blockDim.x + threadIdx.x;
-    int region = (int)blockIdx.y;
-    int s = (int)blockIdx.z;
-    long long i, j, k;
-    if (s >= step ||
-        !map_cpml_region_work<0>(region, region_work,
-        NX, NY, TM2D ? 1 : NZ, pml0, pml1, pml2, pml3, pml4, pml5,
-        &i, &j, &k)) return;
-    long long idx = i * ny_nz + j * NZ + k;
-    long long work = (long long)s * field_stride + idx;
-    float upd = update[idx];
+    const int pml0 = cpml.pml[0], pml1 = cpml.pml[1], pml2 = cpml.pml[2];
+    const int pml3 = cpml.pml[3], pml4 = cpml.pml[4], pml5 = cpml.pml[5];
+    bool in_x0 = pml0 > 0 && i < pml0;
+    bool in_xm = pml1 > 0 && i >= NX - 1 - pml1 && i < NX - 1;
+    bool in_y0 = pml2 > 0 && j < pml2;
+    bool in_ym = pml3 > 0 && j >= NY - 1 - pml3 && j < NY - 1;
+    bool in_z0 = !TM2D && pml4 > 0 && k < pml4;
+    bool in_zm = !TM2D && pml5 > 0 && k >= NZ - 1 - pml5 && k < NZ - 1;
+    if (!(in_x0 || in_xm || in_y0 || in_ym || in_z0 || in_zm)) return;
+    const float* x0R = cpml.coeff[0]; const float* xmR = cpml.coeff[1];
+    const float* y0R = cpml.coeff[2]; const float* ymR = cpml.coeff[3];
+    const float* z0R = cpml.coeff[4]; const float* zmR = cpml.coeff[5];
+    float* x0P1 = cpml.phi[0]; float* x0P2 = cpml.phi[1];
+    float* xmP1 = cpml.phi[2]; float* xmP2 = cpml.phi[3];
+    float* y0P1 = cpml.phi[4]; float* y0P2 = cpml.phi[5];
+    float* ymP1 = cpml.phi[6]; float* ymP2 = cpml.phi[7];
+    float* z0P1 = cpml.phi[8]; float* z0P2 = cpml.phi[9];
+    float* zmP1 = cpml.phi[10]; float* zmP2 = cpml.phi[11];
+    float upd = cpml.update[idx];
 
 #define APPLY_H_PML_GPU(R, P, p, q, stride, coord, n, spacing, field, source, sign) \
     do { \
@@ -2036,7 +2123,7 @@ __global__ void adjoint_cpml_h_gpu(
             (R)[2 * (p) + (q)], (R)[3 * (p) + (q)], &(P)[p_idx]); \
     } while (0)
 
-    if (pml0 > 0 && i < pml0) {
+    if (in_x0) {
         long long q = pml0 - 1 - i;
         if (k < NZ - 1) {
             long long p_idx = ((long long)s * pml0 * NY * (NZ - 1)) + q * NY * (NZ - 1) + j * (NZ - 1) + k;
@@ -2047,7 +2134,7 @@ __global__ void adjoint_cpml_h_gpu(
             APPLY_H_PML_GPU(x0R, x0P2, pml0, q, ny_nz, i, NX, dx, lambda_hz, lambda_ey, -1.0f);
         }
     }
-    if (pml1 > 0 && i >= NX - 1 - pml1 && i < NX - 1) {
+    if (in_xm) {
         long long q = i - (NX - 1 - pml1);
         if (k < NZ - 1) {
             long long p_idx = ((long long)s * pml1 * NY * (NZ - 1)) + q * NY * (NZ - 1) + j * (NZ - 1) + k;
@@ -2058,7 +2145,7 @@ __global__ void adjoint_cpml_h_gpu(
             APPLY_H_PML_GPU(xmR, xmP2, pml1, q, ny_nz, i, NX, dx, lambda_hz, lambda_ey, -1.0f);
         }
     }
-    if (pml2 > 0 && j < pml2) {
+    if (in_y0) {
         long long q = pml2 - 1 - j;
         if (k < NZ - 1) {
             long long p_idx = ((long long)s * NX * pml2 * (NZ - 1)) + i * pml2 * (NZ - 1) + q * (NZ - 1) + k;
@@ -2069,7 +2156,7 @@ __global__ void adjoint_cpml_h_gpu(
             APPLY_H_PML_GPU(y0R, y0P2, pml2, q, NZ, j, NY, dy, lambda_hz, lambda_ex, 1.0f);
         }
     }
-    if (pml3 > 0 && j >= NY - 1 - pml3 && j < NY - 1) {
+    if (in_ym) {
         long long q = j - (NY - 1 - pml3);
         if (k < NZ - 1) {
             long long p_idx = ((long long)s * NX * pml3 * (NZ - 1)) + i * pml3 * (NZ - 1) + q * (NZ - 1) + k;
@@ -2080,7 +2167,7 @@ __global__ void adjoint_cpml_h_gpu(
             APPLY_H_PML_GPU(ymR, ymP2, pml3, q, NZ, j, NY, dy, lambda_hz, lambda_ex, 1.0f);
         }
     }
-    if (!TM2D && pml4 > 0 && k < pml4) {
+    if (in_z0) {
         long long q = pml4 - 1 - k;
         if (j < NY - 1) {
             long long p_idx = ((long long)s * NX * (NY - 1) * pml4) + i * (NY - 1) * pml4 + j * pml4 + q;
@@ -2091,7 +2178,7 @@ __global__ void adjoint_cpml_h_gpu(
             APPLY_H_PML_GPU(z0R, z0P2, pml4, q, 1, k, NZ, dz, lambda_hy, lambda_ex, -1.0f);
         }
     }
-    if (!TM2D && pml5 > 0 && k >= NZ - 1 - pml5 && k < NZ - 1) {
+    if (in_zm) {
         long long q = k - (NZ - 1 - pml5);
         if (j < NY - 1) {
             long long p_idx = ((long long)s * NX * (NY - 1) * pml5) + i * (NY - 1) * pml5 + j * pml5 + q;
@@ -2103,6 +2190,98 @@ __global__ void adjoint_cpml_h_gpu(
         }
     }
 #undef APPLY_H_PML_GPU
+}
+
+/*
+ * Transpose of one reverse electric step for the scatter path: the cell's CPML
+ * correction transpose (adjoint_cpml_e_cell) and then the transpose of its
+ * base update. TM2D transposes only the Ez update:
+ * on that path Ex, Ey and Hz never feed back into Ez, Hx or Hy, so their
+ * cotangents do not affect material or source gradients (they are returned
+ * as zero).
+ */
+template<int ORDER, int TM2D>
+__global__ void adjoint_e_gpu(
+    const float* ce_hist, const float* ce_curl,
+    float* lambda_ex, float* lambda_ey, float* lambda_ez, float* lambda_hx, float* lambda_hy, float* lambda_hz,
+    CellGrid cells, int NX, int NY, int NZ, float dx, float dy, float dz, CpmlState cpml)
+{
+    long long ny_nz = (long long)NY * NZ;
+    long long work, idx, i, j, k;
+    if (!cell_of_thread<TM2D>(cells, NY, NZ, &work, &idx, &i, &j, &k)) return;
+    bool do_ex = !TM2D && (((NY - 1) != 1 || (NZ - 1) != 1) && i < NX - 1 && j > 0 && j < NY - 1 && k > 0 && k < NZ - 1);
+    bool do_ey = !TM2D && (((NX - 1) != 1 || (NZ - 1) != 1) && i > 0 && i < NX - 1 && j < NY - 1 && k > 0 && k < NZ - 1);
+    bool do_ez = (((NX - 1) != 1 || (NY - 1) != 1) && i > 0 && i < NX - 1 && j > 0 && j < NY - 1 && k < NZ - 1);
+    if (cpml.active) {
+        adjoint_cpml_e_cell<ORDER, TM2D>(blockIdx.y, i, j, k, idx, work,
+            lambda_ex, lambda_ey, lambda_ez, lambda_hx, lambda_hy, lambda_hz,
+            dx, dy, dz, NX, NY, NZ, cpml);
+    }
+    float coeff = ce_curl[idx];
+    float coeff_y = dy == dx ? coeff : coeff * dx / dy;
+    float coeff_z = dz == dx ? coeff : coeff * dx / dz;
+
+    if (do_ex) {
+        float value = lambda_ex[work];
+        add_staggered_backward_adjoint<ORDER>(lambda_hz, work, NZ, j, NY, coeff_y * value);
+        add_staggered_backward_adjoint<ORDER>(lambda_hy, work, 1, k, NZ, -coeff_z * value);
+        lambda_ex[work] = ce_hist[idx] * value;
+    }
+    if (do_ey) {
+        float value = lambda_ey[work];
+        add_staggered_backward_adjoint<ORDER>(lambda_hx, work, 1, k, NZ, coeff_z * value);
+        add_staggered_backward_adjoint<ORDER>(lambda_hz, work, ny_nz, i, NX, -coeff * value);
+        lambda_ey[work] = ce_hist[idx] * value;
+    }
+    if (do_ez) {
+        float value = lambda_ez[work];
+        add_staggered_backward_adjoint<ORDER>(lambda_hy, work, ny_nz, i, NX, coeff * value);
+        add_staggered_backward_adjoint<ORDER>(lambda_hx, work, NZ, j, NY, -coeff_y * value);
+        lambda_ez[work] = ce_hist[idx] * value;
+    }
+}
+
+/* Same for the magnetic step (adjoint_cpml_h_cell, then the base update
+ * transpose); TM2D drops the z-derivative scatter. */
+template<int ORDER, int TM2D>
+__global__ void adjoint_h_gpu(
+    const float* ch_hist, const float* ch_curl,
+    float* lambda_ex, float* lambda_ey, float* lambda_ez, float* lambda_hx, float* lambda_hy, float* lambda_hz,
+    CellGrid cells, int NX, int NY, int NZ, float dx, float dy, float dz, CpmlState cpml)
+{
+    long long ny_nz = (long long)NY * NZ;
+    long long work, idx, i, j, k;
+    if (!cell_of_thread<TM2D>(cells, NY, NZ, &work, &idx, &i, &j, &k)) return;
+    bool do_hx = ((NX - 1) != 1 && i > 0 && i < NX - 1 && j < NY - 1 && k < NZ - 1);
+    bool do_hy = ((NY - 1) != 1 && i < NX - 1 && j > 0 && j < NY - 1 && k < NZ - 1);
+    bool do_hz = !TM2D && ((NZ - 1) != 1 && i < NX - 1 && j < NY - 1 && k > 0 && k < NZ - 1);
+    if (cpml.active) {
+        adjoint_cpml_h_cell<ORDER, TM2D>(blockIdx.y, i, j, k, idx, work,
+            lambda_ex, lambda_ey, lambda_ez, lambda_hx, lambda_hy, lambda_hz,
+            dx, dy, dz, NX, NY, NZ, cpml);
+    }
+    float coeff = ch_curl[idx];
+    float coeff_y = dy == dx ? coeff : coeff * dx / dy;
+    float coeff_z = dz == dx ? coeff : coeff * dx / dz;
+
+    if (do_hx) {
+        float value = lambda_hx[work];
+        add_staggered_forward_adjoint<ORDER>(lambda_ez, work, NZ, j, NY, -coeff_y * value);
+        if (!TM2D) add_staggered_forward_adjoint<ORDER>(lambda_ey, work, 1, k, NZ, coeff_z * value);
+        lambda_hx[work] = ch_hist[idx] * value;
+    }
+    if (do_hy) {
+        float value = lambda_hy[work];
+        if (!TM2D) add_staggered_forward_adjoint<ORDER>(lambda_ex, work, 1, k, NZ, -coeff_z * value);
+        add_staggered_forward_adjoint<ORDER>(lambda_ez, work, ny_nz, i, NX, coeff * value);
+        lambda_hy[work] = ch_hist[idx] * value;
+    }
+    if (do_hz) {
+        float value = lambda_hz[work];
+        add_staggered_forward_adjoint<ORDER>(lambda_ey, work, ny_nz, i, NX, -coeff * value);
+        add_staggered_forward_adjoint<ORDER>(lambda_ex, work, NZ, j, NY, coeff_y * value);
+        lambda_hz[work] = ch_hist[idx] * value;
+    }
 }
 
 /*
@@ -3257,7 +3436,7 @@ DEEPGPR_API void forward(const float* __restrict__ eps_r_pad, const float* __res
     dim3 grid_material(CEIL_DIV(total_fields, blockSize));
     CellGrid cell_grid = make_cell_grid(NX_FIELDS, NY_FIELDS, NZ_FIELDS, tm2d);
     dim3 grid_cells(CEIL_DIV((long long)cell_grid.active, blockSize), step);
-    /* The 2D TM path maps CPML work on the k = 0 layer of the four x/y faces. */
+    /* The 2D TM path has CPML only on the k = 0 layer of the x/y faces. */
     int cpml_nz = tm2d ? 1 : NZ_FIELDS;
     long long cpml_e_region_max = cpml_max_region_cells(
         NX_FIELDS, NY_FIELDS, cpml_nz,
@@ -3268,11 +3447,9 @@ DEEPGPR_API void forward(const float* __restrict__ eps_r_pad, const float* __res
     int has_cpml_e = has_cpml && cpml_e_region_max > 0;
     int has_cpml_h = has_cpml && cpml_h_region_max > 0;
     dim3 grid_cpml_e(
-        has_cpml_e ? CEIL_DIV(cpml_e_region_max, blockSize) : 1,
-        tm2d ? 4 : 6, step);
+        has_cpml_e ? CEIL_DIV(cpml_e_region_max, blockSize) : 1, 6, step);
     dim3 grid_cpml_h(
-        has_cpml_h ? CEIL_DIV(cpml_h_region_max, blockSize) : 1,
-        tm2d ? 4 : 6, step);
+        has_cpml_h ? CEIL_DIV(cpml_h_region_max, blockSize) : 1, 6, step);
 
     build_update_coeffs_gpu<<<grid_material, blockSize, 0, stream_comp>>>(eps_r_pad, sigma_pad, mu_r_pad, ce_hist, ce_curl, ce_rhs, ch_hist, ch_curl, ch_rhs, NX_FIELDS, NY_FIELDS, NZ_FIELDS, dt, dx);
     CUDA_CHECK_LAST();
@@ -3290,8 +3467,55 @@ DEEPGPR_API void forward(const float* __restrict__ eps_r_pad, const float* __res
         && int8_reduction_backend == INT8_REDUCTION_CURRENT
         ? int8_threads * sizeof(float) : 0;
 
+    /* 2D TM path: CPML corrections run inside update_h_gpu / update_e_gpu. */
+    CpmlState cpml_state_h = {
+        {x0HR, xmHR, y0HR, ymHR, z0HR, zmHR},
+        {x0HPhi1, x0HPhi2, xmHPhi1, xmHPhi2, y0HPhi1, y0HPhi2,
+         ymHPhi1, ymHPhi2, z0HPhi1, z0HPhi2, zmHPhi1, zmHPhi2},
+        ch_rhs, {pml0, pml1, pml2, pml3, pml4, pml5}, has_cpml_h};
+    CpmlState cpml_state_e = {
+        {x0ER, xmER, y0ER, ymER, z0ER, zmER},
+        {x0EPhi1, x0EPhi2, xmEPhi1, xmEPhi2, y0EPhi1, y0EPhi2,
+         ymEPhi1, ymEPhi2, z0EPhi1, z0EPhi2, zmEPhi1, zmEPhi2},
+        ce_rhs, {pml0, pml1, pml2, pml3, pml4, pml5}, has_cpml_e};
+    /* 2D TM path: scalar float32/float16/bfloat16 E snapshots are written by
+     * update_h_gpu. */
+    int fuse_history = tm2d && save_wavefield_history && !use_int8
+        && wavefield_conversion_backend_host(storage_type) != WAVEFIELD_CONVERSION_NATIVE_VEC2;
+
     for (int i = 0; i < nt; i++) {
-        if (save_wavefield_history && i % sampling_interval == 0) {
+        HistoryStore history_store = {};
+        int save_now = save_wavefield_history && i % sampling_interval == 0;
+        if (save_now && fuse_history) {
+            int t_saved = i / sampling_interval;
+            Field3Pointers frame;
+            history_store.box = history;
+            history_store.kind = storage_kind;
+            history_store.backend = wavefield_conversion_backend_host(storage_type);
+            if (use_async) {
+                int buf_idx = t_saved % 2;
+                unsigned char* buffer = d_E_buf + (long long)buf_idx * e_components * snap_size * storage_size;
+                if (transfer_buffer_in_use[buf_idx]) {
+                    CUDA_CHECK(cudaStreamWaitEvent(stream_comp, event_transfer[buf_idx], 0));
+                }
+                for (int c = 0; c < e_components; ++c) frame.p[c] = buffer + (long long)c * snap_size * storage_size;
+            } else {
+                for (int c = 0; c < e_components; ++c) {
+                    frame.p[c] = wavefield_offset_host(E_saved,
+                        (long long)c * component_stride + (long long)t_saved * snap_size, storage_type);
+                }
+            }
+            for (int c = 0; c < 3; ++c) {
+                history_store.dst[c] = nullptr;
+                history_store.exact[c] = nullptr;
+            }
+            for (int c = 0; c < e_components; ++c) {
+                int field_component = fwi_mode == 3 ? c : 2;
+                history_store.dst[field_component] = frame.p[c];
+                history_store.exact[field_component] = d_exact_Eold != nullptr
+                    ? d_exact_Eold + (long long)c * snap_size : nullptr;
+            }
+        } else if (save_now) {
             int t_saved = i / sampling_interval;
             if (use_int8) {
                 if (fwi_mode == 3) {
@@ -3358,21 +3582,29 @@ DEEPGPR_API void forward(const float* __restrict__ eps_r_pad, const float* __res
             }
         }
 
-        LAUNCH_ORDER_TM_KERNEL(update_h_gpu, tm2d, grid_cells, blockSize, stream_comp, fdtd_order,
-            ch_hist, ch_curl, Ex, Ey, Ez, Hx, Hy, Hz, cell_grid, NX_FIELDS, NY_FIELDS, NZ_FIELDS, dx, dy, dz);
+        if (save_now && fuse_history) {
+            LAUNCH_ORDER_TM_SAVE_KERNEL(update_h_gpu, tm2d, 1, grid_cells, blockSize, stream_comp, fdtd_order,
+                ch_hist, ch_curl, Ex, Ey, Ez, Hx, Hy, Hz, cell_grid, NX_FIELDS, NY_FIELDS, NZ_FIELDS, dx, dy, dz,
+                cpml_state_h, history_store);
+        } else {
+            LAUNCH_ORDER_TM_SAVE_KERNEL(update_h_gpu, tm2d, 0, grid_cells, blockSize, stream_comp, fdtd_order,
+                ch_hist, ch_curl, Ex, Ey, Ez, Hx, Hy, Hz, cell_grid, NX_FIELDS, NY_FIELDS, NZ_FIELDS, dx, dy, dz,
+                cpml_state_h, history_store);
+        }
         CUDA_CHECK_LAST();
-        if (has_cpml_h) {
-            LAUNCH_ORDER_TM_KERNEL(cpml_h_gpu, tm2d, grid_cpml_h, blockSize, stream_comp, fdtd_order,
+        if (!tm2d && has_cpml_h) {
+            LAUNCH_ORDER_KERNEL(cpml_h_gpu, grid_cpml_h, blockSize, stream_comp, fdtd_order,
                 Ex, Ey, Ez, Hx, Hy, Hz, dx, dy, dz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
                 pml0, pml1, pml2, pml3, pml4, pml5, x0HR, xmHR, y0HR, ymHR, z0HR, zmHR, ch_rhs,
                 x0HPhi1, x0HPhi2, xmHPhi1, xmHPhi2, y0HPhi1, y0HPhi2, ymHPhi1, ymHPhi2, z0HPhi1, z0HPhi2, zmHPhi1, zmHPhi2);
             CUDA_CHECK_LAST();
         }
         LAUNCH_ORDER_TM_KERNEL(update_e_gpu, tm2d, grid_cells, blockSize, stream_comp, fdtd_order,
-            ce_hist, ce_curl, Ex, Ey, Ez, Hx, Hy, Hz, cell_grid, NX_FIELDS, NY_FIELDS, NZ_FIELDS, dx, dy, dz);
+            ce_hist, ce_curl, Ex, Ey, Ez, Hx, Hy, Hz, cell_grid, NX_FIELDS, NY_FIELDS, NZ_FIELDS, dx, dy, dz,
+            cpml_state_e);
         CUDA_CHECK_LAST();
-        if (has_cpml_e) {
-            LAUNCH_ORDER_TM_KERNEL(cpml_e_gpu, tm2d, grid_cpml_e, blockSize, stream_comp, fdtd_order,
+        if (!tm2d && has_cpml_e) {
+            LAUNCH_ORDER_KERNEL(cpml_e_gpu, grid_cpml_e, blockSize, stream_comp, fdtd_order,
                 Ex, Ey, Ez, Hx, Hy, Hz, dx, dy, dz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
                 pml0, pml1, pml2, pml3, pml4, pml5, x0ER, xmER, y0ER, ymER, z0ER, zmER, ce_rhs,
                 x0EPhi1, x0EPhi2, xmEPhi1, xmEPhi2, y0EPhi1, y0EPhi2, ymEPhi1, ymEPhi2, z0EPhi1, z0EPhi2, zmEPhi1, zmEPhi2);
@@ -3667,6 +3899,18 @@ DEEPGPR_API void backward(const float* __restrict__ eps_r_pad, const float* __re
     dim3 grid_cpml_h(
         has_cpml_h ? CEIL_DIV(cpml_h_region_max, blockSize) : 1,
         tm2d ? 4 : 6, step);
+    /* Scatter path: CPML transposes run inside adjoint_e_gpu / adjoint_h_gpu
+     * (the TM2D gather path keeps its separate weight kernels). */
+    CpmlState cpml_state_e = {
+        {x0ER, xmER, y0ER, ymER, z0ER, zmER},
+        {x0EPhi1, x0EPhi2, xmEPhi1, xmEPhi2, y0EPhi1, y0EPhi2,
+         ymEPhi1, ymEPhi2, z0EPhi1, z0EPhi2, zmEPhi1, zmEPhi2},
+        ce_rhs, {pml0, pml1, pml2, pml3, pml4, pml5}, has_cpml_e};
+    CpmlState cpml_state_h = {
+        {x0HR, xmHR, y0HR, ymHR, z0HR, zmHR},
+        {x0HPhi1, x0HPhi2, xmHPhi1, xmHPhi2, y0HPhi1, y0HPhi2,
+         ymHPhi1, ymHPhi2, z0HPhi1, z0HPhi2, zmHPhi1, zmHPhi2},
+        ch_rhs, {pml0, pml1, pml2, pml3, pml4, pml5}, has_cpml_h};
 
     build_update_coeffs_gpu<<<grid_material, blockSize, 0, stream_comp>>>(eps_r_pad, sigma_pad, mu_r_pad, ce_hist, ce_curl, ce_rhs, ch_hist, ch_curl, ch_rhs, NX_FIELDS, NY_FIELDS, NZ_FIELDS, dt, dx);
     CUDA_CHECK_LAST();
@@ -3847,30 +4091,15 @@ DEEPGPR_API void backward(const float* __restrict__ eps_r_pad, const float* __re
             continue;
         }
 
-        /* E CPML^T -> E update^T -> H CPML^T -> H update^T. */
-        if (has_cpml_e) {
-            LAUNCH_ORDER_TM_KERNEL(adjoint_cpml_e_gpu, tm2d, grid_cpml_e, blockSize, stream_comp, fdtd_order,
-                lambda_ex, lambda_ey, lambda_ez, lambda_hx, lambda_hy, lambda_hz, dx, dy, dz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
-                pml0, pml1, pml2, pml3, pml4, pml5, x0ER, xmER, y0ER, ymER, z0ER, zmER, ce_rhs,
-                x0EPhi1, x0EPhi2, xmEPhi1, xmEPhi2, y0EPhi1, y0EPhi2, ymEPhi1, ymEPhi2,
-                z0EPhi1, z0EPhi2, zmEPhi1, zmEPhi2);
-            CUDA_CHECK_LAST();
-        }
+        /* (E CPML + E update)^T, then (H CPML + H update)^T; each kernel
+         * applies a cell's CPML transpose before its base-update transpose. */
         LAUNCH_ORDER_TM_KERNEL(adjoint_e_gpu, tm2d, grid_cells, blockSize, stream_comp, fdtd_order,
             ce_hist, ce_curl, lambda_ex, lambda_ey, lambda_ez, lambda_hx, lambda_hy, lambda_hz,
-            cell_grid, NX_FIELDS, NY_FIELDS, NZ_FIELDS, dx, dy, dz);
+            cell_grid, NX_FIELDS, NY_FIELDS, NZ_FIELDS, dx, dy, dz, cpml_state_e);
         CUDA_CHECK_LAST();
-        if (has_cpml_h) {
-            LAUNCH_ORDER_TM_KERNEL(adjoint_cpml_h_gpu, tm2d, grid_cpml_h, blockSize, stream_comp, fdtd_order,
-                lambda_ex, lambda_ey, lambda_ez, lambda_hx, lambda_hy, lambda_hz, dx, dy, dz, step, NX_FIELDS, NY_FIELDS, NZ_FIELDS,
-                pml0, pml1, pml2, pml3, pml4, pml5, x0HR, xmHR, y0HR, ymHR, z0HR, zmHR, ch_rhs,
-                x0HPhi1, x0HPhi2, xmHPhi1, xmHPhi2, y0HPhi1, y0HPhi2, ymHPhi1, ymHPhi2,
-                z0HPhi1, z0HPhi2, zmHPhi1, zmHPhi2);
-            CUDA_CHECK_LAST();
-        }
         LAUNCH_ORDER_TM_KERNEL(adjoint_h_gpu, tm2d, grid_cells, blockSize, stream_comp, fdtd_order,
             ch_hist, ch_curl, lambda_ex, lambda_ey, lambda_ez, lambda_hx, lambda_hy, lambda_hz,
-            cell_grid, NX_FIELDS, NY_FIELDS, NZ_FIELDS, dx, dy, dz);
+            cell_grid, NX_FIELDS, NY_FIELDS, NZ_FIELDS, dx, dy, dz, cpml_state_h);
         CUDA_CHECK_LAST();
     }
 
