@@ -66,4 +66,25 @@
   document.querySelectorAll("[data-year]").forEach((element) => {
     element.textContent = String(new Date().getFullYear());
   });
+
+  // Promo film: show a pixel "Play" button over the poster; native controls take over once it starts.
+  const film = document.querySelector("[data-promo-film]");
+  if (film) {
+    const video = film.querySelector("video");
+    const play = film.querySelector("[data-film-play]");
+    if (video && play) {
+      const reveal = () => {
+        play.hidden = true;
+        video.controls = true;
+      };
+      video.controls = false;
+      play.hidden = false;
+      play.addEventListener("click", () => {
+        reveal();
+        const started = video.play();
+        if (started && typeof started.catch === "function") started.catch(() => {});
+      });
+      video.addEventListener("play", reveal);
+    }
+  }
 })();

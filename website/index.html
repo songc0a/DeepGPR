@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>DeepGPR — Differentiable GPR modelling and inversion</title>
   <meta name="description" content="DeepGPR provides differentiable 2D and 3D Maxwell FDTD modelling for ground-penetrating radar in PyTorch, with CPU and CUDA backends.">
-  <meta name="theme-color" content="#050b13">
+  <meta name="theme-color" content="#0d0b1a">
   <meta property="og:type" content="website">
   <meta property="og:title" content="DeepGPR — Differentiable GPR modelling and inversion">
   <meta property="og:description" content="PyTorch-native 2D and 3D Maxwell FDTD for GPR forward modelling and full-waveform inversion.">
@@ -14,6 +14,7 @@
   <meta name="twitter:card" content="summary_large_image">
   <link rel="canonical" href="https://songc0a.github.io/DeepGPR/">
   <link rel="icon" href="assets/images/favicon.svg" type="image/svg+xml">
+  <link rel="preload" href="assets/fonts/unifont-subset.woff" as="font" type="font/woff" crossorigin>
   <link rel="stylesheet" href="assets/css/style.css">
   <script src="assets/js/main.js" defer></script>
   <script src="assets/js/stats.js" defer></script>
@@ -42,7 +43,7 @@
       <div class="container hero-grid">
         <div>
           <p class="eyebrow">PyTorch × Maxwell FDTD</p>
-          <h1>Deep<span>GPR</span></h1>
+          <h1><img class="hero-logo" src="assets/images/px/logo.svg" width="488" height="118" alt="DeepGPR"></h1>
           <p class="hero-lead">Differentiable 2D and 3D electromagnetic modelling for ground-penetrating radar—built for forward simulation and full-waveform inversion with PyTorch.</p>
           <div class="hero-actions">
             <a class="button" href="docs.html#quick-start">Get started <span aria-hidden="true">→</span></a>
@@ -56,20 +57,16 @@
           </div>
         </div>
 
-        <div class="radar-console" aria-label="Conceptual GPR wave propagation diagram">
+        <div class="radar-console" aria-label="Pixel-art GPR survey: a radar pulse from a DeepGPR simulation propagating through a layered subsurface">
           <div class="console-bar">
             <span>EM propagation / 2D slice</span>
             <span class="console-status">Autograd ready</span>
           </div>
           <div class="radar-stage" aria-hidden="true">
-            <div class="ground-line"></div>
-            <div class="source-node"></div>
-            <div class="receiver-node"></div>
-            <div class="radar-wave wave-1"></div>
-            <div class="radar-wave wave-2"></div>
-            <div class="radar-wave wave-3"></div>
-            <div class="subsurface-layer"></div>
-            <div class="anomaly"></div>
+            <picture>
+              <source srcset="assets/images/px/hero-survey.png" media="(prefers-reduced-motion: reduce)">
+              <img src="assets/images/px/hero-survey.gif" width="512" height="384" alt="">
+            </picture>
             <div class="console-readout">
               <span>SOLVER <strong>MAXWELL FDTD</strong></span>
               <span>BOUNDARY <strong>CPML</strong></span>
@@ -89,6 +86,30 @@
         <div class="capability-item">FDTD 2 / 4 / 8</div>
       </div>
     </div>
+
+    <section class="promo-film" id="film" aria-labelledby="film-heading" data-promo-film>
+      <div class="container">
+        <div class="section-heading">
+          <div>
+            <span class="kicker">Promo film</span>
+            <h2 id="film-heading">DeepGPR in 50 seconds.</h2>
+          </div>
+          <p id="film-description">A pixel-art tour of forward modelling, exact adjoint gradients, dual-parameter FWI, and large-model memory controls.</p>
+        </div>
+        <div class="film-stage">
+          <div class="film-bar"><span>deepgpr-promo.mp4</span><span class="window-dots" aria-hidden="true"><i></i><i></i><i></i></span></div>
+          <div class="film-screen">
+            <video id="deepgpr-film" class="film-video" width="1920" height="1080" poster="assets/video/deepgpr-promo-poster.jpg" preload="none" controls playsinline aria-label="DeepGPR promotional film" aria-describedby="film-description">
+              <source src="assets/video/deepgpr-promo.mp4" type="video/mp4">
+              <source src="assets/video/deepgpr-promo.webm" type="video/webm">
+              Your browser does not support embedded video. <a href="assets/video/deepgpr-promo.mp4">Download the DeepGPR film</a>.
+            </video>
+            <button class="button film-play" type="button" data-film-play aria-controls="deepgpr-film" hidden>▶ Play film</button>
+          </div>
+        </div>
+        <p class="film-note">50 seconds, with sound. The wavefields, radargram, gradients, and inversion shown in the film were computed with DeepGPR's native CPU kernel.</p>
+      </div>
+    </section>
 
     <section class="section" id="features">
       <div class="container">
