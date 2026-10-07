@@ -74,7 +74,10 @@ def draw_hologram(image: Image.Image, time: float, mode: str = "scan",
     # Perspective has an open top and two translucent front-facing cut faces.
     # Their layered geometry supplies the feeling of a real radar tomogram.
     x0, x1, z0, z1, floor = -1.27, 1.27, -.84, .84, -1.23
-    top = lambda x,z: float(_terrain(x,z))
+
+    def top(x, z):
+        return float(_terrain(x, z))
+
     polygon([(x0,top(x0,z1),z1),(x1,top(x1,z1),z1),
              (x1,floor,z1),(x0,floor,z1)], TEAL, 10)
     polygon([(x1,top(x1,z0),z0),(x1,top(x1,z1),z1),
