@@ -42,7 +42,7 @@ jobs:
         with:
           cuda: ${{ matrix.cuda }}
           method: network
-          sub-packages: '["nvcc", "cudart"]'
+          sub-packages: '["nvcc", "cudart", "cuobjdump"]'
           log-file-suffix: windows-${{ matrix.cuda }}.txt
 
       - name: Set up MSVC 2022 Developer Command Prompt
@@ -150,6 +150,8 @@ jobs:
                 -gencode=arch=compute_86,code=sm_86
                 -gencode=arch=compute_89,code=sm_89
                 -gencode=arch=compute_90,code=sm_90
+                # Retain PTX for driver JIT on newer architectures (e.g. Blackwell).
+                -gencode=arch=compute_90,code=compute_90
               )
 
               nvcc -shared \
@@ -164,6 +166,12 @@ jobs:
 
               if [ ! -f "$cuda_out_file" ]; then
                 echo "Build failed: $cuda_out_file was not generated"
+                exit 1
+              fi
+
+              ptx_list="$(cuobjdump --list-ptx "$cuda_out_file")"
+              if ! grep -q "PTX file" <<<"$ptx_list"; then
+                echo "Build failed: $cuda_out_file has no PTX"
                 exit 1
               fi
 
@@ -282,7 +290,9 @@ jobs:
             "-gencode=arch=compute_80,code=sm_80",
             "-gencode=arch=compute_86,code=sm_86",
             "-gencode=arch=compute_89,code=sm_89",
-            "-gencode=arch=compute_90,code=sm_90"
+            "-gencode=arch=compute_90,code=sm_90",
+            # Retain PTX for driver JIT on newer architectures (e.g. Blackwell).
+            "-gencode=arch=compute_90,code=compute_90"
           )
 
           $nvccArgs = @(
@@ -333,6 +343,11 @@ jobs:
           }
 
           python -c "import ctypes; lib=ctypes.CDLL(r'$dll_file'); assert lib.deepgpr_abi_version() == 6"
+
+          $ptx = cuobjdump --list-ptx $dll_file
+          if (-not ($ptx | Select-String -SimpleMatch "PTX file" -Quiet)) {
+            throw "CUDA DLL contains no PTX"
+          }
 
       - name: Compile CPU backend on Windows
         if: matrix.platform == 'windows'
