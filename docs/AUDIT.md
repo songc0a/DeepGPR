@@ -48,7 +48,7 @@ robustness or hygiene.
 | N-3 | Medium | native API | FDTD order passed through process-global state | Mitigated (P-3); ABI change recommended |
 | N-4 | Low | CPU forward | `malloc` failure silently degrades fp16/bf16 R-history accuracy | Fixed |
 | N-5 | Low | native | PEC threshold `100.0f` duplicated as a literal in 5 places | Fixed |
-| N-6 | Perf | CPU kernels | Per-cell 64-bit division/modulo index decode in every update loop | Recommended |
+| N-6 | Perf | CPU kernels | Per-cell 64-bit division/modulo index decode in every update loop | Fixed (performance) |
 | N-7 | Perf | CPU/CUDA | Atomic scatter in the adjoint curl transpose | Fixed on CPU; CUDA 2D TM path fixed, 3D kept (measured) |
 | N-8 | Perf | CUDA | Streams/events/buffers created and destroyed on every call | Fixed (bounded cache) |
 
@@ -246,12 +246,23 @@ reports the failure (and size overflows) through the error API.
 three CUDA sites. It is now `DEEPGPR_PEC_SIGMA_THRESHOLD_F` in `deepgpr.h`;
 the test-suite checks it against `config.constants.PEC_CONDUCTIVITY_THRESHOLD`.
 
-### N-6 CPU index decoding (Performance, Recommended)
-Every CPU update loop (`update_e_cpu`, `update_h_cpu`, adjoints, snapshots)
-iterates over a flattened index and recovers `(s, i, j, k)` with four 64-bit
-`/` and `%` per cell per time step, and recomputes `ue1*dx/dy` per cell.
-Nested loops with `collapse(2)` and hoisted ratios typically give a
-measurable speed-up on the memory-bound CPU path.
+### N-6 CPU index decoding (Performance, Fixed)
+The CPU field updates, CPML updates, adjoint passes, snapshots and material
+gradient accumulation previously decoded flattened indices with repeated
+64-bit division/modulo operations per cell. They now use nested grid loops.
+OpenMP distributes shot/tile pairs; a tile normally spans a complete x slice.
+When there are fewer shot/x slices than threads, y is split into contiguous
+row groups to avoid leaving most of the team idle on narrow grids. Tile
+indices are decoded outside the cell loops. The material-gradient loop
+distributes x/y pairs and retains its serial shot accumulation order.
+
+Floating-point expressions, including `ue1*dx/dy`, remain unchanged; ratios
+were deliberately not hoisted or reassociated. Tested receiver data, field
+states, histories and gradients remain bitwise identical across baseline,
+candidate and thread counts. The initial `collapse(2)`-only implementation
+regressed on narrow grids; the adaptive row tiling addresses that case.
+See the [CPU validation and benchmark report](../tests/profiling_results/cpu_index_decoding_report.md)
+for platform-specific measurements, test skips and reproduction commands.
 
 ### N-7 Atomic scatter in the adjoint (Performance, Fixed on CPU and CUDA)
 Besides determinism (N-1), the atomic scatter of the transposed curl was the

@@ -57,6 +57,14 @@ Measurements, protocol and per-item decisions:
   `DeepGPR.clear_cuda_resource_cache(device=None)` releases idle resources.
   Native forward/backward signatures and ABI 6 are unchanged. Measurements:
   [CUDA resource cache report](../tests/profiling_results/cuda_resource_cache_report.md).
+- CPU update, CPML, adjoint and snapshot loops use nested grid traversal
+  instead of per-cell 64-bit division/modulo index decoding (AUDIT N-6).
+  OpenMP normally assigns complete x slices and splits y into row tiles when
+  shot/x slices cannot occupy the thread team. Material gradients use nested
+  x/y/z loops with the original shot reduction order. Floating-point
+  expressions are unchanged; baseline/candidate results are bitwise identical
+  in the CPU validation matrix. Measurements and limitations are recorded in
+  [the CPU report](../tests/profiling_results/cpu_index_decoding_report.md).
 - CUDA full-grid kernels (E/H update and adjoint) take the shot from
   `blockIdx.y` and decode `(i, j, k)` from a 32-bit per-shot index with a
   multiply-high divider instead of four 64-bit `/` and `%` per thread. Grids

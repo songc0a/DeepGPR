@@ -12,12 +12,43 @@
 #include <omp.h>
 #define DEEPGPR_OMP_PARALLEL _Pragma("omp parallel")
 #define DEEPGPR_OMP_PARALLEL_FOR _Pragma("omp for schedule(static)")
+/* Worksharing loop over a nested (a, b, ...) grid: the two outer loops are
+ * collapsed so one thread runs a whole tile; the inner loops walk
+ * contiguous memory without any per-cell index decode. Declare both loop
+ * counters and compute scalar loop bounds before the pragma for MSVC
+ * C-mode OpenMP compatibility. */
+#define DEEPGPR_OMP_PARALLEL_FOR_COLLAPSE2 _Pragma("omp for schedule(static) collapse(2)")
 #define DEEPGPR_OMP_STANDALONE_PARALLEL_FOR _Pragma("omp parallel for schedule(static)")
 #else
 #define DEEPGPR_OMP_PARALLEL
 #define DEEPGPR_OMP_PARALLEL_FOR
+#define DEEPGPR_OMP_PARALLEL_FOR_COLLAPSE2
 #define DEEPGPR_OMP_STANDALONE_PARALLEL_FOR
 #endif
+
+/* Split y only when shot/x slices cannot occupy the current OpenMP team.
+ * Each tile owns complete, contiguous z rows. Index decoding is once per
+ * tile, outside the cell loops; arithmetic and implicit barriers are unchanged.
+ */
+typedef struct {
+    long long y_tiles;
+    long long rows_per_tile;
+} CpuRowTiling;
+
+static CpuRowTiling cpu_row_tiling(long long shots, long long nx, long long ny)
+{
+    long long y_tiles = 1;
+#if defined(_OPENMP) || defined(DEEPGPR_USE_OPENMP)
+    long long slices = shots * nx;
+    long long threads = omp_get_num_threads();
+    if (slices > 0 && slices < threads && ny > 0) {
+        y_tiles = (threads + slices - 1) / slices;
+        if (y_tiles > ny) y_tiles = ny;
+    }
+#endif
+    CpuRowTiling tiling = {y_tiles, (ny + y_tiles - 1) / y_tiles};
+    return tiling;
+}
 
 /*
  * No OpenMP atomics are used anywhere in this backend: every parallel loop
@@ -677,41 +708,51 @@ static void update_e_cpu(
 {
     long long ny_nz = (long long)NY_FIELDS * NZ_FIELDS;
     long long field_stride = (long long)NX_FIELDS * ny_nz;
-    long long total_work = (long long)step * field_stride;
-    long long work;
 
-    DEEPGPR_OMP_PARALLEL_FOR
-    for (work = 0; work < total_work; ++work) {
-        long long idx = work % field_stride;
-        long long i = idx / ny_nz;
-        long long rem = idx % ny_nz;
-        long long j = rem / NZ_FIELDS;
-        long long k = rem % NZ_FIELDS;
-        long long id4 = work;
+    /* Nested grid loops remove per-cell 64-bit index decoding (audit N-6).
+     * Usually a tile is one complete x slice. Narrow grids split y to
+     * occupy the team without changing cell arithmetic or update order. */
+    {
+        CpuRowTiling tiling = cpu_row_tiling(step, NX_FIELDS, NY_FIELDS);
+        long long tile_count = NX_FIELDS * tiling.y_tiles;
+        long long s, tile;
+        DEEPGPR_OMP_PARALLEL_FOR_COLLAPSE2
+        for (s = 0; s < step; ++s)
+        for (tile = 0; tile < tile_count; ++tile) {
+            long long i = tile / tiling.y_tiles;
+            long long j_begin = (tile % tiling.y_tiles) * tiling.rows_per_tile;
+            long long j_end = j_begin + tiling.rows_per_tile;
+            if (j_end > NY_FIELDS) j_end = NY_FIELDS;
+            for (long long j = j_begin; j < j_end; ++j)
+            for (long long k = 0; k < NZ_FIELDS; ++k) {
+                long long idx = i * ny_nz + j * NZ_FIELDS + k;
+                long long id4 = s * field_stride + idx;
 
-        float ue0 = ce_hist[idx];
-        float ue1 = ce_curl[idx];
-        float ue_y = dy == dx ? ue1 : ue1 * dx / dy;
-        float ue_z = dz == dx ? ue1 : ue1 * dx / dz;
+                float ue0 = ce_hist[idx];
+                float ue1 = ce_curl[idx];
+                float ue_y = dy == dx ? ue1 : ue1 * dx / dy;
+                float ue_z = dz == dx ? ue1 : ue1 * dx / dz;
 
-        int do_ex = (((NY_FIELDS - 1) != 1 || (NZ_FIELDS - 1) != 1) && i < (NX_FIELDS - 1) && j > 0 && j < (NY_FIELDS - 1) && k > 0 && k < (NZ_FIELDS - 1));
-        int do_ey = (((NX_FIELDS - 1) != 1 || (NZ_FIELDS - 1) != 1) && i > 0 && i < (NX_FIELDS - 1) && j < (NY_FIELDS - 1) && k > 0 && k < (NZ_FIELDS - 1));
-        int do_ez = (((NX_FIELDS - 1) != 1 || (NY_FIELDS - 1) != 1) && i > 0 && i < (NX_FIELDS - 1) && j > 0 && j < (NY_FIELDS - 1) && k < (NZ_FIELDS - 1));
+                int do_ex = (((NY_FIELDS - 1) != 1 || (NZ_FIELDS - 1) != 1) && i < (NX_FIELDS - 1) && j > 0 && j < (NY_FIELDS - 1) && k > 0 && k < (NZ_FIELDS - 1));
+                int do_ey = (((NX_FIELDS - 1) != 1 || (NZ_FIELDS - 1) != 1) && i > 0 && i < (NX_FIELDS - 1) && j < (NY_FIELDS - 1) && k > 0 && k < (NZ_FIELDS - 1));
+                int do_ez = (((NX_FIELDS - 1) != 1 || (NY_FIELDS - 1) != 1) && i > 0 && i < (NX_FIELDS - 1) && j > 0 && j < (NY_FIELDS - 1) && k < (NZ_FIELDS - 1));
 
-        if (do_ex) {
-            float dHz_dy = staggered_backward_diff(Hz, id4, NZ_FIELDS, j, NY_FIELDS, fdtd_order);
-            float dHy_dz = staggered_backward_diff(Hy, id4, 1, k, NZ_FIELDS, fdtd_order);
-            Ex[id4] = ue0 * Ex[id4] + ue_y * dHz_dy - ue_z * dHy_dz;
-        }
-        if (do_ey) {
-            float dHx_dz = staggered_backward_diff(Hx, id4, 1, k, NZ_FIELDS, fdtd_order);
-            float dHz_dx = staggered_backward_diff(Hz, id4, ny_nz, i, NX_FIELDS, fdtd_order);
-            Ey[id4] = ue0 * Ey[id4] + ue_z * dHx_dz - ue1 * dHz_dx;
-        }
-        if (do_ez) {
-            float dHy_dx = staggered_backward_diff(Hy, id4, ny_nz, i, NX_FIELDS, fdtd_order);
-            float dHx_dy = staggered_backward_diff(Hx, id4, NZ_FIELDS, j, NY_FIELDS, fdtd_order);
-            Ez[id4] = ue0 * Ez[id4] + ue1 * dHy_dx - ue_y * dHx_dy;
+                if (do_ex) {
+                    float dHz_dy = staggered_backward_diff(Hz, id4, NZ_FIELDS, j, NY_FIELDS, fdtd_order);
+                    float dHy_dz = staggered_backward_diff(Hy, id4, 1, k, NZ_FIELDS, fdtd_order);
+                    Ex[id4] = ue0 * Ex[id4] + ue_y * dHz_dy - ue_z * dHy_dz;
+                }
+                if (do_ey) {
+                    float dHx_dz = staggered_backward_diff(Hx, id4, 1, k, NZ_FIELDS, fdtd_order);
+                    float dHz_dx = staggered_backward_diff(Hz, id4, ny_nz, i, NX_FIELDS, fdtd_order);
+                    Ey[id4] = ue0 * Ey[id4] + ue_z * dHx_dz - ue1 * dHz_dx;
+                }
+                if (do_ez) {
+                    float dHy_dx = staggered_backward_diff(Hy, id4, ny_nz, i, NX_FIELDS, fdtd_order);
+                    float dHx_dy = staggered_backward_diff(Hx, id4, NZ_FIELDS, j, NY_FIELDS, fdtd_order);
+                    Ez[id4] = ue0 * Ez[id4] + ue1 * dHy_dx - ue_y * dHx_dy;
+                }
+            }
         }
     }
 }
@@ -739,143 +780,149 @@ static void cpml_e_cpu(
 {
     long long ny_nz = (long long)NY_FIELDS * NZ_FIELDS;
     long long field_stride = (long long)NX_FIELDS * ny_nz;
-    long long total_work = (long long)step * field_stride;
-    long long work;
 
-    DEEPGPR_OMP_PARALLEL_FOR
-    for (work = 0; work < total_work; ++work) {
-        int s = (int)(work / field_stride);
-        long long idx = work % field_stride;
-        long long i = idx / ny_nz;
-        long long rem = idx % ny_nz;
-        long long j = rem / NZ_FIELDS;
-        long long k = rem % NZ_FIELDS;
+    {
+        CpuRowTiling tiling = cpu_row_tiling(step, NX_FIELDS, NY_FIELDS);
+        long long tile_count = NX_FIELDS * tiling.y_tiles;
+        long long s, tile;
+        DEEPGPR_OMP_PARALLEL_FOR_COLLAPSE2
+        for (s = 0; s < step; ++s)
+        for (tile = 0; tile < tile_count; ++tile) {
+            long long i = tile / tiling.y_tiles;
+            long long j_begin = (tile % tiling.y_tiles) * tiling.rows_per_tile;
+            long long j_end = j_begin + tiling.rows_per_tile;
+            if (j_end > NY_FIELDS) j_end = NY_FIELDS;
+            for (long long j = j_begin; j < j_end; ++j)
+            for (long long k = 0; k < NZ_FIELDS; ++k) {
+                long long idx = i * ny_nz + j * NZ_FIELDS + k;
 
-        int in_x0 = (pml0 > 0 && i > 0 && i <= pml0 && j < NY_FIELDS && k < NZ_FIELDS);
-        int in_xm = (pml1 > 0 && i >= NX_FIELDS - 1 - pml1 && i < NX_FIELDS - 1 && j < NY_FIELDS && k < NZ_FIELDS);
-        int in_y0 = (pml2 > 0 && i < NX_FIELDS && j > 0 && j <= pml2 && k < NZ_FIELDS);
-        int in_ym = (pml3 > 0 && i < NX_FIELDS && j >= NY_FIELDS - 1 - pml3 && j < NY_FIELDS - 1 && k < NZ_FIELDS);
-        int in_z0 = (pml4 > 0 && i < NX_FIELDS && j < NY_FIELDS && k > 0 && k <= pml4);
-        int in_zm = (pml5 > 0 && i < NX_FIELDS && j < NY_FIELDS && k >= NZ_FIELDS - 1 - pml5 && k < NZ_FIELDS - 1);
-        if (!(in_x0 || in_xm || in_y0 || in_ym || in_z0 || in_zm)) {
-            continue;
-        }
+                int in_x0 = (pml0 > 0 && i > 0 && i <= pml0 && j < NY_FIELDS && k < NZ_FIELDS);
+                int in_xm = (pml1 > 0 && i >= NX_FIELDS - 1 - pml1 && i < NX_FIELDS - 1 && j < NY_FIELDS && k < NZ_FIELDS);
+                int in_y0 = (pml2 > 0 && i < NX_FIELDS && j > 0 && j <= pml2 && k < NZ_FIELDS);
+                int in_ym = (pml3 > 0 && i < NX_FIELDS && j >= NY_FIELDS - 1 - pml3 && j < NY_FIELDS - 1 && k < NZ_FIELDS);
+                int in_z0 = (pml4 > 0 && i < NX_FIELDS && j < NY_FIELDS && k > 0 && k <= pml4);
+                int in_zm = (pml5 > 0 && i < NX_FIELDS && j < NY_FIELDS && k >= NZ_FIELDS - 1 - pml5 && k < NZ_FIELDS - 1);
+                if (!(in_x0 || in_xm || in_y0 || in_ym || in_z0 || in_zm)) {
+                    continue;
+                }
 
-        float upd = updatecoeffsE[idx];
-        long long id4 = work;
+                float upd = updatecoeffsE[idx];
+                long long id4 = s * field_stride + idx;
 
-        {
-            if (in_x0) {
-                long long i1 = pml0 - i;
-                float RA01 = x0ER[i1] - 1.0f, RB0 = x0ER[pml0 + i1], RE0 = x0ER[2 * pml0 + i1], RF0 = x0ER[3 * pml0 + i1];
-                if (j < NY_FIELDS - 1 && i > 0) {
-                    float dHz = staggered_backward_diff(Hz, id4, ny_nz, i, NX_FIELDS, fdtd_order) / dx;
-                    long long p_idx = ((long long)s * (pml0 + 1) * (NY_FIELDS - 1) * NZ_FIELDS) + i1 * (NY_FIELDS - 1) * NZ_FIELDS + j * NZ_FIELDS + k;
-                    float phi = x0EPhi1[p_idx];
-                    Ey[id4] -= upd * (RA01 * dHz + RB0 * phi);
-                    x0EPhi1[p_idx] = RE0 * phi - RF0 * dHz;
-                }
-                if (k < NZ_FIELDS - 1 && i > 0) {
-                    float dHy = staggered_backward_diff(Hy, id4, ny_nz, i, NX_FIELDS, fdtd_order) / dx;
-                    long long p_idx = ((long long)s * (pml0 + 1) * NY_FIELDS * (NZ_FIELDS - 1)) + i1 * NY_FIELDS * (NZ_FIELDS - 1) + j * (NZ_FIELDS - 1) + k;
-                    float phi = x0EPhi2[p_idx];
-                    Ez[id4] += upd * (RA01 * dHy + RB0 * phi);
-                    x0EPhi2[p_idx] = RE0 * phi - RF0 * dHy;
-                }
-            }
+                {
+                    if (in_x0) {
+                        long long i1 = pml0 - i;
+                        float RA01 = x0ER[i1] - 1.0f, RB0 = x0ER[pml0 + i1], RE0 = x0ER[2 * pml0 + i1], RF0 = x0ER[3 * pml0 + i1];
+                        if (j < NY_FIELDS - 1 && i > 0) {
+                            float dHz = staggered_backward_diff(Hz, id4, ny_nz, i, NX_FIELDS, fdtd_order) / dx;
+                            long long p_idx = ((long long)s * (pml0 + 1) * (NY_FIELDS - 1) * NZ_FIELDS) + i1 * (NY_FIELDS - 1) * NZ_FIELDS + j * NZ_FIELDS + k;
+                            float phi = x0EPhi1[p_idx];
+                            Ey[id4] -= upd * (RA01 * dHz + RB0 * phi);
+                            x0EPhi1[p_idx] = RE0 * phi - RF0 * dHz;
+                        }
+                        if (k < NZ_FIELDS - 1 && i > 0) {
+                            float dHy = staggered_backward_diff(Hy, id4, ny_nz, i, NX_FIELDS, fdtd_order) / dx;
+                            long long p_idx = ((long long)s * (pml0 + 1) * NY_FIELDS * (NZ_FIELDS - 1)) + i1 * NY_FIELDS * (NZ_FIELDS - 1) + j * (NZ_FIELDS - 1) + k;
+                            float phi = x0EPhi2[p_idx];
+                            Ez[id4] += upd * (RA01 * dHy + RB0 * phi);
+                            x0EPhi2[p_idx] = RE0 * phi - RF0 * dHy;
+                        }
+                    }
 
-            if (in_xm) {
-                long long i1 = i - (NX_FIELDS - 1 - pml1);
-                float RA01 = xmER[i1] - 1.0f, RB0 = xmER[pml1 + i1], RE0 = xmER[2 * pml1 + i1], RF0 = xmER[3 * pml1 + i1];
-                if (j < NY_FIELDS - 1 && i > 0) {
-                    float dHz = staggered_backward_diff(Hz, id4, ny_nz, i, NX_FIELDS, fdtd_order) / dx;
-                    long long p_idx = ((long long)s * (pml1 + 1) * (NY_FIELDS - 1) * NZ_FIELDS) + i1 * (NY_FIELDS - 1) * NZ_FIELDS + j * NZ_FIELDS + k;
-                    float phi = xmEPhi1[p_idx];
-                    Ey[id4] -= upd * (RA01 * dHz + RB0 * phi);
-                    xmEPhi1[p_idx] = RE0 * phi - RF0 * dHz;
-                }
-                if (k < NZ_FIELDS - 1 && i > 0) {
-                    float dHy = staggered_backward_diff(Hy, id4, ny_nz, i, NX_FIELDS, fdtd_order) / dx;
-                    long long p_idx = ((long long)s * (pml1 + 1) * NY_FIELDS * (NZ_FIELDS - 1)) + i1 * NY_FIELDS * (NZ_FIELDS - 1) + j * (NZ_FIELDS - 1) + k;
-                    float phi = xmEPhi2[p_idx];
-                    Ez[id4] += upd * (RA01 * dHy + RB0 * phi);
-                    xmEPhi2[p_idx] = RE0 * phi - RF0 * dHy;
-                }
-            }
+                    if (in_xm) {
+                        long long i1 = i - (NX_FIELDS - 1 - pml1);
+                        float RA01 = xmER[i1] - 1.0f, RB0 = xmER[pml1 + i1], RE0 = xmER[2 * pml1 + i1], RF0 = xmER[3 * pml1 + i1];
+                        if (j < NY_FIELDS - 1 && i > 0) {
+                            float dHz = staggered_backward_diff(Hz, id4, ny_nz, i, NX_FIELDS, fdtd_order) / dx;
+                            long long p_idx = ((long long)s * (pml1 + 1) * (NY_FIELDS - 1) * NZ_FIELDS) + i1 * (NY_FIELDS - 1) * NZ_FIELDS + j * NZ_FIELDS + k;
+                            float phi = xmEPhi1[p_idx];
+                            Ey[id4] -= upd * (RA01 * dHz + RB0 * phi);
+                            xmEPhi1[p_idx] = RE0 * phi - RF0 * dHz;
+                        }
+                        if (k < NZ_FIELDS - 1 && i > 0) {
+                            float dHy = staggered_backward_diff(Hy, id4, ny_nz, i, NX_FIELDS, fdtd_order) / dx;
+                            long long p_idx = ((long long)s * (pml1 + 1) * NY_FIELDS * (NZ_FIELDS - 1)) + i1 * NY_FIELDS * (NZ_FIELDS - 1) + j * (NZ_FIELDS - 1) + k;
+                            float phi = xmEPhi2[p_idx];
+                            Ez[id4] += upd * (RA01 * dHy + RB0 * phi);
+                            xmEPhi2[p_idx] = RE0 * phi - RF0 * dHy;
+                        }
+                    }
 
-            if (in_y0) {
-                long long j1 = pml2 - j;
-                float RA01 = y0ER[j1] - 1.0f, RB0 = y0ER[pml2 + j1], RE0 = y0ER[2 * pml2 + j1], RF0 = y0ER[3 * pml2 + j1];
-                if (i < NX_FIELDS - 1 && j > 0) {
-                    float dHz = staggered_backward_diff(Hz, id4, NZ_FIELDS, j, NY_FIELDS, fdtd_order) / dy;
-                    long long p_idx = ((long long)s * (NX_FIELDS - 1) * (pml2 + 1) * NZ_FIELDS) + i * (pml2 + 1) * NZ_FIELDS + j1 * NZ_FIELDS + k;
-                    float phi = y0EPhi1[p_idx];
-                    Ex[id4] += upd * (RA01 * dHz + RB0 * phi);
-                    y0EPhi1[p_idx] = RE0 * phi - RF0 * dHz;
-                }
-                if (k < NZ_FIELDS - 1 && j > 0) {
-                    float dHx = staggered_backward_diff(Hx, id4, NZ_FIELDS, j, NY_FIELDS, fdtd_order) / dy;
-                    long long p_idx = ((long long)s * NX_FIELDS * (pml2 + 1) * (NZ_FIELDS - 1)) + i * (pml2 + 1) * (NZ_FIELDS - 1) + j1 * (NZ_FIELDS - 1) + k;
-                    float phi = y0EPhi2[p_idx];
-                    Ez[id4] -= upd * (RA01 * dHx + RB0 * phi);
-                    y0EPhi2[p_idx] = RE0 * phi - RF0 * dHx;
-                }
-            }
+                    if (in_y0) {
+                        long long j1 = pml2 - j;
+                        float RA01 = y0ER[j1] - 1.0f, RB0 = y0ER[pml2 + j1], RE0 = y0ER[2 * pml2 + j1], RF0 = y0ER[3 * pml2 + j1];
+                        if (i < NX_FIELDS - 1 && j > 0) {
+                            float dHz = staggered_backward_diff(Hz, id4, NZ_FIELDS, j, NY_FIELDS, fdtd_order) / dy;
+                            long long p_idx = ((long long)s * (NX_FIELDS - 1) * (pml2 + 1) * NZ_FIELDS) + i * (pml2 + 1) * NZ_FIELDS + j1 * NZ_FIELDS + k;
+                            float phi = y0EPhi1[p_idx];
+                            Ex[id4] += upd * (RA01 * dHz + RB0 * phi);
+                            y0EPhi1[p_idx] = RE0 * phi - RF0 * dHz;
+                        }
+                        if (k < NZ_FIELDS - 1 && j > 0) {
+                            float dHx = staggered_backward_diff(Hx, id4, NZ_FIELDS, j, NY_FIELDS, fdtd_order) / dy;
+                            long long p_idx = ((long long)s * NX_FIELDS * (pml2 + 1) * (NZ_FIELDS - 1)) + i * (pml2 + 1) * (NZ_FIELDS - 1) + j1 * (NZ_FIELDS - 1) + k;
+                            float phi = y0EPhi2[p_idx];
+                            Ez[id4] -= upd * (RA01 * dHx + RB0 * phi);
+                            y0EPhi2[p_idx] = RE0 * phi - RF0 * dHx;
+                        }
+                    }
 
-            if (in_ym) {
-                long long j1 = j - (NY_FIELDS - 1 - pml3);
-                float RA01 = ymER[j1] - 1.0f, RB0 = ymER[pml3 + j1], RE0 = ymER[2 * pml3 + j1], RF0 = ymER[3 * pml3 + j1];
-                if (i < NX_FIELDS - 1 && j > 0) {
-                    float dHz = staggered_backward_diff(Hz, id4, NZ_FIELDS, j, NY_FIELDS, fdtd_order) / dy;
-                    long long p_idx = ((long long)s * (NX_FIELDS - 1) * (pml3 + 1) * NZ_FIELDS) + i * (pml3 + 1) * NZ_FIELDS + j1 * NZ_FIELDS + k;
-                    float phi = ymEPhi1[p_idx];
-                    Ex[id4] += upd * (RA01 * dHz + RB0 * phi);
-                    ymEPhi1[p_idx] = RE0 * phi - RF0 * dHz;
-                }
-                if (k < NZ_FIELDS - 1 && j > 0) {
-                    float dHx = staggered_backward_diff(Hx, id4, NZ_FIELDS, j, NY_FIELDS, fdtd_order) / dy;
-                    long long p_idx = ((long long)s * NX_FIELDS * (pml3 + 1) * (NZ_FIELDS - 1)) + i * (pml3 + 1) * (NZ_FIELDS - 1) + j1 * (NZ_FIELDS - 1) + k;
-                    float phi = ymEPhi2[p_idx];
-                    Ez[id4] -= upd * (RA01 * dHx + RB0 * phi);
-                    ymEPhi2[p_idx] = RE0 * phi - RF0 * dHx;
-                }
-            }
+                    if (in_ym) {
+                        long long j1 = j - (NY_FIELDS - 1 - pml3);
+                        float RA01 = ymER[j1] - 1.0f, RB0 = ymER[pml3 + j1], RE0 = ymER[2 * pml3 + j1], RF0 = ymER[3 * pml3 + j1];
+                        if (i < NX_FIELDS - 1 && j > 0) {
+                            float dHz = staggered_backward_diff(Hz, id4, NZ_FIELDS, j, NY_FIELDS, fdtd_order) / dy;
+                            long long p_idx = ((long long)s * (NX_FIELDS - 1) * (pml3 + 1) * NZ_FIELDS) + i * (pml3 + 1) * NZ_FIELDS + j1 * NZ_FIELDS + k;
+                            float phi = ymEPhi1[p_idx];
+                            Ex[id4] += upd * (RA01 * dHz + RB0 * phi);
+                            ymEPhi1[p_idx] = RE0 * phi - RF0 * dHz;
+                        }
+                        if (k < NZ_FIELDS - 1 && j > 0) {
+                            float dHx = staggered_backward_diff(Hx, id4, NZ_FIELDS, j, NY_FIELDS, fdtd_order) / dy;
+                            long long p_idx = ((long long)s * NX_FIELDS * (pml3 + 1) * (NZ_FIELDS - 1)) + i * (pml3 + 1) * (NZ_FIELDS - 1) + j1 * (NZ_FIELDS - 1) + k;
+                            float phi = ymEPhi2[p_idx];
+                            Ez[id4] -= upd * (RA01 * dHx + RB0 * phi);
+                            ymEPhi2[p_idx] = RE0 * phi - RF0 * dHx;
+                        }
+                    }
 
-            if (in_z0) {
-                long long k1 = pml4 - k;
-                float RA01 = z0ER[k1] - 1.0f, RB0 = z0ER[pml4 + k1], RE0 = z0ER[2 * pml4 + k1], RF0 = z0ER[3 * pml4 + k1];
-                if (i < NX_FIELDS - 1 && k > 0) {
-                    float dHy = staggered_backward_diff(Hy, id4, 1, k, NZ_FIELDS, fdtd_order) / dz;
-                    long long p_idx = ((long long)s * (NX_FIELDS - 1) * NY_FIELDS * (pml4 + 1)) + i * NY_FIELDS * (pml4 + 1) + j * (pml4 + 1) + k1;
-                    float phi = z0EPhi1[p_idx];
-                    Ex[id4] -= upd * (RA01 * dHy + RB0 * phi);
-                    z0EPhi1[p_idx] = RE0 * phi - RF0 * dHy;
-                }
-                if (j < NY_FIELDS - 1 && k > 0) {
-                    float dHx = staggered_backward_diff(Hx, id4, 1, k, NZ_FIELDS, fdtd_order) / dz;
-                    long long p_idx = ((long long)s * NX_FIELDS * (NY_FIELDS - 1) * (pml4 + 1)) + i * (NY_FIELDS - 1) * (pml4 + 1) + j * (pml4 + 1) + k1;
-                    float phi = z0EPhi2[p_idx];
-                    Ey[id4] += upd * (RA01 * dHx + RB0 * phi);
-                    z0EPhi2[p_idx] = RE0 * phi - RF0 * dHx;
-                }
-            }
+                    if (in_z0) {
+                        long long k1 = pml4 - k;
+                        float RA01 = z0ER[k1] - 1.0f, RB0 = z0ER[pml4 + k1], RE0 = z0ER[2 * pml4 + k1], RF0 = z0ER[3 * pml4 + k1];
+                        if (i < NX_FIELDS - 1 && k > 0) {
+                            float dHy = staggered_backward_diff(Hy, id4, 1, k, NZ_FIELDS, fdtd_order) / dz;
+                            long long p_idx = ((long long)s * (NX_FIELDS - 1) * NY_FIELDS * (pml4 + 1)) + i * NY_FIELDS * (pml4 + 1) + j * (pml4 + 1) + k1;
+                            float phi = z0EPhi1[p_idx];
+                            Ex[id4] -= upd * (RA01 * dHy + RB0 * phi);
+                            z0EPhi1[p_idx] = RE0 * phi - RF0 * dHy;
+                        }
+                        if (j < NY_FIELDS - 1 && k > 0) {
+                            float dHx = staggered_backward_diff(Hx, id4, 1, k, NZ_FIELDS, fdtd_order) / dz;
+                            long long p_idx = ((long long)s * NX_FIELDS * (NY_FIELDS - 1) * (pml4 + 1)) + i * (NY_FIELDS - 1) * (pml4 + 1) + j * (pml4 + 1) + k1;
+                            float phi = z0EPhi2[p_idx];
+                            Ey[id4] += upd * (RA01 * dHx + RB0 * phi);
+                            z0EPhi2[p_idx] = RE0 * phi - RF0 * dHx;
+                        }
+                    }
 
-            if (in_zm) {
-                long long k1 = k - (NZ_FIELDS - 1 - pml5);
-                float RA01 = zmER[k1] - 1.0f, RB0 = zmER[pml5 + k1], RE0 = zmER[2 * pml5 + k1], RF0 = zmER[3 * pml5 + k1];
-                if (i < NX_FIELDS - 1 && k > 0) {
-                    float dHy = staggered_backward_diff(Hy, id4, 1, k, NZ_FIELDS, fdtd_order) / dz;
-                    long long p_idx = ((long long)s * (NX_FIELDS - 1) * NY_FIELDS * (pml5 + 1)) + i * NY_FIELDS * (pml5 + 1) + j * (pml5 + 1) + k1;
-                    float phi = zmEPhi1[p_idx];
-                    Ex[id4] -= upd * (RA01 * dHy + RB0 * phi);
-                    zmEPhi1[p_idx] = RE0 * phi - RF0 * dHy;
-                }
-                if (j < NY_FIELDS - 1 && k > 0) {
-                    float dHx = staggered_backward_diff(Hx, id4, 1, k, NZ_FIELDS, fdtd_order) / dz;
-                    long long p_idx = ((long long)s * NX_FIELDS * (NY_FIELDS - 1) * (pml5 + 1)) + i * (NY_FIELDS - 1) * (pml5 + 1) + j * (pml5 + 1) + k1;
-                    float phi = zmEPhi2[p_idx];
-                    Ey[id4] += upd * (RA01 * dHx + RB0 * phi);
-                    zmEPhi2[p_idx] = RE0 * phi - RF0 * dHx;
+                    if (in_zm) {
+                        long long k1 = k - (NZ_FIELDS - 1 - pml5);
+                        float RA01 = zmER[k1] - 1.0f, RB0 = zmER[pml5 + k1], RE0 = zmER[2 * pml5 + k1], RF0 = zmER[3 * pml5 + k1];
+                        if (i < NX_FIELDS - 1 && k > 0) {
+                            float dHy = staggered_backward_diff(Hy, id4, 1, k, NZ_FIELDS, fdtd_order) / dz;
+                            long long p_idx = ((long long)s * (NX_FIELDS - 1) * NY_FIELDS * (pml5 + 1)) + i * NY_FIELDS * (pml5 + 1) + j * (pml5 + 1) + k1;
+                            float phi = zmEPhi1[p_idx];
+                            Ex[id4] -= upd * (RA01 * dHy + RB0 * phi);
+                            zmEPhi1[p_idx] = RE0 * phi - RF0 * dHy;
+                        }
+                        if (j < NY_FIELDS - 1 && k > 0) {
+                            float dHx = staggered_backward_diff(Hx, id4, 1, k, NZ_FIELDS, fdtd_order) / dz;
+                            long long p_idx = ((long long)s * NX_FIELDS * (NY_FIELDS - 1) * (pml5 + 1)) + i * (NY_FIELDS - 1) * (pml5 + 1) + j * (pml5 + 1) + k1;
+                            float phi = zmEPhi2[p_idx];
+                            Ey[id4] += upd * (RA01 * dHx + RB0 * phi);
+                            zmEPhi2[p_idx] = RE0 * phi - RF0 * dHx;
+                        }
+                    }
                 }
             }
         }
@@ -893,41 +940,48 @@ static void update_h_cpu(
 {
     long long ny_nz = (long long)NY_FIELDS * NZ_FIELDS;
     long long field_stride = (long long)NX_FIELDS * ny_nz;
-    long long total_work = (long long)step * field_stride;
-    long long work;
 
-    DEEPGPR_OMP_PARALLEL_FOR
-    for (work = 0; work < total_work; ++work) {
-        long long idx = work % field_stride;
-        long long i = idx / ny_nz;
-        long long rem = idx % ny_nz;
-        long long j = rem / NZ_FIELDS;
-        long long k = rem % NZ_FIELDS;
-        long long id4 = work;
+    {
+        CpuRowTiling tiling = cpu_row_tiling(step, NX_FIELDS, NY_FIELDS);
+        long long tile_count = NX_FIELDS * tiling.y_tiles;
+        long long s, tile;
+        DEEPGPR_OMP_PARALLEL_FOR_COLLAPSE2
+        for (s = 0; s < step; ++s)
+        for (tile = 0; tile < tile_count; ++tile) {
+            long long i = tile / tiling.y_tiles;
+            long long j_begin = (tile % tiling.y_tiles) * tiling.rows_per_tile;
+            long long j_end = j_begin + tiling.rows_per_tile;
+            if (j_end > NY_FIELDS) j_end = NY_FIELDS;
+            for (long long j = j_begin; j < j_end; ++j)
+            for (long long k = 0; k < NZ_FIELDS; ++k) {
+                long long idx = i * ny_nz + j * NZ_FIELDS + k;
+                long long id4 = s * field_stride + idx;
 
-        float uh0 = ch_hist[idx];
-        float uh1 = ch_curl[idx];
-        float uh_y = dy == dx ? uh1 : uh1 * dx / dy;
-        float uh_z = dz == dx ? uh1 : uh1 * dx / dz;
+                float uh0 = ch_hist[idx];
+                float uh1 = ch_curl[idx];
+                float uh_y = dy == dx ? uh1 : uh1 * dx / dy;
+                float uh_z = dz == dx ? uh1 : uh1 * dx / dz;
 
-        int do_hx = ((NX_FIELDS - 1) != 1 && i > 0 && i < (NX_FIELDS - 1) && j < (NY_FIELDS - 1) && k < (NZ_FIELDS - 1));
-        int do_hy = ((NY_FIELDS - 1) != 1 && i < (NX_FIELDS - 1) && j > 0 && j < (NY_FIELDS - 1) && k < (NZ_FIELDS - 1));
-        int do_hz = ((NZ_FIELDS - 1) != 1 && i < (NX_FIELDS - 1) && j < (NY_FIELDS - 1) && k > 0 && k < (NZ_FIELDS - 1));
+                int do_hx = ((NX_FIELDS - 1) != 1 && i > 0 && i < (NX_FIELDS - 1) && j < (NY_FIELDS - 1) && k < (NZ_FIELDS - 1));
+                int do_hy = ((NY_FIELDS - 1) != 1 && i < (NX_FIELDS - 1) && j > 0 && j < (NY_FIELDS - 1) && k < (NZ_FIELDS - 1));
+                int do_hz = ((NZ_FIELDS - 1) != 1 && i < (NX_FIELDS - 1) && j < (NY_FIELDS - 1) && k > 0 && k < (NZ_FIELDS - 1));
 
-        if (do_hx) {
-            float dEz_dy = staggered_forward_diff(Ez, id4, NZ_FIELDS, j, NY_FIELDS, fdtd_order);
-            float dEy_dz = staggered_forward_diff(Ey, id4, 1, k, NZ_FIELDS, fdtd_order);
-            Hx[id4] = uh0 * Hx[id4] - uh_y * dEz_dy + uh_z * dEy_dz;
-        }
-        if (do_hy) {
-            float dEx_dz = staggered_forward_diff(Ex, id4, 1, k, NZ_FIELDS, fdtd_order);
-            float dEz_dx = staggered_forward_diff(Ez, id4, ny_nz, i, NX_FIELDS, fdtd_order);
-            Hy[id4] = uh0 * Hy[id4] - uh_z * dEx_dz + uh1 * dEz_dx;
-        }
-        if (do_hz) {
-            float dEy_dx = staggered_forward_diff(Ey, id4, ny_nz, i, NX_FIELDS, fdtd_order);
-            float dEx_dy = staggered_forward_diff(Ex, id4, NZ_FIELDS, j, NY_FIELDS, fdtd_order);
-            Hz[id4] = uh0 * Hz[id4] - uh1 * dEy_dx + uh_y * dEx_dy;
+                if (do_hx) {
+                    float dEz_dy = staggered_forward_diff(Ez, id4, NZ_FIELDS, j, NY_FIELDS, fdtd_order);
+                    float dEy_dz = staggered_forward_diff(Ey, id4, 1, k, NZ_FIELDS, fdtd_order);
+                    Hx[id4] = uh0 * Hx[id4] - uh_y * dEz_dy + uh_z * dEy_dz;
+                }
+                if (do_hy) {
+                    float dEx_dz = staggered_forward_diff(Ex, id4, 1, k, NZ_FIELDS, fdtd_order);
+                    float dEz_dx = staggered_forward_diff(Ez, id4, ny_nz, i, NX_FIELDS, fdtd_order);
+                    Hy[id4] = uh0 * Hy[id4] - uh_z * dEx_dz + uh1 * dEz_dx;
+                }
+                if (do_hz) {
+                    float dEy_dx = staggered_forward_diff(Ey, id4, ny_nz, i, NX_FIELDS, fdtd_order);
+                    float dEx_dy = staggered_forward_diff(Ex, id4, NZ_FIELDS, j, NY_FIELDS, fdtd_order);
+                    Hz[id4] = uh0 * Hz[id4] - uh1 * dEy_dx + uh_y * dEx_dy;
+                }
+            }
         }
     }
 }
@@ -956,143 +1010,149 @@ static void cpml_h_cpu(
 {
     long long ny_nz = (long long)NY_FIELDS * NZ_FIELDS;
     long long field_stride = (long long)NX_FIELDS * ny_nz;
-    long long total_work = (long long)step * field_stride;
-    long long work;
 
-    DEEPGPR_OMP_PARALLEL_FOR
-    for (work = 0; work < total_work; ++work) {
-        int s = (int)(work / field_stride);
-        long long idx = work % field_stride;
-        long long i = idx / ny_nz;
-        long long rem = idx % ny_nz;
-        long long j = rem / NZ_FIELDS;
-        long long k = rem % NZ_FIELDS;
+    {
+        CpuRowTiling tiling = cpu_row_tiling(step, NX_FIELDS, NY_FIELDS);
+        long long tile_count = NX_FIELDS * tiling.y_tiles;
+        long long s, tile;
+        DEEPGPR_OMP_PARALLEL_FOR_COLLAPSE2
+        for (s = 0; s < step; ++s)
+        for (tile = 0; tile < tile_count; ++tile) {
+            long long i = tile / tiling.y_tiles;
+            long long j_begin = (tile % tiling.y_tiles) * tiling.rows_per_tile;
+            long long j_end = j_begin + tiling.rows_per_tile;
+            if (j_end > NY_FIELDS) j_end = NY_FIELDS;
+            for (long long j = j_begin; j < j_end; ++j)
+            for (long long k = 0; k < NZ_FIELDS; ++k) {
+                long long idx = i * ny_nz + j * NZ_FIELDS + k;
 
-        int in_x0 = (pml0 > 0 && i < pml0 && j < NY_FIELDS && k < NZ_FIELDS);
-        int in_xm = (pml1 > 0 && i >= NX_FIELDS - 1 - pml1 && i < NX_FIELDS - 1 && j < NY_FIELDS && k < NZ_FIELDS);
-        int in_y0 = (pml2 > 0 && i < NX_FIELDS && j < pml2 && k < NZ_FIELDS);
-        int in_ym = (pml3 > 0 && i < NX_FIELDS && j >= NY_FIELDS - 1 - pml3 && j < NY_FIELDS - 1 && k < NZ_FIELDS);
-        int in_z0 = (pml4 > 0 && i < NX_FIELDS && j < NY_FIELDS && k < pml4);
-        int in_zm = (pml5 > 0 && i < NX_FIELDS && j < NY_FIELDS && k >= NZ_FIELDS - 1 - pml5 && k < NZ_FIELDS - 1);
-        if (!(in_x0 || in_xm || in_y0 || in_ym || in_z0 || in_zm)) {
-            continue;
-        }
+                int in_x0 = (pml0 > 0 && i < pml0 && j < NY_FIELDS && k < NZ_FIELDS);
+                int in_xm = (pml1 > 0 && i >= NX_FIELDS - 1 - pml1 && i < NX_FIELDS - 1 && j < NY_FIELDS && k < NZ_FIELDS);
+                int in_y0 = (pml2 > 0 && i < NX_FIELDS && j < pml2 && k < NZ_FIELDS);
+                int in_ym = (pml3 > 0 && i < NX_FIELDS && j >= NY_FIELDS - 1 - pml3 && j < NY_FIELDS - 1 && k < NZ_FIELDS);
+                int in_z0 = (pml4 > 0 && i < NX_FIELDS && j < NY_FIELDS && k < pml4);
+                int in_zm = (pml5 > 0 && i < NX_FIELDS && j < NY_FIELDS && k >= NZ_FIELDS - 1 - pml5 && k < NZ_FIELDS - 1);
+                if (!(in_x0 || in_xm || in_y0 || in_ym || in_z0 || in_zm)) {
+                    continue;
+                }
 
-        float upd = updatecoeffsH[idx];
-        long long id4 = work;
+                float upd = updatecoeffsH[idx];
+                long long id4 = s * field_stride + idx;
 
-        {
-            if (in_x0) {
-                long long i1 = pml0 - 1 - i;
-                float RA01 = x0HR[i1] - 1.0f, RB0 = x0HR[pml0 + i1], RE0 = x0HR[2 * pml0 + i1], RF0 = x0HR[3 * pml0 + i1];
-                if (k < NZ_FIELDS - 1) {
-                    float dEz = staggered_forward_diff(Ez, id4, ny_nz, i, NX_FIELDS, fdtd_order) / dx;
-                    long long p_idx = ((long long)s * pml0 * NY_FIELDS * (NZ_FIELDS - 1)) + i1 * NY_FIELDS * (NZ_FIELDS - 1) + j * (NZ_FIELDS - 1) + k;
-                    float phi = x0HPhi1[p_idx];
-                    Hy[id4] += upd * (RA01 * dEz + RB0 * phi);
-                    x0HPhi1[p_idx] = RE0 * phi - RF0 * dEz;
-                }
-                if (j < NY_FIELDS - 1) {
-                    float dEy = staggered_forward_diff(Ey, id4, ny_nz, i, NX_FIELDS, fdtd_order) / dx;
-                    long long p_idx = ((long long)s * pml0 * (NY_FIELDS - 1) * NZ_FIELDS) + i1 * (NY_FIELDS - 1) * NZ_FIELDS + j * NZ_FIELDS + k;
-                    float phi = x0HPhi2[p_idx];
-                    Hz[id4] -= upd * (RA01 * dEy + RB0 * phi);
-                    x0HPhi2[p_idx] = RE0 * phi - RF0 * dEy;
-                }
-            }
+                {
+                    if (in_x0) {
+                        long long i1 = pml0 - 1 - i;
+                        float RA01 = x0HR[i1] - 1.0f, RB0 = x0HR[pml0 + i1], RE0 = x0HR[2 * pml0 + i1], RF0 = x0HR[3 * pml0 + i1];
+                        if (k < NZ_FIELDS - 1) {
+                            float dEz = staggered_forward_diff(Ez, id4, ny_nz, i, NX_FIELDS, fdtd_order) / dx;
+                            long long p_idx = ((long long)s * pml0 * NY_FIELDS * (NZ_FIELDS - 1)) + i1 * NY_FIELDS * (NZ_FIELDS - 1) + j * (NZ_FIELDS - 1) + k;
+                            float phi = x0HPhi1[p_idx];
+                            Hy[id4] += upd * (RA01 * dEz + RB0 * phi);
+                            x0HPhi1[p_idx] = RE0 * phi - RF0 * dEz;
+                        }
+                        if (j < NY_FIELDS - 1) {
+                            float dEy = staggered_forward_diff(Ey, id4, ny_nz, i, NX_FIELDS, fdtd_order) / dx;
+                            long long p_idx = ((long long)s * pml0 * (NY_FIELDS - 1) * NZ_FIELDS) + i1 * (NY_FIELDS - 1) * NZ_FIELDS + j * NZ_FIELDS + k;
+                            float phi = x0HPhi2[p_idx];
+                            Hz[id4] -= upd * (RA01 * dEy + RB0 * phi);
+                            x0HPhi2[p_idx] = RE0 * phi - RF0 * dEy;
+                        }
+                    }
 
-            if (in_xm) {
-                long long i1 = i - (NX_FIELDS - 1 - pml1);
-                float RA01 = xmHR[i1] - 1.0f, RB0 = xmHR[pml1 + i1], RE0 = xmHR[2 * pml1 + i1], RF0 = xmHR[3 * pml1 + i1];
-                if (k < NZ_FIELDS - 1) {
-                    float dEz = staggered_forward_diff(Ez, id4, ny_nz, i, NX_FIELDS, fdtd_order) / dx;
-                    long long p_idx = ((long long)s * pml1 * NY_FIELDS * (NZ_FIELDS - 1)) + i1 * NY_FIELDS * (NZ_FIELDS - 1) + j * (NZ_FIELDS - 1) + k;
-                    float phi = xmHPhi1[p_idx];
-                    Hy[id4] += upd * (RA01 * dEz + RB0 * phi);
-                    xmHPhi1[p_idx] = RE0 * phi - RF0 * dEz;
-                }
-                if (j < NY_FIELDS - 1) {
-                    float dEy = staggered_forward_diff(Ey, id4, ny_nz, i, NX_FIELDS, fdtd_order) / dx;
-                    long long p_idx = ((long long)s * pml1 * (NY_FIELDS - 1) * NZ_FIELDS) + i1 * (NY_FIELDS - 1) * NZ_FIELDS + j * NZ_FIELDS + k;
-                    float phi = xmHPhi2[p_idx];
-                    Hz[id4] -= upd * (RA01 * dEy + RB0 * phi);
-                    xmHPhi2[p_idx] = RE0 * phi - RF0 * dEy;
-                }
-            }
+                    if (in_xm) {
+                        long long i1 = i - (NX_FIELDS - 1 - pml1);
+                        float RA01 = xmHR[i1] - 1.0f, RB0 = xmHR[pml1 + i1], RE0 = xmHR[2 * pml1 + i1], RF0 = xmHR[3 * pml1 + i1];
+                        if (k < NZ_FIELDS - 1) {
+                            float dEz = staggered_forward_diff(Ez, id4, ny_nz, i, NX_FIELDS, fdtd_order) / dx;
+                            long long p_idx = ((long long)s * pml1 * NY_FIELDS * (NZ_FIELDS - 1)) + i1 * NY_FIELDS * (NZ_FIELDS - 1) + j * (NZ_FIELDS - 1) + k;
+                            float phi = xmHPhi1[p_idx];
+                            Hy[id4] += upd * (RA01 * dEz + RB0 * phi);
+                            xmHPhi1[p_idx] = RE0 * phi - RF0 * dEz;
+                        }
+                        if (j < NY_FIELDS - 1) {
+                            float dEy = staggered_forward_diff(Ey, id4, ny_nz, i, NX_FIELDS, fdtd_order) / dx;
+                            long long p_idx = ((long long)s * pml1 * (NY_FIELDS - 1) * NZ_FIELDS) + i1 * (NY_FIELDS - 1) * NZ_FIELDS + j * NZ_FIELDS + k;
+                            float phi = xmHPhi2[p_idx];
+                            Hz[id4] -= upd * (RA01 * dEy + RB0 * phi);
+                            xmHPhi2[p_idx] = RE0 * phi - RF0 * dEy;
+                        }
+                    }
 
-            if (in_y0) {
-                long long j1 = pml2 - 1 - j;
-                float RA01 = y0HR[j1] - 1.0f, RB0 = y0HR[pml2 + j1], RE0 = y0HR[2 * pml2 + j1], RF0 = y0HR[3 * pml2 + j1];
-                if (i < NX_FIELDS && k < NZ_FIELDS - 1) {
-                    float dEz = staggered_forward_diff(Ez, id4, NZ_FIELDS, j, NY_FIELDS, fdtd_order) / dy;
-                    long long p_idx = ((long long)s * NX_FIELDS * pml2 * (NZ_FIELDS - 1)) + i * pml2 * (NZ_FIELDS - 1) + j1 * (NZ_FIELDS - 1) + k;
-                    float phi = y0HPhi1[p_idx];
-                    Hx[id4] -= upd * (RA01 * dEz + RB0 * phi);
-                    y0HPhi1[p_idx] = RE0 * phi - RF0 * dEz;
-                }
-                if (i < NX_FIELDS - 1 && k < NZ_FIELDS) {
-                    float dEx = staggered_forward_diff(Ex, id4, NZ_FIELDS, j, NY_FIELDS, fdtd_order) / dy;
-                    long long p_idx = ((long long)s * (NX_FIELDS - 1) * pml2 * NZ_FIELDS) + i * pml2 * NZ_FIELDS + j1 * NZ_FIELDS + k;
-                    float phi = y0HPhi2[p_idx];
-                    Hz[id4] += upd * (RA01 * dEx + RB0 * phi);
-                    y0HPhi2[p_idx] = RE0 * phi - RF0 * dEx;
-                }
-            }
+                    if (in_y0) {
+                        long long j1 = pml2 - 1 - j;
+                        float RA01 = y0HR[j1] - 1.0f, RB0 = y0HR[pml2 + j1], RE0 = y0HR[2 * pml2 + j1], RF0 = y0HR[3 * pml2 + j1];
+                        if (i < NX_FIELDS && k < NZ_FIELDS - 1) {
+                            float dEz = staggered_forward_diff(Ez, id4, NZ_FIELDS, j, NY_FIELDS, fdtd_order) / dy;
+                            long long p_idx = ((long long)s * NX_FIELDS * pml2 * (NZ_FIELDS - 1)) + i * pml2 * (NZ_FIELDS - 1) + j1 * (NZ_FIELDS - 1) + k;
+                            float phi = y0HPhi1[p_idx];
+                            Hx[id4] -= upd * (RA01 * dEz + RB0 * phi);
+                            y0HPhi1[p_idx] = RE0 * phi - RF0 * dEz;
+                        }
+                        if (i < NX_FIELDS - 1 && k < NZ_FIELDS) {
+                            float dEx = staggered_forward_diff(Ex, id4, NZ_FIELDS, j, NY_FIELDS, fdtd_order) / dy;
+                            long long p_idx = ((long long)s * (NX_FIELDS - 1) * pml2 * NZ_FIELDS) + i * pml2 * NZ_FIELDS + j1 * NZ_FIELDS + k;
+                            float phi = y0HPhi2[p_idx];
+                            Hz[id4] += upd * (RA01 * dEx + RB0 * phi);
+                            y0HPhi2[p_idx] = RE0 * phi - RF0 * dEx;
+                        }
+                    }
 
-            if (in_ym) {
-                long long j1 = j - (NY_FIELDS - 1 - pml3);
-                float RA01 = ymHR[j1] - 1.0f, RB0 = ymHR[pml3 + j1], RE0 = ymHR[2 * pml3 + j1], RF0 = ymHR[3 * pml3 + j1];
-                if (i < NX_FIELDS && k < NZ_FIELDS - 1) {
-                    float dEz = staggered_forward_diff(Ez, id4, NZ_FIELDS, j, NY_FIELDS, fdtd_order) / dy;
-                    long long p_idx = ((long long)s * NX_FIELDS * pml3 * (NZ_FIELDS - 1)) + i * pml3 * (NZ_FIELDS - 1) + j1 * (NZ_FIELDS - 1) + k;
-                    float phi = ymHPhi1[p_idx];
-                    Hx[id4] -= upd * (RA01 * dEz + RB0 * phi);
-                    ymHPhi1[p_idx] = RE0 * phi - RF0 * dEz;
-                }
-                if (i < NX_FIELDS - 1 && k < NZ_FIELDS) {
-                    float dEx = staggered_forward_diff(Ex, id4, NZ_FIELDS, j, NY_FIELDS, fdtd_order) / dy;
-                    long long p_idx = ((long long)s * (NX_FIELDS - 1) * pml3 * NZ_FIELDS) + i * pml3 * NZ_FIELDS + j1 * NZ_FIELDS + k;
-                    float phi = ymHPhi2[p_idx];
-                    Hz[id4] += upd * (RA01 * dEx + RB0 * phi);
-                    ymHPhi2[p_idx] = RE0 * phi - RF0 * dEx;
-                }
-            }
+                    if (in_ym) {
+                        long long j1 = j - (NY_FIELDS - 1 - pml3);
+                        float RA01 = ymHR[j1] - 1.0f, RB0 = ymHR[pml3 + j1], RE0 = ymHR[2 * pml3 + j1], RF0 = ymHR[3 * pml3 + j1];
+                        if (i < NX_FIELDS && k < NZ_FIELDS - 1) {
+                            float dEz = staggered_forward_diff(Ez, id4, NZ_FIELDS, j, NY_FIELDS, fdtd_order) / dy;
+                            long long p_idx = ((long long)s * NX_FIELDS * pml3 * (NZ_FIELDS - 1)) + i * pml3 * (NZ_FIELDS - 1) + j1 * (NZ_FIELDS - 1) + k;
+                            float phi = ymHPhi1[p_idx];
+                            Hx[id4] -= upd * (RA01 * dEz + RB0 * phi);
+                            ymHPhi1[p_idx] = RE0 * phi - RF0 * dEz;
+                        }
+                        if (i < NX_FIELDS - 1 && k < NZ_FIELDS) {
+                            float dEx = staggered_forward_diff(Ex, id4, NZ_FIELDS, j, NY_FIELDS, fdtd_order) / dy;
+                            long long p_idx = ((long long)s * (NX_FIELDS - 1) * pml3 * NZ_FIELDS) + i * pml3 * NZ_FIELDS + j1 * NZ_FIELDS + k;
+                            float phi = ymHPhi2[p_idx];
+                            Hz[id4] += upd * (RA01 * dEx + RB0 * phi);
+                            ymHPhi2[p_idx] = RE0 * phi - RF0 * dEx;
+                        }
+                    }
 
-            if (in_z0) {
-                long long k1 = pml4 - 1 - k;
-                float RA01 = z0HR[k1] - 1.0f, RB0 = z0HR[pml4 + k1], RE0 = z0HR[2 * pml4 + k1], RF0 = z0HR[3 * pml4 + k1];
-                if (i < NX_FIELDS && j < NY_FIELDS - 1) {
-                    float dEy = staggered_forward_diff(Ey, id4, 1, k, NZ_FIELDS, fdtd_order) / dz;
-                    long long p_idx = ((long long)s * NX_FIELDS * (NY_FIELDS - 1) * pml4) + i * (NY_FIELDS - 1) * pml4 + j * pml4 + k1;
-                    float phi = z0HPhi1[p_idx];
-                    Hx[id4] += upd * (RA01 * dEy + RB0 * phi);
-                    z0HPhi1[p_idx] = RE0 * phi - RF0 * dEy;
-                }
-                if (i < NX_FIELDS - 1 && j < NY_FIELDS) {
-                    float dEx = staggered_forward_diff(Ex, id4, 1, k, NZ_FIELDS, fdtd_order) / dz;
-                    long long p_idx = ((long long)s * (NX_FIELDS - 1) * NY_FIELDS * pml4) + i * NY_FIELDS * pml4 + j * pml4 + k1;
-                    float phi = z0HPhi2[p_idx];
-                    Hy[id4] -= upd * (RA01 * dEx + RB0 * phi);
-                    z0HPhi2[p_idx] = RE0 * phi - RF0 * dEx;
-                }
-            }
+                    if (in_z0) {
+                        long long k1 = pml4 - 1 - k;
+                        float RA01 = z0HR[k1] - 1.0f, RB0 = z0HR[pml4 + k1], RE0 = z0HR[2 * pml4 + k1], RF0 = z0HR[3 * pml4 + k1];
+                        if (i < NX_FIELDS && j < NY_FIELDS - 1) {
+                            float dEy = staggered_forward_diff(Ey, id4, 1, k, NZ_FIELDS, fdtd_order) / dz;
+                            long long p_idx = ((long long)s * NX_FIELDS * (NY_FIELDS - 1) * pml4) + i * (NY_FIELDS - 1) * pml4 + j * pml4 + k1;
+                            float phi = z0HPhi1[p_idx];
+                            Hx[id4] += upd * (RA01 * dEy + RB0 * phi);
+                            z0HPhi1[p_idx] = RE0 * phi - RF0 * dEy;
+                        }
+                        if (i < NX_FIELDS - 1 && j < NY_FIELDS) {
+                            float dEx = staggered_forward_diff(Ex, id4, 1, k, NZ_FIELDS, fdtd_order) / dz;
+                            long long p_idx = ((long long)s * (NX_FIELDS - 1) * NY_FIELDS * pml4) + i * NY_FIELDS * pml4 + j * pml4 + k1;
+                            float phi = z0HPhi2[p_idx];
+                            Hy[id4] -= upd * (RA01 * dEx + RB0 * phi);
+                            z0HPhi2[p_idx] = RE0 * phi - RF0 * dEx;
+                        }
+                    }
 
-            if (in_zm) {
-                long long k1 = k - (NZ_FIELDS - 1 - pml5);
-                float RA01 = zmHR[k1] - 1.0f, RB0 = zmHR[pml5 + k1], RE0 = zmHR[2 * pml5 + k1], RF0 = zmHR[3 * pml5 + k1];
-                if (i < NX_FIELDS && j < NY_FIELDS - 1) {
-                    float dEy = staggered_forward_diff(Ey, id4, 1, k, NZ_FIELDS, fdtd_order) / dz;
-                    long long p_idx = ((long long)s * NX_FIELDS * (NY_FIELDS - 1) * pml5) + i * (NY_FIELDS - 1) * pml5 + j * pml5 + k1;
-                    float phi = zmHPhi1[p_idx];
-                    Hx[id4] += upd * (RA01 * dEy + RB0 * phi);
-                    zmHPhi1[p_idx] = RE0 * phi - RF0 * dEy;
-                }
-                if (i < NX_FIELDS - 1 && j < NY_FIELDS) {
-                    float dEx = staggered_forward_diff(Ex, id4, 1, k, NZ_FIELDS, fdtd_order) / dz;
-                    long long p_idx = ((long long)s * (NX_FIELDS - 1) * NY_FIELDS * pml5) + i * NY_FIELDS * pml5 + j * pml5 + k1;
-                    float phi = zmHPhi2[p_idx];
-                    Hy[id4] -= upd * (RA01 * dEx + RB0 * phi);
-                    zmHPhi2[p_idx] = RE0 * phi - RF0 * dEx;
+                    if (in_zm) {
+                        long long k1 = k - (NZ_FIELDS - 1 - pml5);
+                        float RA01 = zmHR[k1] - 1.0f, RB0 = zmHR[pml5 + k1], RE0 = zmHR[2 * pml5 + k1], RF0 = zmHR[3 * pml5 + k1];
+                        if (i < NX_FIELDS && j < NY_FIELDS - 1) {
+                            float dEy = staggered_forward_diff(Ey, id4, 1, k, NZ_FIELDS, fdtd_order) / dz;
+                            long long p_idx = ((long long)s * NX_FIELDS * (NY_FIELDS - 1) * pml5) + i * (NY_FIELDS - 1) * pml5 + j * pml5 + k1;
+                            float phi = zmHPhi1[p_idx];
+                            Hx[id4] += upd * (RA01 * dEy + RB0 * phi);
+                            zmHPhi1[p_idx] = RE0 * phi - RF0 * dEy;
+                        }
+                        if (i < NX_FIELDS - 1 && j < NY_FIELDS) {
+                            float dEx = staggered_forward_diff(Ex, id4, 1, k, NZ_FIELDS, fdtd_order) / dz;
+                            long long p_idx = ((long long)s * (NX_FIELDS - 1) * NY_FIELDS * pml5) + i * NY_FIELDS * pml5 + j * pml5 + k1;
+                            float phi = zmHPhi2[p_idx];
+                            Hy[id4] -= upd * (RA01 * dEx + RB0 * phi);
+                            zmHPhi2[p_idx] = RE0 * phi - RF0 * dEx;
+                        }
+                    }
                 }
             }
         }
@@ -1136,147 +1196,164 @@ static void adjoint_e_step_cpu(
     float* RESTRICT w_b_z = weights + CH_B_Z * total_work;
     float* RESTRICT w_c_y = weights + CH_C_Y * total_work;
     float* RESTRICT w_c_z = weights + CH_C_Z * total_work;
-    long long work;
 
-    DEEPGPR_OMP_PARALLEL_FOR
-    for (work = 0; work < total_work; ++work) {
-        int s = (int)(work / field_stride);
-        long long idx = work % field_stride;
-        long long i = idx / ny_nz;
-        long long rem = idx % ny_nz;
-        long long j = rem / NZ;
-        long long k = rem % NZ;
-        float lex = lambda_ex[work];
-        float ley = lambda_ey[work];
-        float lez = lambda_ez[work];
-        float hz_x = 0.0f, hz_y = 0.0f, hy_x = 0.0f, hy_z = 0.0f, hx_y = 0.0f, hx_z = 0.0f;
+    {
+        CpuRowTiling tiling = cpu_row_tiling(step, NX, NY);
+        long long tile_count = NX * tiling.y_tiles;
+        long long s, tile;
+        DEEPGPR_OMP_PARALLEL_FOR_COLLAPSE2
+        for (s = 0; s < step; ++s)
+        for (tile = 0; tile < tile_count; ++tile) {
+            long long i = tile / tiling.y_tiles;
+            long long j_begin = (tile % tiling.y_tiles) * tiling.rows_per_tile;
+            long long j_end = j_begin + tiling.rows_per_tile;
+            if (j_end > NY) j_end = NY;
+            for (long long j = j_begin; j < j_end; ++j)
+            for (long long k = 0; k < NZ; ++k) {
+                long long idx = i * ny_nz + j * NZ + k;
+                long long work = s * field_stride + idx;
+                float lex = lambda_ex[work];
+                float ley = lambda_ey[work];
+                float lez = lambda_ez[work];
+                float hz_x = 0.0f, hz_y = 0.0f, hy_x = 0.0f, hy_z = 0.0f, hx_y = 0.0f, hx_z = 0.0f;
 
-        if (has_cpml) {
-            float upd = update[idx];
-            long long p_idx;
-#define E_PML(R, P, p, q, spacing, field, channel, sign) \
-            do { \
-                (channel) += pml_adjoint_weight( \
-                    (field), 1.0f / (spacing), upd, (sign), (R)[q] - 1.0f, \
-                    (R)[(p) + (q)], (R)[2 * (p) + (q)], (R)[3 * (p) + (q)], &(P)[p_idx]); \
-            } while (0)
+                if (has_cpml) {
+                    float upd = update[idx];
+                    long long p_idx;
+        #define E_PML(R, P, p, q, spacing, field, channel, sign) \
+                    do { \
+                        (channel) += pml_adjoint_weight( \
+                            (field), 1.0f / (spacing), upd, (sign), (R)[q] - 1.0f, \
+                            (R)[(p) + (q)], (R)[2 * (p) + (q)], (R)[3 * (p) + (q)], &(P)[p_idx]); \
+                    } while (0)
 
-            if (pml0 > 0 && i > 0 && i <= pml0) {
-                long long q = pml0 - i;
-                if (j < NY - 1) {
-                    p_idx = ((long long)s * (pml0 + 1) * (NY - 1) * NZ) + q * (NY - 1) * NZ + j * NZ + k;
-                    E_PML(x0R, x0P1, pml0, q, dx, ley, hz_x, -1.0f);
+                    if (pml0 > 0 && i > 0 && i <= pml0) {
+                        long long q = pml0 - i;
+                        if (j < NY - 1) {
+                            p_idx = ((long long)s * (pml0 + 1) * (NY - 1) * NZ) + q * (NY - 1) * NZ + j * NZ + k;
+                            E_PML(x0R, x0P1, pml0, q, dx, ley, hz_x, -1.0f);
+                        }
+                        if (k < NZ - 1) {
+                            p_idx = ((long long)s * (pml0 + 1) * NY * (NZ - 1)) + q * NY * (NZ - 1) + j * (NZ - 1) + k;
+                            E_PML(x0R, x0P2, pml0, q, dx, lez, hy_x, 1.0f);
+                        }
+                    }
+                    if (pml1 > 0 && i >= NX - 1 - pml1 && i < NX - 1) {
+                        long long q = i - (NX - 1 - pml1);
+                        if (j < NY - 1 && i > 0) {
+                            p_idx = ((long long)s * (pml1 + 1) * (NY - 1) * NZ) + q * (NY - 1) * NZ + j * NZ + k;
+                            E_PML(xmR, xmP1, pml1, q, dx, ley, hz_x, -1.0f);
+                        }
+                        if (k < NZ - 1 && i > 0) {
+                            p_idx = ((long long)s * (pml1 + 1) * NY * (NZ - 1)) + q * NY * (NZ - 1) + j * (NZ - 1) + k;
+                            E_PML(xmR, xmP2, pml1, q, dx, lez, hy_x, 1.0f);
+                        }
+                    }
+                    if (pml2 > 0 && j > 0 && j <= pml2) {
+                        long long q = pml2 - j;
+                        if (i < NX - 1) {
+                            p_idx = ((long long)s * (NX - 1) * (pml2 + 1) * NZ) + i * (pml2 + 1) * NZ + q * NZ + k;
+                            E_PML(y0R, y0P1, pml2, q, dy, lex, hz_y, 1.0f);
+                        }
+                        if (k < NZ - 1) {
+                            p_idx = ((long long)s * NX * (pml2 + 1) * (NZ - 1)) + i * (pml2 + 1) * (NZ - 1) + q * (NZ - 1) + k;
+                            E_PML(y0R, y0P2, pml2, q, dy, lez, hx_y, -1.0f);
+                        }
+                    }
+                    if (pml3 > 0 && j >= NY - 1 - pml3 && j < NY - 1) {
+                        long long q = j - (NY - 1 - pml3);
+                        if (i < NX - 1 && j > 0) {
+                            p_idx = ((long long)s * (NX - 1) * (pml3 + 1) * NZ) + i * (pml3 + 1) * NZ + q * NZ + k;
+                            E_PML(ymR, ymP1, pml3, q, dy, lex, hz_y, 1.0f);
+                        }
+                        if (k < NZ - 1 && j > 0) {
+                            p_idx = ((long long)s * NX * (pml3 + 1) * (NZ - 1)) + i * (pml3 + 1) * (NZ - 1) + q * (NZ - 1) + k;
+                            E_PML(ymR, ymP2, pml3, q, dy, lez, hx_y, -1.0f);
+                        }
+                    }
+                    if (pml4 > 0 && k > 0 && k <= pml4) {
+                        long long q = pml4 - k;
+                        if (i < NX - 1) {
+                            p_idx = ((long long)s * (NX - 1) * NY * (pml4 + 1)) + i * NY * (pml4 + 1) + j * (pml4 + 1) + q;
+                            E_PML(z0R, z0P1, pml4, q, dz, lex, hy_z, -1.0f);
+                        }
+                        if (j < NY - 1) {
+                            p_idx = ((long long)s * NX * (NY - 1) * (pml4 + 1)) + i * (NY - 1) * (pml4 + 1) + j * (pml4 + 1) + q;
+                            E_PML(z0R, z0P2, pml4, q, dz, ley, hx_z, 1.0f);
+                        }
+                    }
+                    if (pml5 > 0 && k >= NZ - 1 - pml5 && k < NZ - 1) {
+                        long long q = k - (NZ - 1 - pml5);
+                        if (i < NX - 1 && k > 0) {
+                            p_idx = ((long long)s * (NX - 1) * NY * (pml5 + 1)) + i * NY * (pml5 + 1) + j * (pml5 + 1) + q;
+                            E_PML(zmR, zmP1, pml5, q, dz, lex, hy_z, -1.0f);
+                        }
+                        if (j < NY - 1 && k > 0) {
+                            p_idx = ((long long)s * NX * (NY - 1) * (pml5 + 1)) + i * (NY - 1) * (pml5 + 1) + j * (pml5 + 1) + q;
+                            E_PML(zmR, zmP2, pml5, q, dz, ley, hx_z, 1.0f);
+                        }
+                    }
+        #undef E_PML
                 }
-                if (k < NZ - 1) {
-                    p_idx = ((long long)s * (pml0 + 1) * NY * (NZ - 1)) + q * NY * (NZ - 1) + j * (NZ - 1) + k;
-                    E_PML(x0R, x0P2, pml0, q, dx, lez, hy_x, 1.0f);
+
+                {
+                    int do_ex = (((NY - 1) != 1 || (NZ - 1) != 1) && i < NX - 1 && j > 0 && j < NY - 1 && k > 0 && k < NZ - 1);
+                    int do_ey = (((NX - 1) != 1 || (NZ - 1) != 1) && i > 0 && i < NX - 1 && j < NY - 1 && k > 0 && k < NZ - 1);
+                    int do_ez = (((NX - 1) != 1 || (NY - 1) != 1) && i > 0 && i < NX - 1 && j > 0 && j < NY - 1 && k < NZ - 1);
+                    float coeff = ce_curl[idx];
+                    float coeff_y = dy == dx ? coeff : coeff * dx / dy;
+                    float coeff_z = dz == dx ? coeff : coeff * dx / dz;
+
+                    if (do_ex) {
+                        hz_y += coeff_y * lex;
+                        hy_z += -coeff_z * lex;
+                        lambda_ex[work] = ce_hist[idx] * lex;
+                    }
+                    if (do_ey) {
+                        hx_z += coeff_z * ley;
+                        hz_x += -coeff * ley;
+                        lambda_ey[work] = ce_hist[idx] * ley;
+                    }
+                    if (do_ez) {
+                        hy_x += coeff * lez;
+                        hx_y += -coeff_y * lez;
+                        lambda_ez[work] = ce_hist[idx] * lez;
+                    }
                 }
+
+                w_a_x[work] = hz_x;
+                w_a_y[work] = hz_y;
+                w_b_x[work] = hy_x;
+                w_b_z[work] = hy_z;
+                w_c_y[work] = hx_y;
+                w_c_z[work] = hx_z;
             }
-            if (pml1 > 0 && i >= NX - 1 - pml1 && i < NX - 1) {
-                long long q = i - (NX - 1 - pml1);
-                if (j < NY - 1 && i > 0) {
-                    p_idx = ((long long)s * (pml1 + 1) * (NY - 1) * NZ) + q * (NY - 1) * NZ + j * NZ + k;
-                    E_PML(xmR, xmP1, pml1, q, dx, ley, hz_x, -1.0f);
-                }
-                if (k < NZ - 1 && i > 0) {
-                    p_idx = ((long long)s * (pml1 + 1) * NY * (NZ - 1)) + q * NY * (NZ - 1) + j * (NZ - 1) + k;
-                    E_PML(xmR, xmP2, pml1, q, dx, lez, hy_x, 1.0f);
-                }
-            }
-            if (pml2 > 0 && j > 0 && j <= pml2) {
-                long long q = pml2 - j;
-                if (i < NX - 1) {
-                    p_idx = ((long long)s * (NX - 1) * (pml2 + 1) * NZ) + i * (pml2 + 1) * NZ + q * NZ + k;
-                    E_PML(y0R, y0P1, pml2, q, dy, lex, hz_y, 1.0f);
-                }
-                if (k < NZ - 1) {
-                    p_idx = ((long long)s * NX * (pml2 + 1) * (NZ - 1)) + i * (pml2 + 1) * (NZ - 1) + q * (NZ - 1) + k;
-                    E_PML(y0R, y0P2, pml2, q, dy, lez, hx_y, -1.0f);
-                }
-            }
-            if (pml3 > 0 && j >= NY - 1 - pml3 && j < NY - 1) {
-                long long q = j - (NY - 1 - pml3);
-                if (i < NX - 1 && j > 0) {
-                    p_idx = ((long long)s * (NX - 1) * (pml3 + 1) * NZ) + i * (pml3 + 1) * NZ + q * NZ + k;
-                    E_PML(ymR, ymP1, pml3, q, dy, lex, hz_y, 1.0f);
-                }
-                if (k < NZ - 1 && j > 0) {
-                    p_idx = ((long long)s * NX * (pml3 + 1) * (NZ - 1)) + i * (pml3 + 1) * (NZ - 1) + q * (NZ - 1) + k;
-                    E_PML(ymR, ymP2, pml3, q, dy, lez, hx_y, -1.0f);
-                }
-            }
-            if (pml4 > 0 && k > 0 && k <= pml4) {
-                long long q = pml4 - k;
-                if (i < NX - 1) {
-                    p_idx = ((long long)s * (NX - 1) * NY * (pml4 + 1)) + i * NY * (pml4 + 1) + j * (pml4 + 1) + q;
-                    E_PML(z0R, z0P1, pml4, q, dz, lex, hy_z, -1.0f);
-                }
-                if (j < NY - 1) {
-                    p_idx = ((long long)s * NX * (NY - 1) * (pml4 + 1)) + i * (NY - 1) * (pml4 + 1) + j * (pml4 + 1) + q;
-                    E_PML(z0R, z0P2, pml4, q, dz, ley, hx_z, 1.0f);
-                }
-            }
-            if (pml5 > 0 && k >= NZ - 1 - pml5 && k < NZ - 1) {
-                long long q = k - (NZ - 1 - pml5);
-                if (i < NX - 1 && k > 0) {
-                    p_idx = ((long long)s * (NX - 1) * NY * (pml5 + 1)) + i * NY * (pml5 + 1) + j * (pml5 + 1) + q;
-                    E_PML(zmR, zmP1, pml5, q, dz, lex, hy_z, -1.0f);
-                }
-                if (j < NY - 1 && k > 0) {
-                    p_idx = ((long long)s * NX * (NY - 1) * (pml5 + 1)) + i * (NY - 1) * (pml5 + 1) + j * (pml5 + 1) + q;
-                    E_PML(zmR, zmP2, pml5, q, dz, ley, hx_z, 1.0f);
-                }
-            }
-#undef E_PML
         }
-
-        {
-            int do_ex = (((NY - 1) != 1 || (NZ - 1) != 1) && i < NX - 1 && j > 0 && j < NY - 1 && k > 0 && k < NZ - 1);
-            int do_ey = (((NX - 1) != 1 || (NZ - 1) != 1) && i > 0 && i < NX - 1 && j < NY - 1 && k > 0 && k < NZ - 1);
-            int do_ez = (((NX - 1) != 1 || (NY - 1) != 1) && i > 0 && i < NX - 1 && j > 0 && j < NY - 1 && k < NZ - 1);
-            float coeff = ce_curl[idx];
-            float coeff_y = dy == dx ? coeff : coeff * dx / dy;
-            float coeff_z = dz == dx ? coeff : coeff * dx / dz;
-
-            if (do_ex) {
-                hz_y += coeff_y * lex;
-                hy_z += -coeff_z * lex;
-                lambda_ex[work] = ce_hist[idx] * lex;
-            }
-            if (do_ey) {
-                hx_z += coeff_z * ley;
-                hz_x += -coeff * ley;
-                lambda_ey[work] = ce_hist[idx] * ley;
-            }
-            if (do_ez) {
-                hy_x += coeff * lez;
-                hx_y += -coeff_y * lez;
-                lambda_ez[work] = ce_hist[idx] * lez;
-            }
-        }
-
-        w_a_x[work] = hz_x;
-        w_a_y[work] = hz_y;
-        w_b_x[work] = hy_x;
-        w_b_z[work] = hy_z;
-        w_c_y[work] = hx_y;
-        w_c_z[work] = hx_z;
     }
 
-    DEEPGPR_OMP_PARALLEL_FOR
-    for (work = 0; work < total_work; ++work) {
-        long long idx = work % field_stride;
-        long long i = idx / ny_nz;
-        long long rem = idx % ny_nz;
-        long long j = rem / NZ;
-        long long k = rem % NZ;
+    {
+        CpuRowTiling tiling = cpu_row_tiling(step, NX, NY);
+        long long tile_count = NX * tiling.y_tiles;
+        long long s, tile;
+        DEEPGPR_OMP_PARALLEL_FOR_COLLAPSE2
+        for (s = 0; s < step; ++s)
+        for (tile = 0; tile < tile_count; ++tile) {
+            long long i = tile / tiling.y_tiles;
+            long long j_begin = (tile % tiling.y_tiles) * tiling.rows_per_tile;
+            long long j_end = j_begin + tiling.rows_per_tile;
+            if (j_end > NY) j_end = NY;
+            for (long long j = j_begin; j < j_end; ++j)
+            for (long long k = 0; k < NZ; ++k) {
+                long long work = s * field_stride + i * ny_nz + j * NZ + k;
 
-        lambda_hz[work] += gather_backward_transpose(w_a_x, work, ny_nz, i, NX, order);
-        lambda_hz[work] += gather_backward_transpose(w_a_y, work, NZ, j, NY, order);
-        lambda_hy[work] += gather_backward_transpose(w_b_x, work, ny_nz, i, NX, order);
-        lambda_hy[work] += gather_backward_transpose(w_b_z, work, 1, k, NZ, order);
-        lambda_hx[work] += gather_backward_transpose(w_c_y, work, NZ, j, NY, order);
-        lambda_hx[work] += gather_backward_transpose(w_c_z, work, 1, k, NZ, order);
+                lambda_hz[work] += gather_backward_transpose(w_a_x, work, ny_nz, i, NX, order);
+                lambda_hz[work] += gather_backward_transpose(w_a_y, work, NZ, j, NY, order);
+                lambda_hy[work] += gather_backward_transpose(w_b_x, work, ny_nz, i, NX, order);
+                lambda_hy[work] += gather_backward_transpose(w_b_z, work, 1, k, NZ, order);
+                lambda_hx[work] += gather_backward_transpose(w_c_y, work, NZ, j, NY, order);
+                lambda_hx[work] += gather_backward_transpose(w_c_z, work, 1, k, NZ, order);
+            }
+        }
     }
 }
 
@@ -1314,147 +1391,164 @@ static void adjoint_h_step_cpu(
     float* RESTRICT w_b_z = weights + CH_B_Z * total_work;
     float* RESTRICT w_c_y = weights + CH_C_Y * total_work;
     float* RESTRICT w_c_z = weights + CH_C_Z * total_work;
-    long long work;
 
-    DEEPGPR_OMP_PARALLEL_FOR
-    for (work = 0; work < total_work; ++work) {
-        int s = (int)(work / field_stride);
-        long long idx = work % field_stride;
-        long long i = idx / ny_nz;
-        long long rem = idx % ny_nz;
-        long long j = rem / NZ;
-        long long k = rem % NZ;
-        float lhx = lambda_hx[work];
-        float lhy = lambda_hy[work];
-        float lhz = lambda_hz[work];
-        float ez_x = 0.0f, ez_y = 0.0f, ey_x = 0.0f, ey_z = 0.0f, ex_y = 0.0f, ex_z = 0.0f;
+    {
+        CpuRowTiling tiling = cpu_row_tiling(step, NX, NY);
+        long long tile_count = NX * tiling.y_tiles;
+        long long s, tile;
+        DEEPGPR_OMP_PARALLEL_FOR_COLLAPSE2
+        for (s = 0; s < step; ++s)
+        for (tile = 0; tile < tile_count; ++tile) {
+            long long i = tile / tiling.y_tiles;
+            long long j_begin = (tile % tiling.y_tiles) * tiling.rows_per_tile;
+            long long j_end = j_begin + tiling.rows_per_tile;
+            if (j_end > NY) j_end = NY;
+            for (long long j = j_begin; j < j_end; ++j)
+            for (long long k = 0; k < NZ; ++k) {
+                long long idx = i * ny_nz + j * NZ + k;
+                long long work = s * field_stride + idx;
+                float lhx = lambda_hx[work];
+                float lhy = lambda_hy[work];
+                float lhz = lambda_hz[work];
+                float ez_x = 0.0f, ez_y = 0.0f, ey_x = 0.0f, ey_z = 0.0f, ex_y = 0.0f, ex_z = 0.0f;
 
-        if (has_cpml) {
-            float upd = update[idx];
-            long long p_idx;
-#define H_PML(R, P, p, q, spacing, field, channel, sign) \
-            do { \
-                (channel) += pml_adjoint_weight( \
-                    (field), 1.0f / (spacing), upd, (sign), (R)[q] - 1.0f, \
-                    (R)[(p) + (q)], (R)[2 * (p) + (q)], (R)[3 * (p) + (q)], &(P)[p_idx]); \
-            } while (0)
+                if (has_cpml) {
+                    float upd = update[idx];
+                    long long p_idx;
+        #define H_PML(R, P, p, q, spacing, field, channel, sign) \
+                    do { \
+                        (channel) += pml_adjoint_weight( \
+                            (field), 1.0f / (spacing), upd, (sign), (R)[q] - 1.0f, \
+                            (R)[(p) + (q)], (R)[2 * (p) + (q)], (R)[3 * (p) + (q)], &(P)[p_idx]); \
+                    } while (0)
 
-            if (pml0 > 0 && i < pml0) {
-                long long q = pml0 - 1 - i;
-                if (k < NZ - 1) {
-                    p_idx = ((long long)s * pml0 * NY * (NZ - 1)) + q * NY * (NZ - 1) + j * (NZ - 1) + k;
-                    H_PML(x0R, x0P1, pml0, q, dx, lhy, ez_x, 1.0f);
+                    if (pml0 > 0 && i < pml0) {
+                        long long q = pml0 - 1 - i;
+                        if (k < NZ - 1) {
+                            p_idx = ((long long)s * pml0 * NY * (NZ - 1)) + q * NY * (NZ - 1) + j * (NZ - 1) + k;
+                            H_PML(x0R, x0P1, pml0, q, dx, lhy, ez_x, 1.0f);
+                        }
+                        if (j < NY - 1) {
+                            p_idx = ((long long)s * pml0 * (NY - 1) * NZ) + q * (NY - 1) * NZ + j * NZ + k;
+                            H_PML(x0R, x0P2, pml0, q, dx, lhz, ey_x, -1.0f);
+                        }
+                    }
+                    if (pml1 > 0 && i >= NX - 1 - pml1 && i < NX - 1) {
+                        long long q = i - (NX - 1 - pml1);
+                        if (k < NZ - 1) {
+                            p_idx = ((long long)s * pml1 * NY * (NZ - 1)) + q * NY * (NZ - 1) + j * (NZ - 1) + k;
+                            H_PML(xmR, xmP1, pml1, q, dx, lhy, ez_x, 1.0f);
+                        }
+                        if (j < NY - 1) {
+                            p_idx = ((long long)s * pml1 * (NY - 1) * NZ) + q * (NY - 1) * NZ + j * NZ + k;
+                            H_PML(xmR, xmP2, pml1, q, dx, lhz, ey_x, -1.0f);
+                        }
+                    }
+                    if (pml2 > 0 && j < pml2) {
+                        long long q = pml2 - 1 - j;
+                        if (k < NZ - 1) {
+                            p_idx = ((long long)s * NX * pml2 * (NZ - 1)) + i * pml2 * (NZ - 1) + q * (NZ - 1) + k;
+                            H_PML(y0R, y0P1, pml2, q, dy, lhx, ez_y, -1.0f);
+                        }
+                        if (i < NX - 1) {
+                            p_idx = ((long long)s * (NX - 1) * pml2 * NZ) + i * pml2 * NZ + q * NZ + k;
+                            H_PML(y0R, y0P2, pml2, q, dy, lhz, ex_y, 1.0f);
+                        }
+                    }
+                    if (pml3 > 0 && j >= NY - 1 - pml3 && j < NY - 1) {
+                        long long q = j - (NY - 1 - pml3);
+                        if (k < NZ - 1) {
+                            p_idx = ((long long)s * NX * pml3 * (NZ - 1)) + i * pml3 * (NZ - 1) + q * (NZ - 1) + k;
+                            H_PML(ymR, ymP1, pml3, q, dy, lhx, ez_y, -1.0f);
+                        }
+                        if (i < NX - 1) {
+                            p_idx = ((long long)s * (NX - 1) * pml3 * NZ) + i * pml3 * NZ + q * NZ + k;
+                            H_PML(ymR, ymP2, pml3, q, dy, lhz, ex_y, 1.0f);
+                        }
+                    }
+                    if (pml4 > 0 && k < pml4) {
+                        long long q = pml4 - 1 - k;
+                        if (j < NY - 1) {
+                            p_idx = ((long long)s * NX * (NY - 1) * pml4) + i * (NY - 1) * pml4 + j * pml4 + q;
+                            H_PML(z0R, z0P1, pml4, q, dz, lhx, ey_z, 1.0f);
+                        }
+                        if (i < NX - 1) {
+                            p_idx = ((long long)s * (NX - 1) * NY * pml4) + i * NY * pml4 + j * pml4 + q;
+                            H_PML(z0R, z0P2, pml4, q, dz, lhy, ex_z, -1.0f);
+                        }
+                    }
+                    if (pml5 > 0 && k >= NZ - 1 - pml5 && k < NZ - 1) {
+                        long long q = k - (NZ - 1 - pml5);
+                        if (j < NY - 1) {
+                            p_idx = ((long long)s * NX * (NY - 1) * pml5) + i * (NY - 1) * pml5 + j * pml5 + q;
+                            H_PML(zmR, zmP1, pml5, q, dz, lhx, ey_z, 1.0f);
+                        }
+                        if (i < NX - 1) {
+                            p_idx = ((long long)s * (NX - 1) * NY * pml5) + i * NY * pml5 + j * pml5 + q;
+                            H_PML(zmR, zmP2, pml5, q, dz, lhy, ex_z, -1.0f);
+                        }
+                    }
+        #undef H_PML
                 }
-                if (j < NY - 1) {
-                    p_idx = ((long long)s * pml0 * (NY - 1) * NZ) + q * (NY - 1) * NZ + j * NZ + k;
-                    H_PML(x0R, x0P2, pml0, q, dx, lhz, ey_x, -1.0f);
+
+                {
+                    int do_hx = ((NX - 1) != 1 && i > 0 && i < NX - 1 && j < NY - 1 && k < NZ - 1);
+                    int do_hy = ((NY - 1) != 1 && i < NX - 1 && j > 0 && j < NY - 1 && k < NZ - 1);
+                    int do_hz = ((NZ - 1) != 1 && i < NX - 1 && j < NY - 1 && k > 0 && k < NZ - 1);
+                    float coeff = ch_curl[idx];
+                    float coeff_y = dy == dx ? coeff : coeff * dx / dy;
+                    float coeff_z = dz == dx ? coeff : coeff * dx / dz;
+
+                    if (do_hx) {
+                        ez_y += -coeff_y * lhx;
+                        ey_z += coeff_z * lhx;
+                        lambda_hx[work] = ch_hist[idx] * lhx;
+                    }
+                    if (do_hy) {
+                        ex_z += -coeff_z * lhy;
+                        ez_x += coeff * lhy;
+                        lambda_hy[work] = ch_hist[idx] * lhy;
+                    }
+                    if (do_hz) {
+                        ey_x += -coeff * lhz;
+                        ex_y += coeff_y * lhz;
+                        lambda_hz[work] = ch_hist[idx] * lhz;
+                    }
                 }
+
+                w_a_x[work] = ez_x;
+                w_a_y[work] = ez_y;
+                w_b_x[work] = ey_x;
+                w_b_z[work] = ey_z;
+                w_c_y[work] = ex_y;
+                w_c_z[work] = ex_z;
             }
-            if (pml1 > 0 && i >= NX - 1 - pml1 && i < NX - 1) {
-                long long q = i - (NX - 1 - pml1);
-                if (k < NZ - 1) {
-                    p_idx = ((long long)s * pml1 * NY * (NZ - 1)) + q * NY * (NZ - 1) + j * (NZ - 1) + k;
-                    H_PML(xmR, xmP1, pml1, q, dx, lhy, ez_x, 1.0f);
-                }
-                if (j < NY - 1) {
-                    p_idx = ((long long)s * pml1 * (NY - 1) * NZ) + q * (NY - 1) * NZ + j * NZ + k;
-                    H_PML(xmR, xmP2, pml1, q, dx, lhz, ey_x, -1.0f);
-                }
-            }
-            if (pml2 > 0 && j < pml2) {
-                long long q = pml2 - 1 - j;
-                if (k < NZ - 1) {
-                    p_idx = ((long long)s * NX * pml2 * (NZ - 1)) + i * pml2 * (NZ - 1) + q * (NZ - 1) + k;
-                    H_PML(y0R, y0P1, pml2, q, dy, lhx, ez_y, -1.0f);
-                }
-                if (i < NX - 1) {
-                    p_idx = ((long long)s * (NX - 1) * pml2 * NZ) + i * pml2 * NZ + q * NZ + k;
-                    H_PML(y0R, y0P2, pml2, q, dy, lhz, ex_y, 1.0f);
-                }
-            }
-            if (pml3 > 0 && j >= NY - 1 - pml3 && j < NY - 1) {
-                long long q = j - (NY - 1 - pml3);
-                if (k < NZ - 1) {
-                    p_idx = ((long long)s * NX * pml3 * (NZ - 1)) + i * pml3 * (NZ - 1) + q * (NZ - 1) + k;
-                    H_PML(ymR, ymP1, pml3, q, dy, lhx, ez_y, -1.0f);
-                }
-                if (i < NX - 1) {
-                    p_idx = ((long long)s * (NX - 1) * pml3 * NZ) + i * pml3 * NZ + q * NZ + k;
-                    H_PML(ymR, ymP2, pml3, q, dy, lhz, ex_y, 1.0f);
-                }
-            }
-            if (pml4 > 0 && k < pml4) {
-                long long q = pml4 - 1 - k;
-                if (j < NY - 1) {
-                    p_idx = ((long long)s * NX * (NY - 1) * pml4) + i * (NY - 1) * pml4 + j * pml4 + q;
-                    H_PML(z0R, z0P1, pml4, q, dz, lhx, ey_z, 1.0f);
-                }
-                if (i < NX - 1) {
-                    p_idx = ((long long)s * (NX - 1) * NY * pml4) + i * NY * pml4 + j * pml4 + q;
-                    H_PML(z0R, z0P2, pml4, q, dz, lhy, ex_z, -1.0f);
-                }
-            }
-            if (pml5 > 0 && k >= NZ - 1 - pml5 && k < NZ - 1) {
-                long long q = k - (NZ - 1 - pml5);
-                if (j < NY - 1) {
-                    p_idx = ((long long)s * NX * (NY - 1) * pml5) + i * (NY - 1) * pml5 + j * pml5 + q;
-                    H_PML(zmR, zmP1, pml5, q, dz, lhx, ey_z, 1.0f);
-                }
-                if (i < NX - 1) {
-                    p_idx = ((long long)s * (NX - 1) * NY * pml5) + i * NY * pml5 + j * pml5 + q;
-                    H_PML(zmR, zmP2, pml5, q, dz, lhy, ex_z, -1.0f);
-                }
-            }
-#undef H_PML
         }
-
-        {
-            int do_hx = ((NX - 1) != 1 && i > 0 && i < NX - 1 && j < NY - 1 && k < NZ - 1);
-            int do_hy = ((NY - 1) != 1 && i < NX - 1 && j > 0 && j < NY - 1 && k < NZ - 1);
-            int do_hz = ((NZ - 1) != 1 && i < NX - 1 && j < NY - 1 && k > 0 && k < NZ - 1);
-            float coeff = ch_curl[idx];
-            float coeff_y = dy == dx ? coeff : coeff * dx / dy;
-            float coeff_z = dz == dx ? coeff : coeff * dx / dz;
-
-            if (do_hx) {
-                ez_y += -coeff_y * lhx;
-                ey_z += coeff_z * lhx;
-                lambda_hx[work] = ch_hist[idx] * lhx;
-            }
-            if (do_hy) {
-                ex_z += -coeff_z * lhy;
-                ez_x += coeff * lhy;
-                lambda_hy[work] = ch_hist[idx] * lhy;
-            }
-            if (do_hz) {
-                ey_x += -coeff * lhz;
-                ex_y += coeff_y * lhz;
-                lambda_hz[work] = ch_hist[idx] * lhz;
-            }
-        }
-
-        w_a_x[work] = ez_x;
-        w_a_y[work] = ez_y;
-        w_b_x[work] = ey_x;
-        w_b_z[work] = ey_z;
-        w_c_y[work] = ex_y;
-        w_c_z[work] = ex_z;
     }
 
-    DEEPGPR_OMP_PARALLEL_FOR
-    for (work = 0; work < total_work; ++work) {
-        long long idx = work % field_stride;
-        long long i = idx / ny_nz;
-        long long rem = idx % ny_nz;
-        long long j = rem / NZ;
-        long long k = rem % NZ;
+    {
+        CpuRowTiling tiling = cpu_row_tiling(step, NX, NY);
+        long long tile_count = NX * tiling.y_tiles;
+        long long s, tile;
+        DEEPGPR_OMP_PARALLEL_FOR_COLLAPSE2
+        for (s = 0; s < step; ++s)
+        for (tile = 0; tile < tile_count; ++tile) {
+            long long i = tile / tiling.y_tiles;
+            long long j_begin = (tile % tiling.y_tiles) * tiling.rows_per_tile;
+            long long j_end = j_begin + tiling.rows_per_tile;
+            if (j_end > NY) j_end = NY;
+            for (long long j = j_begin; j < j_end; ++j)
+            for (long long k = 0; k < NZ; ++k) {
+                long long work = s * field_stride + i * ny_nz + j * NZ + k;
 
-        lambda_ez[work] += gather_forward_transpose(w_a_x, work, ny_nz, i, NX, order);
-        lambda_ez[work] += gather_forward_transpose(w_a_y, work, NZ, j, NY, order);
-        lambda_ey[work] += gather_forward_transpose(w_b_x, work, ny_nz, i, NX, order);
-        lambda_ey[work] += gather_forward_transpose(w_b_z, work, 1, k, NZ, order);
-        lambda_ex[work] += gather_forward_transpose(w_c_y, work, NZ, j, NY, order);
-        lambda_ex[work] += gather_forward_transpose(w_c_z, work, 1, k, NZ, order);
+                lambda_ez[work] += gather_forward_transpose(w_a_x, work, ny_nz, i, NX, order);
+                lambda_ez[work] += gather_forward_transpose(w_a_y, work, NZ, j, NY, order);
+                lambda_ey[work] += gather_forward_transpose(w_b_x, work, ny_nz, i, NX, order);
+                lambda_ey[work] += gather_forward_transpose(w_b_z, work, 1, k, NZ, order);
+                lambda_ex[work] += gather_forward_transpose(w_c_y, work, NZ, j, NY, order);
+                lambda_ex[work] += gather_forward_transpose(w_c_z, work, 1, k, NZ, order);
+            }
+        }
     }
 }
 
@@ -1567,30 +1661,40 @@ static void save_rhs_snapshot_cpu(
     long long total = (long long)box.nx * ny1 * nz1;
     long long field_stride = (long long)NX * NY * NZ;
     long long snap_stride = (long long)step * total;
-    long long total_work = (long long)step * total;
-    long long work;
 
-    DEEPGPR_OMP_PARALLEL_FOR
-    for (work = 0; work < total_work; ++work) {
-        int s = (int)(work / total);
-        long long idx = work % total;
-        long long i = idx / (ny1 * nz1) + box.x0;
-        long long rem = idx % (ny1 * nz1);
-        long long j = rem / nz1 + box.y0;
-        long long k = rem % nz1 + box.z0;
-        long long field_idx = (long long)s * field_stride + i * NY * NZ + j * NZ + k;
-        long long saved_idx = (long long)t_idx * snap_stride + work;
-        float cb_value = cb[i * NY * NZ + j * NZ + k];
+    {
+        CpuRowTiling tiling = cpu_row_tiling(step, box.nx, ny1);
+        long long tile_count = box.nx * tiling.y_tiles;
+        long long s, tile;
+        DEEPGPR_OMP_PARALLEL_FOR_COLLAPSE2
+        for (s = 0; s < step; ++s)
+        for (tile = 0; tile < tile_count; ++tile) {
+            long long ii = tile / tiling.y_tiles;
+            long long j_begin = (tile % tiling.y_tiles) * tiling.rows_per_tile;
+            long long j_end = j_begin + tiling.rows_per_tile;
+            if (j_end > ny1) j_end = ny1;
+            for (long long jj = j_begin; jj < j_end; ++jj)
+            for (long long kk = 0; kk < nz1; ++kk) {
+                long long i = ii + box.x0;
+                long long j = jj + box.y0;
+                long long k = kk + box.z0;
+                long long idx = ii * ny1 * nz1 + jj * nz1 + kk;
+                long long work = s * total + idx;
+                long long field_idx = (long long)s * field_stride + i * NY * NZ + j * NZ + k;
+                long long saved_idx = (long long)t_idx * snap_stride + work;
+                float cb_value = cb[i * NY * NZ + j * NZ + k];
 
-        float e_old = exact_Eold != NULL
-            ? exact_Eold[work]
-            : load_wavefield_value(Eold_ptr, saved_idx, storage_kind);
-        float effective_ca = material_component_has_e_update_cpu(component, i, j, k, NX, NY, NZ)
-            ? ca[i * NY * NZ + j * NZ + k] : 1.0f;
-        float rhs = cb_value != 0.0f
-            ? (E[field_idx] - effective_ca * e_old) / cb_value
-            : 0.0f;
-        store_wavefield_value(dst_ptr, saved_idx, rhs, storage_kind);
+                float e_old = exact_Eold != NULL
+                    ? exact_Eold[work]
+                    : load_wavefield_value(Eold_ptr, saved_idx, storage_kind);
+                float effective_ca = material_component_has_e_update_cpu(component, i, j, k, NX, NY, NZ)
+                    ? ca[i * NY * NZ + j * NZ + k] : 1.0f;
+                float rhs = cb_value != 0.0f
+                    ? (E[field_idx] - effective_ca * e_old) / cb_value
+                    : 0.0f;
+                store_wavefield_value(dst_ptr, saved_idx, rhs, storage_kind);
+            }
+        }
     }
 }
 
@@ -1612,23 +1716,33 @@ static void save_e_snapshot_cpu(
     long long ny1 = box.ny, nz1 = box.nz;
     long long total = (long long)box.nx * ny1 * nz1;
     long long field_stride = (long long)NX * NY * NZ;
-    long long total_work = (long long)step * total;
-    long long work;
 
-    DEEPGPR_OMP_PARALLEL_FOR
-    for (work = 0; work < total_work; ++work) {
-        int s = (int)(work / total);
-        long long idx = work % total;
-        long long i = idx / (ny1 * nz1) + box.x0;
-        long long rem = idx % (ny1 * nz1);
-        long long j = rem / nz1 + box.y0;
-        long long k = rem % nz1 + box.z0;
+    {
+        CpuRowTiling tiling = cpu_row_tiling(step, box.nx, ny1);
+        long long tile_count = box.nx * tiling.y_tiles;
+        long long s, tile;
+        DEEPGPR_OMP_PARALLEL_FOR_COLLAPSE2
+        for (s = 0; s < step; ++s)
+        for (tile = 0; tile < tile_count; ++tile) {
+            long long ii = tile / tiling.y_tiles;
+            long long j_begin = (tile % tiling.y_tiles) * tiling.rows_per_tile;
+            long long j_end = j_begin + tiling.rows_per_tile;
+            if (j_end > ny1) j_end = ny1;
+            for (long long jj = j_begin; jj < j_end; ++jj)
+            for (long long kk = 0; kk < nz1; ++kk) {
+                long long i = ii + box.x0;
+                long long j = jj + box.y0;
+                long long k = kk + box.z0;
+                long long idx = ii * ny1 * nz1 + jj * nz1 + kk;
+                long long work = s * total + idx;
 
-        long long src_idx = (long long)s * field_stride + i * NY * NZ + j * NZ + k;
-        long long dst_idx = (long long)t_idx * step * total + (long long)s * total + idx;
-        float value = E[src_idx];
-        store_wavefield_value(dst_ptr, dst_idx, value, storage_kind);
-        if (exact_Eold != NULL) exact_Eold[work] = value;
+                long long src_idx = (long long)s * field_stride + i * NY * NZ + j * NZ + k;
+                long long dst_idx = (long long)t_idx * step * total + (long long)s * total + idx;
+                float value = E[src_idx];
+                store_wavefield_value(dst_ptr, dst_idx, value, storage_kind);
+                if (exact_Eold != NULL) exact_Eold[work] = value;
+            }
+        }
     }
 }
 
@@ -1669,16 +1783,18 @@ static void accumulate_material_gradients_cpu(
     int fwi_mode, int storage_kind, int rhs_from_e, HistoryBox box)
 {
     long long sy = NY - 1, sz = NZ - 1;
-    long long hy = box.ny, hz = box.nz;
+    long long hx = box.nx, hy = box.ny, hz = box.nz;
     long long total_cells = (long long)box.nx * hy * hz;
-    long long history_idx;
 
-    DEEPGPR_OMP_PARALLEL_FOR
-    for (history_idx = 0; history_idx < total_cells; ++history_idx) {
-        long long ix = history_idx / (hy * hz) + box.x0;
-        long long rem = history_idx % (hy * hz);
-        long long iy = rem / hz + box.y0;
-        long long iz = rem % hz + box.z0;
+    long long ix0, iy0;
+    DEEPGPR_OMP_PARALLEL_FOR_COLLAPSE2
+    for (ix0 = 0; ix0 < hx; ++ix0)
+    for (iy0 = 0; iy0 < hy; ++iy0)
+    for (long long iz0 = 0; iz0 < box.nz; ++iz0) {
+        long long ix = ix0 + box.x0;
+        long long iy = iy0 + box.y0;
+        long long iz = iz0 + box.z0;
+        long long history_idx = ix0 * hy * hz + iy0 * hz + iz0;
         long long idx = ix * sy * sz + iy * sz + iz;
 
         long long material_idx = ix * NY * NZ + iy * NZ + iz;
