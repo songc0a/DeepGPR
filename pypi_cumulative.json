@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
   "package": "DeepGPR",
-  "total_downloads": 3626,
+  "total_downloads": 3633,
   "first_tracked_date": "2026-04-15",
-  "last_tracked_date": "2026-10-25",
+  "last_tracked_date": "2026-10-26",
   "package_first_release_date": "2026-04-15",
   "history_complete": true,
   "tracking_method": "persistent_daily_history",
@@ -202,7 +202,8 @@
     "2026-10-22": 6,
     "2026-10-23": 10,
     "2026-10-24": 115,
-    "2026-10-25": 15
+    "2026-10-25": 15,
+    "2026-10-26": 7
   },
-  "updated_at": "2026-10-26T08:50:59Z"
+  "updated_at": "2026-10-27T08:56:19Z"
 }
