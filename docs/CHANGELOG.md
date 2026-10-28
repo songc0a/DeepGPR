@@ -4,6 +4,29 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased] — Huygens subgridding for 3D FDTD (experimental, branch `feature/hybrid-dgtd-topography`)
+
+### Added
+
+- `DeepGPR.subgrid` (3D): Huygens subgridding of the Yee scheme in the arrangement
+  of gprMax's `subgrids` code (subgrid CPML, inner/outer Huygens surfaces, normal
+  precursor filter, odd ratios, sub-cycling): `SubgridMaxwell3D` (model grid,
+  block-averaged main grid, subgrid boxes, sources/receivers on either grid),
+  fused CUDA coupling kernels with exact transposes (`subgrid/csrc/hsg3d.cu`), CUDA
+  Graph replay. The 3D Yee kernels of `DeepGPR.hybrid` are reused unchanged.
+- `subgrid.adapt.plan_refinement`: main spacing from `f_max`/points per wavelength,
+  dispersion and material-representation criteria, Berger-Rigoutsos clustering,
+  boundary-touching flags reported, antennas kept off the Huygens rings.
+- `subgrid.adjoint.SubgridPropagator`: checkpointed exact discrete adjoint
+  (gradients for `eps_r`, `sigma`, the wavelet).
+- `subgrid.indicators` / `subgrid.amr`: dual-weighted-residual indicator of the
+  main grid from the reverse sweep (effectivity 0.93-1.01), Doerfler marking,
+  differential indicator for anomaly-response FWI, persistent dynamic regridding.
+- `subgrid.hybrid.HybridSubgridMaxwell3D`: subgrids below the DGTD surface band of
+  `HybridMaxwell3D` (split step reproduces the hybrid to round-off).
+- Examples `examples/subgrid/{adaptive_targets,fwi3d_subgrid,amr_fwi3d,fwi3d_dgtd_subgrid}.py`,
+  tests `tests/test_subgrid_*.py`, `docs/SUBGRID.md` (results, limitations).
+
 ## [Unreleased] — Hybrid DGTD–FDTD with topography (experimental, branch `feature/hybrid-dgtd-topography`)
 
 ### Added

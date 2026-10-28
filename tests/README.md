@@ -77,6 +77,19 @@ GPU), and the 3D discrete adjoint (dot product, finite differences, native
 pure-Yee gradient, hand-written against autograd sweep). See
 `docs/HYBRID_DGTD.md`.
 
+`test_subgrid_3d.py`, `test_subgrid_adapt.py`, `test_subgrid_adjoint.py`,
+`test_subgrid_indicators.py` and `test_subgrid_hybrid.py` cover the experimental 3D
+Huygens subgridding (`DeepGPR.subgrid`): exact precursors of linear fields, outer-surface
+samples on the coinciding main nodes, transparency (< 1 % reflection, CPU and CUDA),
+antennas inside a subgrid against a uniform fine grid, the scattered field of an
+unresolved target, the fused CUDA coupling kernels against the PyTorch step, CUDA Graph
+replay, long-run stability, the refinement planner (clustering, boundary-touching flags,
+antennas), the discrete adjoint (finite differences for eps, sigma and the wavelet with
+sources and receivers inside and outside the subgrid, CUDA against autograd, checkpoint
+invariance), the effectivity of the adjoint-weighted error indicator, and subgrids below
+the DGTD band (the split step against `HybridMaxwell3D`, finite differences). CUDA tests
+are skipped without a GPU. See `docs/SUBGRID.md`.
+
 `test_signal_and_regularization.py` checks the FIR design, the analytic-signal
 envelope and the TV variants against independent NumPy implementations.
 
