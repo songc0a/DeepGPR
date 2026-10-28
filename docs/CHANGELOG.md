@@ -4,6 +4,96 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased] — Hybrid DGTD–FDTD with topography (experimental, branch `feature/hybrid-dgtd-topography`)
+
+### Added
+
+- `DeepGPR.hybrid` (2D Ez-TM): a body-fitted DGTD band (nodal DG on
+  triangles, P1/P2, central or penalised-upwind fluxes, CPML) carrying the
+  air–ground surface, coupled to DeepGPR's second-order Yee grid above and below
+  by an energy-neutral mortar on horizontal interfaces (non-matching meshes).
+  One leapfrog step for the whole system; coupled CFL limit from Lanczos.
+  `HybridTM2D` also runs pure Yee (`dg_band=None`, equal to `DeepGPR.compute`
+  with `fdtd_order=2` to float32 rounding) and pure DGTD (`dg_band=(None, None)`).
+- Topography: `Surface.flat/sine/slope/from_samples/from_elevation`,
+  terrain-following and Delaunay band meshes (graded local refinement around
+  the surface), `FieldSampler` for snapshots.
+- `fdtd_refinement=r`: the Yee part runs on `dx/r` while the model and the DG
+  mesh stay on `dx`; with the DG-limited time step this costs 2–20 % more steps
+  for `r = 3` and cuts the interface reflection and Yee dispersion by `r²`.
+  `dg_pml_strength` (default 0.4) and `pml_profile="matched"` set the DG CPML
+  and give the Yee CPML of the side columns the same physical profile.
+- Phase 2 benchmark `examples/hybrid/phase2_benchmark.py` (models A/B/C +
+  slope; staircase and averaged Yee, full DGTD P1/P2, hybrid P1/P2 against a
+  converged reference) and `tests/test_hybrid_topography.py`.
+- Tests `tests/test_hybrid_dgtd.py` (energy conservation to round-off, mortar
+  identities, sharp CFL limit, accuracy against a fine reference) and examples
+  `examples/hybrid/phase1_flat_interface.py`, `examples/hybrid/topography_gifs.py`
+  (shared models in `examples/hybrid/models.py`).
+- Phase 3: exact discrete adjoint of the hybrid scheme (`hybrid/adjoint.py`):
+  one side-effect-free time step (`hybrid/functional.py`) shared by forward
+  modelling, CFL estimate and adjoint; transposes by per-step vector-Jacobian
+  products with checkpointed recomputation. `HybridPropagator`,
+  `FDTDPropagator` and `make_propagator(solver="fdtd" | "hybrid_dgtd")` give a
+  differentiable `data = prop(eps_r, sigma, wavelet)` for FWI with either
+  solver; `resample` maps data between time axes. Tests
+  `tests/test_hybrid_adjoint.py`, verification script
+  `examples/hybrid/phase3_gradient_check.py`, dual-parameter FWI example
+  `examples/hybrid/fwi_topography.py` (per-iteration GIFs).
+- Phase 4 (3D): `HybridMaxwell3D` with a band of body-fitted tetrahedra
+  (nodal DG P1/P2, terrain-following Kuhn-split mesh, `Surface3D`) coupled to
+  DeepGPR's 3D Yee grid by an energy-conserving mortar on horizontal planes
+  (exact triangle/lattice-cell integration, two tangential components), a
+  dissipative interface penalty (`interface_penalty`, default 0.1), a UPML in
+  auxiliary-equation form for the side faces (stable; the stretched DG CPML is
+  not in 3D), and fused CUDA kernels for the DG operator with exact transpose
+  kernels (`hybrid/csrc/dgtd3d.cu`, compiled with `nvcc` on first use, PyTorch
+  fallback). Pure-Yee 3D mode equals `DeepGPR.compute` (3e-7) including its
+  native adjoint (1e-6). `HybridPropagator` / `make_propagator` accept 3D
+  models (discrete adjoint; FDTD propagator in 3D with Ez antennas).
+  `FieldSampler3D` for snapshots. Benchmark, gradient check, figures and a
+  small 3D FWI in `examples/hybrid/` (`phase4_benchmark.py`,
+  `phase4_gradient_check.py`, `topography3d_figures.py`,
+  `fwi3d_topography.py`); tests `tests/test_hybrid_3d.py`.
+- 3D mesh without thin layers: `mesh="adaptive"` (new default,
+  `adaptive_column_tet_mesh`) gives every column its own number of layers
+  (collapsed lattice sheets, degenerate Kuhn tetrahedra removed; conforming,
+  never inverted). B3 time step 7.8e-12 s instead of 3.5e-12 s for the
+  terrain-following mesh (`mesh="terrain"`).
+- 3D CUDA library for forward and adjoint: fused Yee H/E kernels
+  (`hybrid/csrc/yee3d.cu`: differences, CPML slabs, side UPML, masks, interface
+  penalty) and fused DG update kernels, each with an exact, atomic-free
+  transpose; compact DG transpose (lifted face cotangent only); no host-device
+  synchronisation in the step; CUDA Graph replay of the step in `run()` and in
+  the adjoint's forward/recompute passes for small states (≤ 32 MB, where the
+  step is host-bound; `hybrid/graphs.py`, `DEEPGPR_HYBRID_DISABLE_GRAPHS=1` to
+  disable); hand-written step transpose for
+  the reverse sweep (`hybrid/vjp3d.py`, equal to autograd to 2e-15;
+  `DEEPGPR_HYBRID_AUTOGRAD_VJP=1` selects autograd). Timing script
+  `examples/hybrid/phase4_cuda_benchmark.py`.
+- 2D CUDA library (same design): fused triangle DG kernels (curl terms with
+  fluxes, updates with the DG CPML; P1–P3) and Yee TM kernels, each with an
+  exact, atomic-free transpose (`hybrid/csrc/dg2d.cu`, `hybrid/csrc/yee2d.cu`,
+  `hybrid/cuda2d.py`); hand-written step transpose `hybrid/vjp2d.py` used by
+  `HybridPropagator`; no host-device synchronisation in the 2D step and CUDA
+  Graph replay for small states; `HybridTM2D(cuda_kernels=True)` (default).
+  On the 2D FWI model the forward is 2.8× and the gradient 4.6× faster than
+  with the PyTorch step (`examples/hybrid/cuda2d_benchmark.py`).
+- 2D prototype `StaircaseHybridTM2D` (`hybrid/staircase.py`): the DGTD region is
+  a layer around the surface and the DGTD-FDTD interface a staircase of Yee
+  grid lines, coupled by a summation-by-parts closure on an arbitrary union of
+  cells (fractional node and edge weights, ghost edges, explicit concave
+  corners) and per-piece hat-function mortars. Energy conserved to 5e-16;
+  adjoint verified (dot product, finite differences, hand-written transpose
+  against autograd). On the rugged model: 4× fewer triangles than the planar
+  band, 1.95 % error against 2.12 %.
+- `examples/hybrid/rugged2d_study.py`: rugged-topography comparison of staircase
+  FDTD (2.5, 0.83, 0.5 cm, cell-averaged), the planar-band and the staircase
+  hybrids: forward accuracy, time, memory, eps_r-only FWI, GIFs and interface
+  figures (docs 8.7, 8.8).
+- Formulation and verification: [`docs/HYBRID_DGTD.md`](HYBRID_DGTD.md).
+  `DeepGPR.compute` and the native libraries are unchanged.
+
 ## [Unreleased] — History memory and CUDA adjoint performance
 
 ### Repository layout
