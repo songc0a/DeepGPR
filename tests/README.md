@@ -46,6 +46,37 @@ and requires bitwise equality, and
 `test_cuda_asymmetric_cpml_dot_products_orders_2_4_8` adds asymmetric and
 partly disabled CPML faces to the CUDA dot-product tests (3D scatter and 2D
 gather).
+`test_hybrid_dgtd.py`, `test_hybrid_topography.py` and `test_hybrid_adjoint.py`
+cover the experimental 2D hybrid DGTD-FDTD solver (`DeepGPR.hybrid`): the pure-Yee
+mode against `DeepGPR.compute`, exact energy conservation of the coupled scheme,
+the interface mortar, the coupled CFL limit, accuracy against fine-grid FDTD,
+topography meshes and material mapping, the DG CPML, the refined Yee part, and
+the discrete adjoint (source dot-product test, checkpoint invariance,
+finite-difference directional derivatives in the DG band, the Yee region and
+across the interface rows, and the pure-Yee gradient against DeepGPR's native
+adjoint). `test_hybrid_staircase.py` covers the staircase-interface prototype: Yee-region
+weights and corner types, the layer mesh, energy conservation (r = 1, 3, CPU
+and CUDA kernels), the discrete adjoint (dot product, finite differences) and,
+on CUDA, the hand-written step transpose against autograd (step and sweep).
+
+On CUDA, `test_hybrid_adjoint.py` also runs its adjoint checks through the
+fused 2D kernels and the hand-written transpose, and compares the fused step
+with the PyTorch step, the hand-written transpose with autograd (step and
+sweep) and CUDA Graph replay with the eager step; `test_hybrid_dgtd.py` repeats
+the energy-conservation tests on the kernels.
+
+`test_hybrid_3d.py` covers the 3D version: reference tetrahedron, the
+terrain-following and the adaptive column meshes (positive volumes,
+conformity, point location), pure-Yee 3D against `DeepGPR.compute` (three
+components), energy conservation of the coupled scheme (P1, P2, refined Yee,
+both meshes), the 3D mortar, the dissipative interface penalty, long-run
+stability of the side UPML, the fused CUDA kernels and their transpose against
+the PyTorch operator, CUDA Graph replay against the eager step, the
+hand-written step transpose against autograd (CUDA tests skipped without a
+GPU), and the 3D discrete adjoint (dot product, finite differences, native
+pure-Yee gradient, hand-written against autograd sweep). See
+`docs/HYBRID_DGTD.md`.
+
 `test_signal_and_regularization.py` checks the FIR design, the analytic-signal
 envelope and the TV variants against independent NumPy implementations.
 

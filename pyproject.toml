@@ -67,6 +67,7 @@ DeepGPR = [
     "lib/*.so",
     "lib/*.dylib",
     "lib/*.pyd",
+    "hybrid/csrc/*.cu",
 ]
 
 [tool.setuptools.exclude-package-data]
