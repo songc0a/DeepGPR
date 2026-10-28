@@ -14,6 +14,7 @@ DeepGPR provides a wave propagation module for PyTorch, designed for application
 - Large models: checkpointing, DDP, temporal sub-sampling (fixed or `"auto"` from the source spectrum), E-only float32 histories (default; half the memory of E+R), FP16/BF16 or GPU-native INT8 wavefield histories and asynchronous offload to host memory. Material gradients with PML require `wavefield_history_region="extended"`; physical-only histories remain available for diagnostics, source/initial-state gradients and models without PML. See [`docs/API.md`](docs/API.md) §4.3-4.6.
 
 - Experimental (2D and 3D): `DeepGPR.hybrid.HybridTM2D` / `HybridMaxwell3D` couple a body-fitted DGTD band (triangles / tetrahedra, fused CUDA kernels with hand-written adjoints in 2D and 3D) that carries the ground surface (topography) to the Yee grid, with a discrete adjoint for FWI; see [`docs/HYBRID_DGTD.md`](docs/HYBRID_DGTD.md).
+- Experimental (3D): `DeepGPR.subgrid` adds Huygens subgridding to the 3D Yee grid (refined boxes with their own time step, fused CUDA coupling kernels), an a priori refinement planner, the exact discrete adjoint, an adjoint-weighted error indicator for dynamic refinement in FWI, and subgrids below the DGTD surface band; see [`docs/SUBGRID.md`](docs/SUBGRID.md).
 
 ## System requirements
 
