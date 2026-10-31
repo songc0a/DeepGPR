@@ -91,6 +91,37 @@ class RegridTest(unittest.TestCase):
         self.assertEqual(len(r2.plan.subgrids), 1)
         self.assertFalse(r2.changed)
 
+    def test_maximum_strategy_non_persistent_and_hysteresis(self):
+        eps, sig = np.full((91, 91, 91), 4.0), np.full((91, 91, 91), 0.002)
+        eta = np.full((31, 31, 31), 1e-3)                # diffuse remainder
+        eta[15:17, 14:16, 15:17] = 1.0
+        allowed = np.zeros(eta.shape, dtype=bool)
+        allowed[9:22, 9:22, 9:22] = True
+        wide = regrid(eps, sig, 0.01, 3, eta, allowed=allowed, theta=0.9, f_max=4e8,
+                      use_model_criteria=False)
+        tight = regrid(eps, sig, 0.01, 3, eta, allowed=allowed, theta=0.9, f_max=4e8,
+                       use_model_criteria=False, gamma=0.2)
+        self.assertGreater(wide.info["marked_nodes"], tight.info["marked_nodes"])
+        self.assertEqual(tight.info["marked_nodes"], 8)
+        size = lambda r: np.prod(np.diff(np.asarray(r.plan.subgrids[0].box), axis=1))  # noqa: E731
+        self.assertLess(size(tight), size(wide))
+        # the target moves: a persistent layout keeps the old box, a non-persistent one moves
+        moved = np.zeros_like(eta)
+        moved[11:13, 18:20, 11:13] = 1.0
+        keep = regrid(eps, sig, 0.01, 3, moved, allowed=allowed, f_max=4e8, use_model_criteria=False,
+                      gamma=0.2, current=tight.plan.subgrids)
+        move = regrid(eps, sig, 0.01, 3, moved, allowed=allowed, f_max=4e8, use_model_criteria=False,
+                      gamma=0.2, current=tight.plan.subgrids, persistent=False)
+        self.assertEqual(len(keep.plan.subgrids), 1)
+        self.assertGreater(size(keep), size(tight))       # merged with the old box
+        self.assertTrue(move.changed)
+        self.assertLessEqual(size(move), size(tight) * 1.01)
+        # hysteresis: marks inside the current box keep the layout
+        same = regrid(eps, sig, 0.01, 3, eta, allowed=allowed, f_max=4e8, use_model_criteria=False,
+                      gamma=0.5, current=tight.plan.subgrids, persistent=False, hysteresis=0.9)
+        self.assertFalse(same.changed)
+        self.assertTrue(same.info.get("kept"))
+
 
 if __name__ == "__main__":
     unittest.main()
