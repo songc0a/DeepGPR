@@ -64,25 +64,41 @@ class RegridResult:
     info: dict = field(default_factory=dict)
 
 
+def _box_slices(sg, dx: float, shrink: int = 0):
+    box = np.asarray(sg.box, dtype=np.float64).reshape(3, 2)
+    return tuple(slice(int(round(box[a, 0] / dx)) + shrink, int(round(box[a, 1] / dx)) - shrink + 1)
+                 for a in range(3))
+
+
 def regrid(eps, sig, h: float, coarsen: int, eta: np.ndarray, *, allowed: Optional[np.ndarray],
            theta: float = 0.5, f_max: float, ppw: float = 10.0, keep_points=None,
            current: Optional[list] = None, use_model_criteria: bool = True,
+           gamma: float = 0.0, persistent: bool = True, hysteresis: Optional[float] = None,
            **plan_kw) -> RegridResult:
-    """New subgrid layout from the indicator ``eta`` (main interior nodes)."""
+    """New subgrid layout from the indicator ``eta`` (main interior nodes).
+
+    Marking: Doerfler's rule with ``theta``; with ``gamma > 0`` only the marked nodes
+    with ``eta >= gamma max(eta)`` are kept (maximum strategy), so that a diffuse
+    remainder of the indicator does not spread the boxes. ``persistent`` (default): the
+    boxes of ``current`` stay marked (for an indicator evaluated on the subgridded
+    solver, undefined inside its boxes); ``persistent=False`` re-derives the layout from
+    ``eta`` alone (for an indicator of the main grid without subgrids, defined
+    everywhere), so boxes can shrink, move or vanish. ``hysteresis`` (e.g. 0.9): keep
+    ``current`` when at least that fraction of the marked indicator lies inside its
+    boxes and they hold at most 1.5 times the main cells of the new layout."""
     e = np.asarray(eta, dtype=np.float64)
     if allowed is not None:
         e = np.where(allowed, e, 0.0)
     marked = doerfler_mark(e, theta)
-    # refinement persists: the main grid's indicator is not evaluated inside existing
-    # subgrids (it carries only the incident field there), so their boxes stay marked
+    if gamma > 0 and e.max() > 0:
+        marked &= e >= gamma * e.max()
     dx = coarsen * h
     margin = int(plan_kw.get("margin", 1))
-    for sg in current or []:
+    # refinement persists: the main grid's indicator is not evaluated inside existing
+    # subgrids (it carries only the incident field there), so their boxes stay marked
+    for sg in (current or []) if persistent else []:
         # shrunk by the planner's padding, so that an unchanged box is reproduced
-        box = np.asarray(sg.box, dtype=np.float64).reshape(3, 2)
-        sl = tuple(slice(int(round(box[a, 0] / dx)) + margin,
-                         int(round(box[a, 1] / dx)) - margin + 1) for a in range(3))
-        marked[sl] = True
+        marked[_box_slices(sg, dx, margin)] = True
     if use_model_criteria:
         plan = plan_refinement(eps, sig, h, f_max, ppw=ppw, coarsen=coarsen, extra_flags=marked,
                                keep_points=keep_points, **plan_kw)
@@ -100,10 +116,25 @@ def regrid(eps, sig, h: float, coarsen: int, eta: np.ndarray, *, allowed: Option
                 keep.append((sg, cells))
         plan.subgrids = [k[0] for k in keep]
         plan.boxes_cells = [k[1] for k in keep]
+    info = {"marked_nodes": int(marked.sum()), "eta_total": float(e.sum())}
+    if hysteresis is not None and current:
+        inside = np.zeros(marked.shape, dtype=bool)
+        for sg in current:
+            inside[_box_slices(sg, dx)] = True
+        frac = float(e[marked & inside].sum() / max(e[marked].sum(), 1e-300))
+
+        def cells(bs):
+            return sum(int(np.prod([s_.stop - s_.start for s_ in _box_slices(b, dx)])) for b in bs)
+
+        info["covered_fraction"] = frac
+        if frac >= hysteresis and cells(current) <= 1.5 * max(cells(plan.subgrids), 1):
+            plan.subgrids = list(current)
+            plan.boxes_cells = [tuple((s_.start, s_.stop - 1) for s_ in _box_slices(sg, dx))
+                                for sg in current]
+            info["kept"] = True
     boxes = sorted(tuple(map(tuple, np.round(np.asarray(sg.box), 6))) for sg in plan.subgrids)
     old = sorted(tuple(map(tuple, np.round(np.asarray(sg.box), 6))) for sg in (current or []))
-    return RegridResult(plan, e, marked, boxes != old,
-                        {"marked_nodes": int(marked.sum()), "eta_total": float(e.sum())})
+    return RegridResult(plan, e, marked, boxes != old, info)
 
 
 __all__ = ["RegridResult", "indicator", "regrid"]

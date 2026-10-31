@@ -586,3 +586,60 @@ Planner fixes found while setting up the experiments (covered by the tests):
   from them;
 * refinement persists across AMR regrids without growing.
 
+
+## 10. Equal-budget study: AMR vs static refinement vs uniform FDTD (`examples/subgrid/amr_budget_study.py`)
+
+Question: at the same wall-clock budget, does adjoint-driven AMR give better FWI
+models than static local refinement and uniform FDTD across models, frequencies and
+noise? Run with `examples/subgrid/run_amr_budget_study.sh` (round 1) and
+`run_amr_budget_study2.sh` (round 2); `amr_budget_study.py report` writes
+`results/amr_budget/report.md`, summary figures and per-scenario GIFs
+(`evolution.gif`: all methods at the same compute time; `depth_sweep.gif`;
+`iso3d.gif`; `fdtd1_timeline.gif`).
+
+Design: 0.75 x 1.2 x 1.2 m domain; models M1-M4 (compact sphere pair, pipe + air
+void, dipping plate + boulder, random inclusions) and, in round 2, the fresh random
+models M5/M6 used for validation only; two-plane acquisition, 7 training and 6
+held-out shots; data from a uniform 0.5 cm grid (no inverse crime for any solver),
+differential data plus Ricker-band noise; 200/300/400 MHz at 20 dB, 300 MHz also at
+10 and 30 dB. Every method gets T = 150 s on an RTX 4090; its clock covers setup,
+CUDA graphs, baseline runs, gradients, line searches, indicators and re-planning, and
+the model scored at time t is the last iterate completed by t. Score: held-out
+prediction error PE (noise-free responses, 1 cm evaluator; a 0.5 cm re-evaluation
+gives the same ranking, Spearman 0.89-1.0), plus PE at 4/3 f0 and model errors.
+
+Methods: uniform 3 cm and 1 cm FDTD; static 1 cm box over the whole update region or
+at the survey centre (same fine-node count as AMR); oracle boxes from the true model;
+AMR v1 (round 1: Doerfler marking of the differential DWR indicator, persistent
+boxes, a priori criteria of the current model) dynamic and "adaptive once" (one
+re-plan after 10 coarse iterations, then fixed); AMR v2 (round 2, "finer"):
+indicator of the 3 cm grid alone, `regrid(gamma=0.2, persistent=False,
+hysteresis=0.9)`, no a priori criteria, so boxes can shrink and move.
+
+Results (24 scenarios):
+
+1. **Adaptive once (v1) is the best method without prior knowledge** (best in 14 of
+   24). On the 20 round-1 scenarios its PE is 0.75x that of 3 cm FDTD (16 wins) and
+   0.74x that of the whole-region box (19 wins); on the fresh models 0.51x (4/4) and
+   0.80x (3/4), and better than the oracle boxes in all 4.
+2. **Frequency decides against the main grid**: at 400 MHz every refined solver
+   halves the 3 cm PE; at 200 MHz uniform 3 cm FDTD is best in all 4 models (accurate
+   enough and about 5x more iterations in the budget).
+3. **Dynamic re-planning does not pay.** v1's second re-plan grows the box to almost
+   the whole region (Doerfler marking of the diffuse remainder, plus L-BFGS restarts):
+   PE 1.19x that of adaptive once on round 1. v2 avoids the growth (boxes 0.12-0.38 M
+   fine nodes instead of 0.3-0.8 M, about twice the iterations) but its indicator
+   boxes only the dominant target and leaves the others on the 3 cm grid: PE 1.45x
+   that of adaptive once v1 (round 1, 19 of 20 worse; fresh models 4 of 4 worse).
+   Smaller boxes are not better unless they cover every target that matters.
+4. **Noise** between 10 and 30 dB changes PE by a few percent; modelling error
+   dominates.
+5. **Uniform 1 cm FDTD** (29-40 s per gradient) completes no L-BFGS iteration within
+   150 s. Run for 1800 s it is the most accurate solver (PE 0.008-0.045, typically
+   1.5-2.5x below the best 150 s result), but it needs 620-1700 s (4-11x the budget)
+   to reach the PE of adaptive once at 150 s, and more than 1800 s in 3 of the
+   200 MHz scenarios.
+
+Limits: one acquisition geometry, differential data with a known baseline, one GPU;
+the v2 settings were chosen on round-1 snapshots of M1-M4 (only M5/M6 are an
+independent test); the 1 cm evaluator slightly favours the 1 cm solver.

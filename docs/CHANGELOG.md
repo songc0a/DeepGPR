@@ -24,6 +24,13 @@ All notable changes to this project are documented here. The format follows
   differential indicator for anomaly-response FWI, persistent dynamic regridding.
 - `subgrid.hybrid.HybridSubgridMaxwell3D`: subgrids below the DGTD surface band of
   `HybridMaxwell3D` (split step reproduces the hybrid to round-off).
+- `subgrid.amr.regrid`: `gamma` (maximum-strategy restriction of Doerfler marking),
+  `persistent=False` (layout re-derived from an indicator of the main grid alone, so
+  boxes can shrink or move) and `hysteresis` (keep a layout that already covers the
+  marks); defaults unchanged.
+- `examples/subgrid/amr_budget_study.py` (+ `amr_budget_report.py`, run scripts):
+  equal-budget FWI study of AMR against static refinement and uniform FDTD, 24
+  scenarios, GIFs; results in `docs/SUBGRID.md` section 10.
 - Examples `examples/subgrid/{adaptive_targets,fwi3d_subgrid,amr_fwi3d,fwi3d_dgtd_subgrid}.py`,
   tests `tests/test_subgrid_*.py`, `docs/SUBGRID.md` (results, limitations).
 
