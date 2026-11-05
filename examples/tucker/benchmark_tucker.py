@@ -216,62 +216,128 @@ def sketch_config(spec: Dict[str, Any], measure: bool = False) -> Optional[Tucke
     return TuckerSketchConfig(**options)
 
 
+def build_case_2d(device: torch.device, quick: bool) -> Dict[str, Any]:
+    """The 2D FWI notebook at its own size (examples/2.2DFWI.ipynb).
+
+    ``2DFWImodel.npy`` (200 x 100, dx = 5 cm, dt = 50 ps, 200 MHz Ricker,
+    nt = 2000), sources every 4 cells on the first row (50 shots), receivers
+    on every cell of the last row, ``sigma = 0.002 eps`` with the notebook's
+    mirrored deep part; initial models smoothed. Mode 2 (2D TM fast path).
+    """
+    eps = torch.tensor(np.load(ROOT / "examples" / "2DFWImodel.npy"), dtype=torch.float32)
+    nt = 2000 if not quick else 600
+    sigma = eps * 0.002
+    sigma[95:, :] = torch.flip(sigma[95:, :], dims=[1])
+    nx, ny = eps.shape
+    shot_x = torch.arange(0, nx, 4 if not quick else 20)
+    shots = shot_x.numel()
+    source_location = torch.zeros((shots, 1, 3), dtype=torch.int32)
+    source_location[:, 0, 0] = shot_x
+    receiver_location = torch.zeros((shots, nx, 3), dtype=torch.int32)
+    receiver_location[:, :, 0] = torch.arange(nx)
+    receiver_location[:, :, 1] = ny - 1
+    smooth = eps[None, None]
+    for _ in range(4):
+        smooth = F.avg_pool2d(smooth, 9, stride=1, padding=4, count_include_pad=False)
+    freq, dt = 2.0e8, 5.0e-11
+    wavelet = DeepGPR.wavelet.ricker(freq, nt, dt, 1.0 / freq).reshape(1, nt, 1)
+    kwargs = dict(device=device, dx=0.05, dt=dt, source_amplitudes=wavelet.to(device), pmlthick=10, mode=2)
+    return dict(
+        eps=eps.to(device), sigma=sigma.to(device), eps_init=smooth[0, 0].to(device),
+        sigma_init=(smooth[0, 0] * 0.002).to(device), air=0, nt=nt, shots=shots,
+        source_location=source_location.to(device), receiver_location=receiver_location.to(device),
+        kwargs=kwargs, name="2d",
+    )
+
+
 def wavefield_worker(spec: Dict[str, Any], quick: bool) -> Dict[str, Any]:
     device = torch.device("cuda")
-    case = build_case(quick, device, shots=1, nt=spec.get("nt"))
-    observed = observed_data(case, quick)[0]
-    options = shot_kwargs(case, 0)
+    if spec.get("case") == "2d":
+        case = build_case_2d(device, quick)
+        cache = RESULTS / scale_name(quick) / "cache" / f"observed2d_{case['nt']}.pt"
+        options = dict(case["kwargs"], source_location=case["source_location"], receiver_location=case["receiver_location"])
+        if cache.exists():
+            observed = torch.load(cache).to(device)
+        else:
+            with torch.no_grad():
+                observed = DeepGPR.compute(eps_r=case["eps"], sigma=case["sigma"], save_wavefield_history=False, **options)[-1]
+            atomic_save(observed.cpu(), cache)
+    else:
+        case = build_case(quick, device, shots=1, nt=spec.get("nt"))
+        observed = observed_data(case, quick)[0]
+        options = shot_kwargs(case, 0)
     if spec.get("rhs_history"):
         options["wavefield_rhs_history"] = spec["rhs_history"]
+    interval = spec.get("interval", 1)
+    options["model_gradient_sampling_interval"] = interval
     sketch = sketch_config(spec)
-    stats = WavefieldSketchStats(synchronize=True) if sketch is not None else None
-    eps = case["eps_init"].clone().requires_grad_(True)
-    sigma = case["sigma_init"].clone().requires_grad_(True)
     scale = observed.square().sum()
 
     # Warm-up (CUDA context, native resource cache, allocator).
     with torch.no_grad():
         DeepGPR.compute(eps_r=case["eps_init"], sigma=case["sigma_init"], save_wavefield_history=False, **options)
-    base = fresh_peak()
-    t0 = time.perf_counter()
-    collected: List[WavefieldSketchStats] = []
-    if spec.get("checkpoint"):
-        data = checkpointed_shot(eps, sigma, options, spec["checkpoint"], sketch, collected)
-    else:
-        outputs = DeepGPR.compute(eps_r=eps, sigma=sigma, wavefield_sketch=sketch, wavefield_sketch_stats=stats, **options)
-        data = outputs[-1]
-        del outputs
-    loss = 0.5 * (data - observed).square().sum() / scale
-    sync()
-    t1 = time.perf_counter()
-    forward_peak = torch.cuda.max_memory_allocated() - base
-    loss.backward()
-    sync()
-    t2 = time.perf_counter()
-    result: Dict[str, Any] = dict(
-        name=spec["name"],
-        loss=float(loss),
-        forward_s=t1 - t0,
-        backward_s=t2 - t1,
-        total_s=t2 - t0,
-        forward_peak_gib=forward_peak / GIB,
-        peak_allocated_gib=(torch.cuda.max_memory_allocated() - base) / GIB,
-        peak_reserved_gib=torch.cuda.max_memory_reserved() / GIB,
-    )
-    del data, loss
-    grads = {"eps": eps.grad.detach(), "sigma": sigma.grad.detach()}
-    # Uncompressed history sizes (float32, Ex/Ey/Ez frames on the extended grid).
+
+    def timed_run():
+        stats = WavefieldSketchStats(synchronize=True) if sketch is not None else None
+        eps = case["eps_init"].clone().requires_grad_(True)
+        sigma = case["sigma_init"].clone().requires_grad_(True)
+        base = fresh_peak()
+        t0 = time.perf_counter()
+        collected: List[WavefieldSketchStats] = []
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")  # sampling-interval advisory
+            if spec.get("checkpoint"):
+                data = checkpointed_shot(eps, sigma, options, spec["checkpoint"], sketch, collected)
+            else:
+                outputs = DeepGPR.compute(eps_r=eps, sigma=sigma, wavefield_sketch=sketch, wavefield_sketch_stats=stats, **options)
+                data = outputs[-1]
+                del outputs
+        loss = 0.5 * (data - observed).square().sum() / scale
+        sync()
+        t1 = time.perf_counter()
+        forward_peak = torch.cuda.max_memory_allocated() - base
+        loss.backward()
+        sync()
+        t2 = time.perf_counter()
+        timing = dict(
+            loss=float(loss), forward_s=t1 - t0, backward_s=t2 - t1, total_s=t2 - t0,
+            forward_peak_gib=forward_peak / GIB,
+            peak_allocated_gib=(torch.cuda.max_memory_allocated() - base) / GIB,
+            peak_reserved_gib=torch.cuda.max_memory_reserved() / GIB,
+        )
+        grads = {"eps": eps.grad.detach(), "sigma": sigma.grad.detach()}
+        return timing, grads, stats, collected
+
+    repeats = spec.get("repeats", 1 if quick else 3)
+    runs = []
+    for _ in range(repeats):
+        timing, grads, stats, collected = timed_run()
+        runs.append(timing)
+    result: Dict[str, Any] = dict(name=spec["name"], repeats=repeats, interval=interval)
+    for key in ("forward_s", "backward_s", "total_s"):
+        values = sorted(run[key] for run in runs)
+        result[key] = values[len(values) // 2]  # median
+        result[key.replace("_s", "_min_s")] = values[0]
+    for key in ("forward_peak_gib", "peak_allocated_gib", "peak_reserved_gib"):
+        result[key] = max(run[key] for run in runs)
+    result["loss"] = runs[-1]["loss"]
+    # Uncompressed history sizes (float32 E frames of all gradient components
+    # and shots on the extended grid).
     pml = 2 * options["pmlthick"]
-    cells = math.prod(size + pml for size in case["eps"].shape)
-    frame_bytes = 3 * cells * 4
+    shape = tuple(case["eps"].shape)
+    cells = math.prod(size + (pml if index < 2 or len(shape) == 3 else 0) for index, size in enumerate(shape))
+    components = 3 if options["mode"] == 3 else 1
+    shots = options["source_location"].shape[0]
+    frame_bytes = components * shots * cells * 4
     nt = case["nt"]
+    saved = -(-nt // interval)
     result["raw_e_frame_bytes"] = frame_bytes
     if "sketch" not in spec:
         if spec.get("checkpoint"):
             # One recomputed segment's default (E-only + final frame) history at a time.
-            result["history_bytes"] = (spec["checkpoint"] + 1) * frame_bytes
-        elif spec.get("rhs_history") == "stored":
-            result["history_bytes"] = 2 * nt * frame_bytes
+            result["history_bytes"] = (-(-spec["checkpoint"] // interval) + 1) * frame_bytes
+        elif spec.get("rhs_history") == "stored" or interval > 1:
+            result["history_bytes"] = 2 * saved * frame_bytes  # E + R (E-only needs interval 1)
         else:
             result["history_bytes"] = (nt + 1) * frame_bytes
     # Gradients are cached per configuration; errors against the reference
@@ -292,6 +358,7 @@ def wavefield_worker(spec: Dict[str, Any], quick: bool) -> Dict[str, Any]:
         result["theoretical_ratio"] = compressed_raw / tucker_values_bytes if tucker_values_bytes else None
         result["actual_ratio_vs_er"] = size.raw_bytes / size.stored_bytes
         result["actual_ratio_vs_default"] = (nt + 1) * frame_bytes / size.stored_bytes
+        result["mask_bytes"] = mask_bytes
         if collected:
             for key in ("compress_seconds", "decompress_seconds", "forward_native_seconds", "backward_native_seconds"):
                 setattr(stats, key, sum(getattr(item, key) for item in collected))
@@ -308,7 +375,7 @@ def wavefield_worker(spec: Dict[str, Any], quick: bool) -> Dict[str, Any]:
             components={name: dict(stored=v[0], raw=v[1], compressed=v[2], reason=v[3]) for name, v in size.components.items()},
         )
         # Error pass (separate: measuring costs time).
-        del eps, sigma, grads
+        del grads
         measure = sketch_config(spec, measure=True)
         assert measure is not None
         if measure.time_block == 1 or (measure.segment_steps or 16) % measure.time_block == 0:
@@ -358,6 +425,23 @@ def wavefield_specs(quick: bool) -> List[Dict[str, Any]]:
     specs.append(dict(name="tucker_r24_tb8", sketch=dict(ranks=24, oversampling=8, segment_steps=seg, time_block=8, time_rank=4)))
     specs.append(dict(name="tucker_r16_seg32", sketch=dict(ranks=16, oversampling=8, segment_steps=32)))
     specs.append(dict(name="checkpoint_150+tucker_r16", checkpoint=150, sketch=dict(ranks=16, oversampling=8, segment_steps=seg)))
+    # Randomness of the sketch: other seeds of tucker_r16 / tucker_r16_fromE.
+    for seed in (1, 2, 3, 4):
+        specs.append(dict(name=f"tucker_r16_seed{seed}", sketch=dict(ranks=16, oversampling=8, segment_steps=seg, seed=seed)))
+        specs.append(dict(name=f"tucker_r16_fromE_seed{seed}", sketch=dict(ranks=16, oversampling=8, segment_steps=seg, rhs="from_e", seed=seed)))
+    # Temporal subsampling (existing option) alone and with the sketch.
+    for interval in (2, 4):
+        specs.append(dict(name=f"none_interval{interval}", interval=interval))
+        specs.append(dict(name=f"tucker_r16_interval{interval}", interval=interval, sketch=dict(ranks=16, oversampling=8, segment_steps=seg)))
+    # The 2D FWI notebook at its own size (50 shots, nt = 2000).
+    two_d = dict(case="2d", reference="2d_none")
+    specs += [
+        dict(name="2d_none", **two_d),
+        dict(name="2d_checkpoint_200", checkpoint=200, **two_d),
+        dict(name="2d_tucker_r16_fromE", sketch=dict(ranks=16, oversampling=8, segment_steps=16, rhs="from_e"), **two_d),
+        dict(name="2d_tucker_r32_fromE", sketch=dict(ranks=32, oversampling=8, segment_steps=16, rhs="from_e"), **two_d),
+        dict(name="2d_tucker_r32_tb8_fromE", sketch=dict(ranks=32, oversampling=8, segment_steps=16, rhs="from_e", time_block=8, time_rank=4), **two_d),
+    ]
     # Twice as many steps: the uncompressed history (~34 GB) cannot fit on a
     # 24 GB card; exact checkpointing is the reference.
     long = dict(nt=1200 if not quick else 600, reference="long_checkpoint_150")
