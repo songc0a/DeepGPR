@@ -226,6 +226,62 @@ def checkpointed_shot(eps, sigma, options, segment_steps, sketch, collected=None
     return torch.cat(pieces, dim=1)
 
 
+def offloaded_checkpoint_gradients(eps, sigma, options, segment_steps, observed, scale):
+    """Exact gradient with boundary states kept in host memory.
+
+    For runs whose single-level checkpointing does not fit on the GPU:
+    a history-free forward pass stores the 30 state tensors at segment
+    boundaries in host memory; the backward pass recomputes one segment at a
+    time (with the uncompressed history) and chains the state cotangents.
+    Returns the data and accumulates ``eps.grad`` / ``sigma.grad``.
+    """
+    source = options["source_amplitudes"]
+    common = {k: v for k, v in options.items() if k != "source_amplitudes"}
+    nt = source.shape[1]
+    starts = list(range(0, nt, segment_steps))
+    boundaries = []
+    pieces = []
+    state = None
+    with torch.no_grad():
+        for start in starts:
+            boundaries.append(None if state is None else tuple(t.to("cpu") for t in state))
+            chunk = source[:, start : start + segment_steps].contiguous()
+            result = DeepGPR.compute(
+                eps_r=eps, sigma=sigma, source_amplitudes=chunk, save_wavefield_history=False,
+                E=state[:3] if state else None, H=state[3:6] if state else None, PML=state[6:] if state else None,
+                **common,
+            )
+            state = (*result[1], *result[2], *result[3])
+            pieces.append(result[-1].clone())
+    del state
+    data = torch.cat(pieces, dim=1)
+    data_grad = (data - observed) / scale
+    cotangents = None
+    for index in reversed(range(len(starts))):
+        start = starts[index]
+        chunk = source[:, start : start + segment_steps].contiguous()
+        boundary = boundaries[index]
+        inputs = None
+        if boundary is not None:
+            inputs = [t.to(eps.device).requires_grad_(True) for t in boundary]
+        result = DeepGPR.compute(
+            eps_r=eps, sigma=sigma, source_amplitudes=chunk,
+            E=inputs[:3] if inputs else None, H=inputs[3:6] if inputs else None, PML=inputs[6:] if inputs else None,
+            **common,
+        )
+        outputs = [result[-1]]
+        grads = [data_grad[:, start : start + chunk.shape[1]].contiguous()]
+        if cotangents is not None:
+            for tensor, gradient in zip((*result[1], *result[2], *result[3]), cotangents):
+                if gradient is not None and tensor.requires_grad:
+                    outputs.append(tensor)
+                    grads.append(gradient)
+        torch.autograd.backward(outputs, grads)
+        cotangents = None if inputs is None else [t.grad for t in inputs]
+        del result, outputs, grads, inputs
+    return data
+
+
 def sketch_config(spec: Dict[str, Any], measure: bool = False) -> Optional[TuckerSketchConfig]:
     if "sketch" not in spec:
         return None
@@ -307,7 +363,9 @@ def wavefield_worker(spec: Dict[str, Any], quick: bool) -> Dict[str, Any]:
         collected: List[WavefieldSketchStats] = []
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")  # sampling-interval advisory
-            if spec.get("checkpoint"):
+            if spec.get("offload_checkpoint"):
+                data = offloaded_checkpoint_gradients(eps, sigma, options, spec["offload_checkpoint"], observed, scale)
+            elif spec.get("checkpoint"):
                 data = checkpointed_shot(eps, sigma, options, spec["checkpoint"], sketch, collected)
             else:
                 outputs = DeepGPR.compute(eps_r=eps, sigma=sigma, wavefield_sketch=sketch, wavefield_sketch_stats=stats, **options)
@@ -317,7 +375,8 @@ def wavefield_worker(spec: Dict[str, Any], quick: bool) -> Dict[str, Any]:
         sync()
         t1 = time.perf_counter()
         forward_peak = torch.cuda.max_memory_allocated() - base
-        loss.backward()
+        if not spec.get("offload_checkpoint"):  # already back-propagated
+            loss.backward()
         sync()
         t2 = time.perf_counter()
         timing = dict(
@@ -354,9 +413,10 @@ def wavefield_worker(spec: Dict[str, Any], quick: bool) -> Dict[str, Any]:
     saved = -(-nt // interval)
     result["raw_e_frame_bytes"] = frame_bytes
     if "sketch" not in spec:
-        if spec.get("checkpoint"):
+        if spec.get("checkpoint") or spec.get("offload_checkpoint"):
             # One recomputed segment's default (E-only + final frame) history at a time.
-            result["history_bytes"] = (-(-spec["checkpoint"] // interval) + 1) * frame_bytes
+            steps = spec.get("checkpoint") or spec["offload_checkpoint"]
+            result["history_bytes"] = (-(-steps // interval) + 1) * frame_bytes
         elif spec.get("rhs_history") == "stored" or interval > 1:
             result["history_bytes"] = 2 * saved * frame_bytes  # E + R (E-only needs interval 1)
         else:
@@ -662,6 +722,11 @@ def scaling_specs(quick: bool) -> List[Dict[str, Any]]:
             base_nt = (600 if not quick else 300) * factor
             name = f"{label}{factor:g}"
             group = {key: factor, "reference": f"{name}_checkpoint_opt", "repeats": 2}
+            if factor >= 2:
+                # Single-level checkpointing does not fit on 24 GB here; the
+                # exact reference keeps the boundary states in host memory.
+                group["reference"] = f"{name}_offload_checkpoint"
+                specs.append(dict(name=f"{name}_offload_checkpoint", offload_checkpoint=40, **dict(group, repeats=1)))
             specs += [
                 dict(name=f"{name}_checkpoint_opt", checkpoint=optimal_checkpoint_steps(int(base_nt)), **group),
                 dict(name=f"{name}_tucker_r16_fromE", sketch=tucker16, **group),
