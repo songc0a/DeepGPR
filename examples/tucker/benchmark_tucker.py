@@ -106,7 +106,8 @@ def build_case(
     eps = torch.cat([torch.ones(nx, air, nz), eps], dim=1)
     sigma = 5e-4 * eps
     sigma[:, :air] = 0.0
-    smooth = eps[None, None]
+    # Smooth on the solver device (minutes on the CPU for ~50 M cells).
+    smooth = eps.to(device)[None, None]
     for _ in range(4):
         smooth = F.avg_pool3d(smooth, 9, stride=1, padding=4, count_include_pad=False)
     eps_init = smooth[0, 0]
@@ -401,6 +402,9 @@ def wavefield_worker(spec: Dict[str, Any], quick: bool) -> Dict[str, Any]:
     for key in ("forward_peak_gib", "peak_allocated_gib", "peak_reserved_gib"):
         result[key] = max(run[key] for run in runs)
     result["loss"] = runs[-1]["loss"]
+    import resource
+
+    result["host_peak_gib"] = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024 / GIB
     # Uncompressed history sizes (float32 E frames of all gradient components
     # and shots on the extended grid).
     pml = 2 * options["pmlthick"]
@@ -716,6 +720,15 @@ def scaling_specs(quick: bool) -> List[Dict[str, Any]]:
             dict(name=f"T{nt}_checkpoint_150", checkpoint=150, **group),
             dict(name=f"T{nt}_tucker_r16_fromE", sketch=tucker16, **group),
             dict(name=f"T{nt}_tucker_r16_i4", interval=4, sketch=dict(ranks=16, oversampling=8, segment_steps=seg), **group),
+        ]
+    # ~50 M cells, nt = 1000: refined grid (XLG) and larger domain (XLD).
+    for label, key in (("XLG", "grid_factor"), ("XLD", "domain_factor")):
+        group = {key: 3.1 if not quick else 1.6, "nt": 1000 if not quick else 300, "reference": f"{label}_offload_checkpoint"}
+        specs += [
+            dict(name=f"{label}_offload_checkpoint", offload_checkpoint=16, repeats=1, **group),
+            dict(name=f"{label}_checkpoint_gpu", checkpoint=optimal_checkpoint_steps(group["nt"]), repeats=1, **group),
+            dict(name=f"{label}_tucker_r16_fromE", sketch=dict(ranks=16, oversampling=8, segment_steps=4, rhs="from_e"), repeats=2, **group),
+            dict(name=f"{label}_tucker_r24_fromE", sketch=dict(ranks=24, oversampling=8, segment_steps=4, rhs="from_e"), repeats=2, **group),
         ]
     for label, key in (("G", "grid_factor"), ("D", "domain_factor")):
         for factor in ((1.5, 2.0) if not quick else (1.5,)):
