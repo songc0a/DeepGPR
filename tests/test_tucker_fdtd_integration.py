@@ -426,5 +426,24 @@ class CombinationAndValidationTests(_CaseMixin, unittest.TestCase):
         self.assertGreater(sketched, stats.size.stored_bytes + stats.segment_buffer_bytes)
 
 
+class CpuBackendTests(unittest.TestCase):
+    """The CPU/OpenMP native backend through the segmented path (deterministic)."""
+
+    def test_cpu_lossless_bitwise_and_lossy_accuracy(self):
+        cpu = torch.device("cpu")
+        cases = (tc.case_2d(cpu, nt=200, stride=4), tc.case_3d(cpu, nt=120, extrude=8, stride=16))
+        for case in cases:
+            with self.subTest(case=case.name):
+                obs = tc.observed(case)
+                ref = tc.l2_gradients(case, obs)
+                lossless = tc.l2_gradients(case, obs, wavefield_sketch=TuckerSketchConfig(ranks=10_000, segment_steps=11))
+                self.assertTrue(_bitwise_equal(lossless["data"], ref["data"]))
+                self.assertTrue(_bitwise_equal(lossless["grad_eps"], ref["grad_eps"]))
+                self.assertTrue(_bitwise_equal(lossless["grad_sigma"], ref["grad_sigma"]))
+                lossy = tc.l2_gradients(case, obs, wavefield_sketch=TuckerSketchConfig(ranks=6, oversampling=4))
+                self.assertGreater(cosine_similarity(lossy["grad_eps"], ref["grad_eps"]), 0.999)
+                self.assertGreater(cosine_similarity(lossy["grad_sigma"], ref["grad_sigma"]), 0.999)
+
+
 if __name__ == "__main__":
     unittest.main()
