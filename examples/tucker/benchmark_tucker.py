@@ -66,13 +66,29 @@ def scale_name(quick: bool) -> str:
 
 
 def build_case(
-    quick: bool, device: torch.device, shots: Optional[int] = None, nt: Optional[int] = None
+    quick: bool,
+    device: torch.device,
+    shots: Optional[int] = None,
+    nt: Optional[int] = None,
+    grid_factor: float = 1.0,
+    domain_factor: float = 1.0,
 ) -> Dict[str, Any]:
-    """True/initial models and solver keywords (see the module docstring)."""
+    """True/initial models and solver keywords (see the module docstring).
+
+    Args:
+        grid_factor: Refine the grid of the same physical model (cells x f,
+            dx and dt / f, steps x f; same frequency and record length).
+        domain_factor: Enlarge the physical model at the same dx and dt
+            (cells x g, steps x g so waves cross the larger model).
+    """
     if quick:
         nx, depth, nz, air, default_nt, nshots = 40, 30, 32, 10, 300, 2
     else:
         nx, depth, nz, air, default_nt, nshots = 120, 110, 100, 10, 600, 4
+    factor = grid_factor * domain_factor
+    nx, depth, nz = (int(round(size * factor)) for size in (nx, depth, nz))
+    air = int(round(air * grid_factor))
+    default_nt = int(round(default_nt * factor))
     nshots = shots or nshots
     nt = nt or default_nt
     section = torch.tensor(np.load(ROOT / "examples" / "OverThrust.npy"), dtype=torch.float32)
@@ -97,7 +113,7 @@ def build_case(
     eps_init[:, :air] = 1.0
     sigma_init = torch.full_like(sigma, float(sigma[:, air:].mean()))
     sigma_init[:, :air] = 0.0
-    dx, dt, freq = 0.02, 3.0e-11, 5.0e8
+    dx, dt, freq = 0.02 / grid_factor, 3.0e-11 / grid_factor, 5.0e8
     wavelet = DeepGPR.wavelet.ricker(freq, nt, dt, 1.2 / freq).reshape(1, nt, 1)
     source_location = torch.zeros((nshots, 1, 3), dtype=torch.int32)
     source_location[:, 0, 0] = torch.linspace(nx * 0.3, nx * 0.7, nshots).round().int() if nshots > 1 else nx // 2
@@ -135,7 +151,9 @@ def shot_kwargs(case: Dict[str, Any], shot: int) -> Dict[str, Any]:
 
 
 def observed_data(case: Dict[str, Any], quick: bool) -> List[torch.Tensor]:
-    cache = RESULTS / scale_name(quick) / "cache" / f"observed_{case['shots']}_{case['nt']}.pt"
+    cache = RESULTS / scale_name(quick) / "cache" / (
+        f"observed_{case['shots']}_{case['nt']}_{tuple(case['eps'].shape)}_{case['kwargs']['dx']:.5f}.pt"
+    )
     if cache.exists():
         return [t.to(case["eps"].device) for t in torch.load(cache)]
     data = []
@@ -263,7 +281,10 @@ def wavefield_worker(spec: Dict[str, Any], quick: bool) -> Dict[str, Any]:
                 observed = DeepGPR.compute(eps_r=case["eps"], sigma=case["sigma"], save_wavefield_history=False, **options)[-1]
             atomic_save(observed.cpu(), cache)
     else:
-        case = build_case(quick, device, shots=1, nt=spec.get("nt"))
+        case = build_case(
+            quick, device, shots=1, nt=spec.get("nt"),
+            grid_factor=spec.get("grid_factor", 1.0), domain_factor=spec.get("domain_factor", 1.0),
+        )
         observed = observed_data(case, quick)[0]
         options = shot_kwargs(case, 0)
     if spec.get("rhs_history"):
@@ -617,7 +638,39 @@ def fwi_specs(quick: bool) -> List[Dict[str, Any]]:
 # Driver
 # ---------------------------------------------------------------------------
 
-WORKERS = {"wavefield": (wavefield_worker, wavefield_specs), "model": (model_worker, model_specs), "fwi": (fwi_worker, fwi_specs)}
+def optimal_checkpoint_steps(nt: int) -> int:
+    """Segment length minimising ``(nt / S) * state + S * frame`` (state ~ 2 E-frames)."""
+    return max(1, int(round(math.sqrt(2 * nt))))
+
+
+def scaling_specs(quick: bool) -> List[Dict[str, Any]]:
+    """Longer records, finer grids and larger domains (Section 9.5 of the doc)."""
+    specs: List[Dict[str, Any]] = []
+    seg = 8
+    tucker16 = dict(ranks=16, oversampling=8, segment_steps=seg, rhs="from_e")
+    tucker24 = dict(ranks=24, oversampling=8, segment_steps=seg, rhs="from_e")
+    for nt in ((600, 1200, 2400) if not quick else (300, 600)):
+        group = dict(nt=nt, reference=f"T{nt}_checkpoint_opt")
+        specs += [
+            dict(name=f"T{nt}_checkpoint_opt", checkpoint=optimal_checkpoint_steps(nt), **group),
+            dict(name=f"T{nt}_checkpoint_150", checkpoint=150, **group),
+            dict(name=f"T{nt}_tucker_r16_fromE", sketch=tucker16, **group),
+            dict(name=f"T{nt}_tucker_r16_i4", interval=4, sketch=dict(ranks=16, oversampling=8, segment_steps=seg), **group),
+        ]
+    for label, key in (("G", "grid_factor"), ("D", "domain_factor")):
+        for factor in ((1.5, 2.0) if not quick else (1.5,)):
+            base_nt = (600 if not quick else 300) * factor
+            name = f"{label}{factor:g}"
+            group = {key: factor, "reference": f"{name}_checkpoint_opt", "repeats": 2}
+            specs += [
+                dict(name=f"{name}_checkpoint_opt", checkpoint=optimal_checkpoint_steps(int(base_nt)), **group),
+                dict(name=f"{name}_tucker_r16_fromE", sketch=tucker16, **group),
+                dict(name=f"{name}_tucker_r24_fromE", sketch=tucker24, **group),
+            ]
+    return specs
+
+
+WORKERS = {"wavefield": (wavefield_worker, wavefield_specs), "scaling": (wavefield_worker, scaling_specs), "model": (model_worker, model_specs), "fwi": (fwi_worker, fwi_specs)}
 
 
 def run_suite(kind: str, quick: bool, only: Optional[List[str]] = None) -> None:
@@ -719,6 +772,32 @@ def report(quick: bool) -> None:
                 f"{_fmt(max(ew.values())) if ew else '-'} |"
             )
         lines.append("")
+    scaling_path = out_dir / "scaling.json"
+    if scaling_path.exists():
+        scaling = json.loads(scaling_path.read_text())
+        add_gradient_errors(scaling, quick)
+        (out_dir / "scaling_with_errors.json").write_text(json.dumps(scaling, indent=1))
+        lines += ["## Scaling: longer records (T), finer grids (G), larger domains (D)", ""]
+        lines.append(
+            "| run | cells (M, with CPML) | nt | default history GiB (computed) | history MiB | peak GiB "
+            "| total s | e_g eps | cos eps | e_g sigma | max e_W |"
+        )
+        lines.append("|---|---|---|---|---|---|---|---|---|---|---|")
+        for name, r in scaling.items():
+            if name.startswith("_"):
+                continue
+            if "error" in r:
+                lines.append(f"| {name} | failed: {r['error'][:120]} |")
+                continue
+            cells = r["raw_e_frame_bytes"] / 12
+            default = (r["nt"] + 1) * r["raw_e_frame_bytes"]
+            ew = r.get("wavefield_rel_l2")
+            lines.append(
+                f"| {name} | {_fmt(cells / 1e6)} | {r['nt']} | {_fmt(default / GIB)} | {_fmt(r.get('history_bytes', 0) / MIB)} | "
+                f"{_fmt(r['peak_allocated_gib'])} | {_fmt(r['total_s'])} | {_fmt(r.get('grad_eps_rel_l2'))} | "
+                f"{_fmt(r.get('grad_eps_cosine'), 7)} | {_fmt(r.get('grad_sigma_rel_l2'))} | {_fmt(max(ew.values())) if ew else '-'} |"
+            )
+        lines.append("")
     model_path = out_dir / "model.json"
     if model_path.exists():
         model = json.loads(model_path.read_text())
@@ -760,7 +839,7 @@ def report(quick: bool) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("command", choices=["model", "wavefield", "fwi", "report", "all", "_worker"])
+    parser.add_argument("command", choices=["model", "wavefield", "scaling", "fwi", "report", "all", "_worker"])
     parser.add_argument("args", nargs="*")
     parser.add_argument("--quick", action="store_true")
     parser.add_argument("--only", nargs="*")
