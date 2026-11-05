@@ -145,14 +145,20 @@ class DefaultPathTests(_CaseMixin, unittest.TestCase):
 
 class SketchAccuracyTests(_CaseMixin, unittest.TestCase):
     # Thresholds are ~3x the values measured on an RTX 4090 (float32, no TF32).
-    CASES_2D = [
+    # Built at run time (see setUpModule).
+    @staticmethod
+    def cases_2d():
+        return [
         # (config, max eps rel. error, max sigma rel. error, min cosine)
         (TuckerSketchConfig(ranks=10, oversampling=6, measure_error=True), 3e-2, 3e-2, 0.9998),
         (TuckerSketchConfig(ranks=16, oversampling=6, measure_error=True), 6e-3, 3e-3, 0.99999),
         (TuckerSketchConfig(ranks=16, oversampling=6, rhs="from_e"), 4e-3, 3e-3, 0.99999),
         (TuckerSketchConfig(ranks=16, oversampling=6, time_block=8, time_rank=4), 1.5e-2, 6e-3, 0.9999),
     ]
-    CASES_3D = [
+
+    @staticmethod
+    def cases_3d():
+        return [
         (TuckerSketchConfig(ranks=6, oversampling=6, measure_error=True), 3e-3, 7e-3, 0.99998),
         (TuckerSketchConfig(ranks=10, oversampling=6, measure_error=True), 1e-3, 2e-3, 0.999998),
         (TuckerSketchConfig(ranks=10, oversampling=6, rhs="from_e"), 1e-3, 2e-3, 0.999998),
@@ -180,10 +186,10 @@ class SketchAccuracyTests(_CaseMixin, unittest.TestCase):
                         self.assertEqual(error.frames, stats.frames * case.kwargs["source_location"].shape[0])
 
     def test_2d_example_gradient_accuracy(self):
-        self._check(self.case2d, self.obs2d, self.ref2d, self.CASES_2D)
+        self._check(self.case2d, self.obs2d, self.ref2d, self.cases_2d())
 
     def test_3d_example_gradient_accuracy(self):
-        self._check(self.case3d, self.obs3d, self.ref3d, self.CASES_3D)
+        self._check(self.case3d, self.obs3d, self.ref3d, self.cases_3d())
 
     def test_error_decreases_with_rank(self):
         for case, obs, ref, ranks in ((self.case2d, self.obs2d, self.ref2d, (6, 10, 16)), (self.case3d, self.obs3d, self.ref3d, (4, 6, 10))):
@@ -198,10 +204,10 @@ class FourModeTests(_CaseMixin, unittest.TestCase):
     """Original / model Tucker only / sketch only / both."""
 
     MODEL_RANKS = {"2d_fwi_example": ((12, 8), (8, 6)), "3d_overthrust_example": ((3, 8, 10), (2, 6, 8))}
-    SKETCH = {
-        "2d_fwi_example": TuckerSketchConfig(ranks=16, oversampling=6),
-        "3d_overthrust_example": TuckerSketchConfig(ranks=10, oversampling=6),
-    }
+    @staticmethod
+    def sketch_for(name):
+        ranks = {"2d_fwi_example": 16, "3d_overthrust_example": 10}[name]
+        return TuckerSketchConfig(ranks=ranks, oversampling=6)
 
     def _model(self, case, tucker=True):
         # Low-rank approximations undershoot eps = 1 in the air layer, and
@@ -222,7 +228,7 @@ class FourModeTests(_CaseMixin, unittest.TestCase):
     def test_tucker_gradients_through_exact_and_sketched_adjoint(self):
         for case, obs in ((self.case2d, self.obs2d), (self.case3d, self.obs3d)):
             grads = {}
-            for label, config in (("exact", None), ("sketch", self.SKETCH[case.name])):
+            for label, config in (("exact", None), ("sketch", self.sketch_for(case.name))):
                 model = self._model(case)
                 tucker = model.epsilon.tucker
                 unconstrained = tucker()
@@ -280,7 +286,7 @@ class FourModeTests(_CaseMixin, unittest.TestCase):
                         for _ in range(4):
                             optimizer.zero_grad()
                             eps, sigma = model()
-                            loss = self._loss(case, obs, eps, sigma, self.SKETCH[case.name] if use_sketch else None)
+                            loss = self._loss(case, obs, eps, sigma, self.sketch_for(case.name) if use_sketch else None)
                             loss.backward()
                             optimizer.step()
                             losses.append(float(loss))

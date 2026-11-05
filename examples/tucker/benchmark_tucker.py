@@ -65,13 +65,16 @@ def scale_name(quick: bool) -> str:
     return "quick" if quick else "full"
 
 
-def build_case(quick: bool, device: torch.device, shots: Optional[int] = None) -> Dict[str, Any]:
+def build_case(
+    quick: bool, device: torch.device, shots: Optional[int] = None, nt: Optional[int] = None
+) -> Dict[str, Any]:
     """True/initial models and solver keywords (see the module docstring)."""
     if quick:
-        nx, depth, nz, air, nt, nshots = 40, 30, 32, 10, 300, 2
+        nx, depth, nz, air, default_nt, nshots = 40, 30, 32, 10, 300, 2
     else:
-        nx, depth, nz, air, nt, nshots = 120, 110, 100, 10, 600, 4
+        nx, depth, nz, air, default_nt, nshots = 120, 110, 100, 10, 600, 4
     nshots = shots or nshots
+    nt = nt or default_nt
     section = torch.tensor(np.load(ROOT / "examples" / "OverThrust.npy"), dtype=torch.float32)
     section = F.interpolate(section[None, None], size=(depth, nz), mode="bilinear", align_corners=True)[0, 0]
     rows = torch.arange(depth, dtype=torch.float32)
@@ -132,7 +135,7 @@ def shot_kwargs(case: Dict[str, Any], shot: int) -> Dict[str, Any]:
 
 
 def observed_data(case: Dict[str, Any], quick: bool) -> List[torch.Tensor]:
-    cache = RESULTS / scale_name(quick) / "cache" / f"observed_{case['shots']}.pt"
+    cache = RESULTS / scale_name(quick) / "cache" / f"observed_{case['shots']}_{case['nt']}.pt"
     if cache.exists():
         return [t.to(case["eps"].device) for t in torch.load(cache)]
     data = []
@@ -140,9 +143,16 @@ def observed_data(case: Dict[str, Any], quick: bool) -> List[torch.Tensor]:
         for shot in range(case["shots"]):
             out = DeepGPR.compute(eps_r=case["eps"], sigma=case["sigma"], save_wavefield_history=False, **shot_kwargs(case, shot))
             data.append(out[-1].clone())
-    cache.parent.mkdir(parents=True, exist_ok=True)
-    torch.save([t.cpu() for t in data], cache)
+    atomic_save([t.cpu() for t in data], cache)
     return data
+
+
+def atomic_save(obj: Any, path: Path) -> None:
+    """``torch.save`` through a temporary file (parallel workers share caches)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(f".{os.getpid()}.tmp")
+    torch.save(obj, temporary)
+    os.replace(temporary, path)
 
 
 def sync() -> None:
@@ -208,7 +218,7 @@ def sketch_config(spec: Dict[str, Any], measure: bool = False) -> Optional[Tucke
 
 def wavefield_worker(spec: Dict[str, Any], quick: bool) -> Dict[str, Any]:
     device = torch.device("cuda")
-    case = build_case(quick, device, shots=1)
+    case = build_case(quick, device, shots=1, nt=spec.get("nt"))
     observed = observed_data(case, quick)[0]
     options = shot_kwargs(case, 0)
     if spec.get("rhs_history"):
@@ -264,14 +274,11 @@ def wavefield_worker(spec: Dict[str, Any], quick: bool) -> Dict[str, Any]:
             result["history_bytes"] = 2 * nt * frame_bytes
         else:
             result["history_bytes"] = (nt + 1) * frame_bytes
-    cache = RESULTS / scale_name(quick) / "cache" / "reference_gradients.pt"
-    if spec["name"] == "none":
-        torch.save({k: v.cpu() for k, v in grads.items()}, cache)
-    if cache.exists():
-        reference = {k: v.to(device) for k, v in torch.load(cache).items()}
-        for key in ("eps", "sigma"):
-            result[f"grad_{key}_rel_l2"] = relative_error(grads[key], reference[key])
-            result[f"grad_{key}_cosine"] = cosine_similarity(grads[key], reference[key])
+    # Gradients are cached per configuration; errors against the reference
+    # configuration are computed by ``report`` (workers may run in parallel).
+    atomic_save({k: v.cpu() for k, v in grads.items()}, gradient_cache(quick, spec["name"]))
+    result["reference"] = spec.get("reference", "none")
+    result["nt"] = nt
     if collected:
         # Checkpoint + sketch: one compressed history per recomputed segment,
         # alive one at a time; report the largest.
@@ -315,6 +322,26 @@ def wavefield_worker(spec: Dict[str, Any], quick: bool) -> Dict[str, Any]:
     return result
 
 
+def gradient_cache(quick: bool, name: str) -> Path:
+    safe = name.replace("+", "_plus_").replace("/", "_")
+    return RESULTS / scale_name(quick) / "cache" / f"gradients_{safe}.pt"
+
+
+def add_gradient_errors(results: Dict[str, Any], quick: bool) -> None:
+    """Relative L2 error and cosine of every cached gradient vs its reference."""
+    for name, result in results.items():
+        if name.startswith("_") or "error" in result:
+            continue
+        reference_name = result.get("reference", "none")
+        path, reference_path = gradient_cache(quick, name), gradient_cache(quick, reference_name)
+        if not (path.exists() and reference_path.exists()):
+            continue
+        grads, reference = torch.load(path), torch.load(reference_path)
+        for key in ("eps", "sigma"):
+            result[f"grad_{key}_rel_l2"] = relative_error(grads[key], reference[key])
+            result[f"grad_{key}_cosine"] = cosine_similarity(grads[key], reference[key])
+
+
 def wavefield_specs(quick: bool) -> List[Dict[str, Any]]:
     seg = 8
     specs: List[Dict[str, Any]] = [
@@ -331,6 +358,17 @@ def wavefield_specs(quick: bool) -> List[Dict[str, Any]]:
     specs.append(dict(name="tucker_r24_tb8", sketch=dict(ranks=24, oversampling=8, segment_steps=seg, time_block=8, time_rank=4)))
     specs.append(dict(name="tucker_r16_seg32", sketch=dict(ranks=16, oversampling=8, segment_steps=32)))
     specs.append(dict(name="checkpoint_150+tucker_r16", checkpoint=150, sketch=dict(ranks=16, oversampling=8, segment_steps=seg)))
+    # Twice as many steps: the uncompressed history (~34 GB) cannot fit on a
+    # 24 GB card; exact checkpointing is the reference.
+    long = dict(nt=1200 if not quick else 600, reference="long_checkpoint_150")
+    specs += [
+        dict(name="long_none", **long),
+        dict(name="long_checkpoint_150", checkpoint=150, **long),
+        dict(name="long_tucker_r16", sketch=dict(ranks=16, oversampling=8, segment_steps=seg), **long),
+        dict(name="long_tucker_r16_fromE", sketch=dict(ranks=16, oversampling=8, segment_steps=seg, rhs="from_e"), **long),
+        dict(name="long_tucker_r16_tb8", sketch=dict(ranks=16, oversampling=8, segment_steps=seg, time_block=8, time_rank=4), **long),
+        dict(name="long_checkpoint_150+tucker_r16", checkpoint=150, sketch=dict(ranks=16, oversampling=8, segment_steps=seg), **long),
+    ]
     return specs
 
 
@@ -421,7 +459,10 @@ def fwi_worker(spec: Dict[str, Any], quick: bool) -> Dict[str, Any]:
     )
     sketch = sketch_config(spec)
     parameters = [p for p in model.parameters() if p.requires_grad]
-    optimizer = torch.optim.LBFGS(parameters, lr=1.0, max_iter=spec.get("max_iter", 12), max_eval=spec.get("max_eval", 16), history_size=10, line_search_fn="strong_wolfe")
+    optimizer = torch.optim.LBFGS(
+        parameters, lr=1.0, max_iter=spec.get("max_iter", 20), max_eval=spec.get("max_eval", 25),
+        history_size=10, line_search_fn="strong_wolfe",
+    )
     history: List[Dict[str, float]] = []
     start = time.perf_counter()
     scale = sum(float(d.square().sum()) for d in observed)
@@ -480,7 +521,6 @@ def run_suite(kind: str, quick: bool, only: Optional[List[str]] = None) -> None:
     out_dir = RESULTS / scale_name(quick)
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / f"{kind}.json"
-    results = json.loads(path.read_text()) if path.exists() else {}
     _, specs = WORKERS[kind]
     for spec in specs(quick):
         if only and spec["name"] not in only:
@@ -490,12 +530,26 @@ def run_suite(kind: str, quick: bool, only: Optional[List[str]] = None) -> None:
         process = subprocess.run(command, capture_output=True, text=True, env=dict(os.environ, PYTHONPATH=str(ROOT / "src")))
         if process.returncode != 0:
             print(process.stdout[-2000:], process.stderr[-4000:])
-            results[spec["name"]] = dict(name=spec["name"], error=process.stderr.strip().splitlines()[-1] if process.stderr else "failed")
+            result = dict(name=spec["name"], error=process.stderr.strip().splitlines()[-1] if process.stderr else "failed")
         else:
-            results[spec["name"]] = json.loads(process.stdout.strip().splitlines()[-1])
-            print("   ", {k: v for k, v in results[spec["name"]].items() if not isinstance(v, (dict, list))}, flush=True)
+            result = json.loads(process.stdout.strip().splitlines()[-1])
+            print("   ", {k: v for k, v in result.items() if not isinstance(v, (dict, list))}, flush=True)
+        result["gpu"] = os.environ.get("CUDA_VISIBLE_DEVICES")
+        merge_result(path, spec["name"], result)
+
+
+def merge_result(path: Path, name: str, result: Dict[str, Any]) -> None:
+    """Add one result to a JSON file shared by parallel drivers (file lock)."""
+    import fcntl
+
+    with open(path.with_suffix(".lock"), "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        results = json.loads(path.read_text()) if path.exists() else {}
+        results[name] = result
         results["_environment"] = environment()
-        path.write_text(json.dumps(results, indent=1))
+        temporary = path.with_suffix(f".{os.getpid()}.tmp")
+        temporary.write_text(json.dumps(results, indent=1))
+        os.replace(temporary, path)
 
 
 def environment() -> Dict[str, Any]:
@@ -524,9 +578,14 @@ def report(quick: bool) -> None:
     wave_path = out_dir / "wavefield.json"
     if wave_path.exists():
         wave = json.loads(wave_path.read_text())
+        add_gradient_errors(wave, quick)
+        merged = json.dumps(wave, indent=1)
+        (out_dir / "wavefield_with_errors.json").write_text(merged)
         env = wave.get("_environment", {})
         lines += [f"Environment: {env}", "", "## Wavefield history (1 shot)", ""]
         base = wave.get("none", {})
+        if base.get("history_bytes") is None:
+            base = {}
         lines.append(
             "| method | history MiB | theoretical ratio | actual vs E+R | actual vs default | peak GiB | peak vs default "
             "| fwd s | bwd s | total s | compress s | decompress s | e_g eps | cos eps | e_g sigma | cos sigma | max e_W |"
@@ -539,8 +598,15 @@ def report(quick: bool) -> None:
                 lines.append(f"| {name} | failed: {r['error']} |")
                 continue
             hist = r.get("history_bytes")
-            ratio = base.get("history_bytes", 0) / hist if hist else None
-            peak_ratio = r["peak_allocated_gib"] / base["peak_allocated_gib"] if base.get("peak_allocated_gib") else None
+            # Default history of the same run length: E-only frames + final frame.
+            default_bytes = (r["nt"] + 1) * r["raw_e_frame_bytes"] if "nt" in r else None
+            ratio = default_bytes / hist if hist and default_bytes else None
+            same_length = base.get("nt") == r.get("nt")
+            peak_ratio = (
+                r["peak_allocated_gib"] / base["peak_allocated_gib"]
+                if same_length and base.get("peak_allocated_gib")
+                else None
+            )
             ew = r.get("wavefield_rel_l2")
             lines.append(
                 f"| {name} | {_fmt(hist / MIB) if hist else '-'} | {_fmt(r.get('theoretical_ratio'))} | "
