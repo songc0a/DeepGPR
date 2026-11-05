@@ -1,0 +1,11 @@
+2026-11-05 17:41:41 start
+2026-11-05 17:42:41 regression finished; model benchmark on gpu1
+2026-11-05 17:43:15 model (gpu1) exit 0
+2026-11-05 17:44:07 wavefield A (gpu5) exit 0
+2026-11-05 17:44:16 fwi (gpu7) exit 143
+2026-11-05 17:45:06 wavefield B (gpu3, shared) exit 0
+2026-11-05 17:45:08 ALL DONE
+2026-11-05 18:07:13 wavefield v2 (gpu1, repeats=3, all specs) exit 0
+2026-11-05 18:07:15 report written
+2026-11-05 18:31:27 fwi v1 (gpu7) exit 0
+2026-11-05 18:31:29 FWI DONE, report written

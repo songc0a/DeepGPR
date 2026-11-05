@@ -480,8 +480,148 @@ Run: `python -m unittest tests.test_tucker_model tests.test_tucker_sketch tests.
 
 ## 9. Benchmarks
 
-See Section 9 results below (`examples/tucker/benchmark_tucker.py`).
+Reproduce: `bash examples/tucker/run_benchmarks.sh A B C [python]` (or the
+subcommands of `examples/tucker/benchmark_tucker.py`). Measured on one RTX 4090
+per job (server `hdnl`, PyTorch 2.0.1, CUDA 11.8, float32, commit `1f007e0`);
+raw results in `examples/tucker/results/full/` (`wavefield_with_errors.json`,
+`model.json`, `fwi.json`, `report.md`, logs). Every configuration ran in its own
+process; times are medians of 3 runs; peak = `torch.cuda.max_memory_allocated`
+during forward + backward (the native library allocates nothing extra for
+float32 histories). Gradient errors are relative L2 errors and cosines against
+the uncompressed DeepGPR gradient of the same run (for `nt = 1200`, against
+exact checkpointing, because the uncompressed run does not fit).
+
+**3D model.** OverThrust section of the 3D FWI example resampled to 110 x 100,
+extruded over 120 cells with a smooth lateral dip, 10 air cells: `120 x 120 x 100`
+(`140 x 140 x 120` = 2.35 M cells with CPML), dx 2 cm, dt 30 ps, 500 MHz Ricker,
+mode 3, one shot, `nt = 600` unless stated.
+
+### 9.1 History storage, peak memory, time and gradient error (3D)
+
+| Method | History | Peak GPU | Time fwd + bwd | e_g eps / cos | e_g sigma |
+|---|---|---|---|---|---|
+| default (E only, uncompressed) | 16.2 GB | 16.0 GiB | 0.58 s | exact | exact |
+| E + R stored | 32 GB | OOM | - | - | - |
+| checkpoint, 60-step segments | 1.64 GB / segment | 2.56 GiB | 0.92 s | 3e-7 (atomics) | 2e-7 |
+| checkpoint, 150-step segments | 4.06 GB / segment | 4.50 GiB | 0.84 s | 3e-7 | 2e-7 |
+| Tucker r8 (E+R) | 53 MB (307x) | 0.76 GiB | 2.77 s | 1.0e-2 / 0.99995 | 3.6e-3 |
+| Tucker r12 (E+R) | 91 MB (177x) | 0.81 GiB | 3.14 s | 2.3e-3 / 0.999997 | 1.0e-3 |
+| Tucker r16 (E+R) | 146 MB (111x) | 0.88 GiB | 3.56 s | 1.0e-3 / 0.9999995 | 4.3e-4 |
+| Tucker r24 (E+R) | 323 MB (50x) | 1.09 GiB | 4.49 s | 1.7e-4 / 1.0000000 | 1.0e-4 |
+| Tucker r12, `rhs="from_e"` | 46 MB (354x) | 0.57 GiB | 2.02 s | 2.2e-3 / 0.999998 | 1.0e-3 |
+| Tucker r16, `rhs="from_e"` | 73 MB (222x) | 0.60 GiB | 2.14 s | 8.7e-4 / 0.9999996 | 4.3e-4 |
+| Tucker r24, `rhs="from_e"` | 162 MB (100x) | 0.71 GiB | 2.75 s | 1.7e-4 / 1.0000000 | 1.0e-4 |
+| Tucker r16, time block 8 | 41 MB (396x) | 0.77 GiB | 2.81 s | 1.2e-3 / 0.9999993 | 5.1e-4 |
+| Tucker r16, 32-step segments | 146 MB | 2.49 GiB | 3.06 s | 1.0e-3 | 4.3e-4 |
+| sampling interval 4 (existing) | 8.1 GB | 8.06 GiB | 0.49 s | 5.5e-6 | 1.5e-6 |
+| Tucker r16 + sampling interval 4 | 38 MB (429x) | 0.37 GiB | 1.63 s | 1.0e-3 / 0.9999995 | 4.3e-4 |
+| checkpoint 150 + Tucker r16 | 38 MB / segment | 1.08 GiB | 3.54 s | 1.0e-3 | 4.3e-4 |
+
+The history ratio is against the default E-only history. The theoretical
+per-frame ratio (`cells / (prod r + sum I r)`) and the measured storage ratio
+agree to within 2 % (support masks, `cells / 8` bytes per component, are the
+difference). Peak memory is dominated by the 8-step full-resolution segment
+buffer (450 MB for E+R, 250 MB for E-only), not by the compressed history.
+
+`nt = 1200` (uncompressed history 31.5 GiB, does not fit): checkpoint 150 →
+4.78 GiB, 1.65 s, exact; Tucker r16 → 1.02 GiB, 6.9 s; Tucker r16 `from_e` →
+0.67 GiB, 4.1 s, e_g 8.7e-4; time block 8 → 0.81 GiB, 5.3 s, 1.2e-3;
+checkpoint 150 + Tucker r16 → 1.37 GiB, 6.9 s, 1.0e-3. Errors do not grow
+with the run length.
+
+Seeds 0-4 of Tucker r16: eps error 7.6e-4..1.0e-3 (E+R) and 7.6e-4..8.8e-4
+(`from_e`), sigma 3.6e-4..5.2e-4; the randomness of the maps changes the error
+by less than 30 %.
+
+Cost breakdown (idle GPU, per 8-step segment of 6 components at 2.35 M cells):
+sketch contractions ~20 ms, recovery 23-40 ms on the host (112-196 ms with
+`recovery_device="device"`), reconstruction 1.5 ms. Compression therefore
+costs 2-4 s per 600 steps against 0.58 s for the native forward + backward.
+
+### 9.2 The 2D FWI notebook at its own size
+
+`2DFWImodel.npy`, 200 x 100, 50 shots in one batch, `nt = 2000`, mode 2:
+
+| Method | History | Peak | Time | e_g eps / sigma |
+|---|---|---|---|---|
+| default | 10.1 GB | 10.2 GiB | 0.32 s | exact |
+| checkpoint 200 | 1.0 GB / segment | 1.97 GiB | 0.75 s | 3e-7 |
+| Tucker r16 `from_e` | 2.2 GB (4.6x) | 2.53 GiB | 31.5 s | 8.2e-3 / 9.9e-3 |
+| Tucker r32 `from_e` | 4.5 GB (2.2x) | 4.86 GiB | 62 s | 1.1e-4 / 1.2e-4 |
+| Tucker r32, time block 8, `from_e` | 0.72 GB (14x) | 1.15 GiB | 8.8 s | 3.1e-4 / 3.8e-4 |
+
+2D frames (220 x 120) are matrices; a rank-r Tucker form saves little, and
+100 000 small frames make the per-frame recovery expensive. In 2D,
+checkpointing is better; time blocks are the only useful Tucker variant.
+
+### 9.3 Model parameterization (Module A, 120 x 120 x 100)
+
+| Ranks | Trainable values | vs dense | HOSVD error true eps | true sigma | Reconstruct fwd / fwd+bwd |
+|---|---|---|---|---|---|
+| 8 | 3 232 | 446x | 6.0 % | 6.0 % | 0.3 / 1.9 ms |
+| 12 | 5 808 | 248x | 4.8 % | 4.8 % | 0.3 / 1.9 ms |
+| 16 | 9 536 | 151x | 3.9 % | 3.9 % | 0.3 / 1.9 ms |
+| 24 | 21 984 | 65x | 2.8 % | 2.8 % | 0.5 / 2.4 ms |
+
+(The value 2.82 ms for rank 12 in `report.md` is a first-call outlier.)
+Reconstruction is negligible against one FDTD forward + backward (0.6 s); the
+peak memory of a Tucker-model FWI step equals that of the voxel model (16 GiB,
+history-dominated), because the solver needs the full grid.
+
+### 9.4 FWI (eps only, 4 shots, L-BFGS with Wolfe line search, ~70 evaluations)
+
+Smoothed start model, sigma fixed at its mean, data from the same solver
+(inverse crime). Zone RMSE: eps error in the illuminated zone (0.8 m below the
+surface, inside the receiver footprint); the whole-volume RMSE is dominated by
+the deep part the 18 ns record does not see.
+
+| Parameterization + history | Trainable | Evals | Data loss start → best | Zone eps RMSE start → end | s / eval | Peak |
+|---|---|---|---|---|---|---|
+| voxel + exact | 1 440 000 | 74 | 0.069 → 1.65e-4 | 0.566 → 0.564 | 2.25 | 16.2 GiB |
+| voxel + Tucker sketch r16 | 1 440 000 | 76 | 0.069 → 2.48e-4 | 0.566 → 0.565 | 13.5 | 1.06 GiB |
+| Tucker r8 + exact | 3 232 | 67 | 0.058 → 2.10e-4 | 0.566 → 0.520 | 2.24 | 16.0 GiB |
+| Tucker r12 + exact | 5 808 | 68 | 0.071 → 2.06e-4 | 0.566 → 0.500 | 2.24 | 16.0 GiB |
+| Tucker r16 + exact | 9 536 | 65 | 0.070 → 1.96e-4 | 0.566 → 0.496 | 2.25 | 16.0 GiB |
+| Tucker r24 + exact | 21 984 | 76 | 0.069 → 1.45e-4 | 0.566 → 0.521 | 2.24 | 16.0 GiB |
+| Tucker r16 + Tucker sketch r16 | 9 536 | 73 | 0.070 → 1.90e-4 | 0.566 → 0.513 | 13.2 | 0.90 GiB |
+
+The voxel inversion fits the data 400x better than the start but leaves the
+zone error unchanged (updates concentrate around the antennas). The Tucker
+models reach comparable data misfits and reduce the zone error by 8-12 %
+(rank 12-16 best). With the sketched history the voxel inversion follows the
+exact one (same misfit decade, same zone error) at 1/15 of the peak memory and
+6x the time per evaluation. This is one synthetic, low-rank-friendly model
+(layered section with a smooth dip), four shots, eps only.
 
 ## 10. Limitations and open items
 
-See the end of this document.
+* **Speed.** The sketch costs 3-5x the native forward + backward in 3D and
+  25-100x in the 2D notebook case. The contractions run as generic PyTorch
+  `tensordot`/`einsum` (several passes over each frame; a fused first
+  contraction would save an estimated 25 %), and the small recovery
+  factorizations are per frame on the host. No custom CUDA kernel was written;
+  given the measured split (half contractions, half host linear algebra), a
+  kernel would only address part of the cost.
+* **When to use it.** Checkpointing is exact and faster whenever ~2.5 GiB
+  (3D example) is available. The sketch is for memory-bound cases: 4-7x below
+  the best checkpoint setting, and growing far more slowly with `nt`.
+  Combined with the existing temporal subsampling (nearly exact up to the
+  recommended interval), it gives the smallest footprint measured (0.37 GiB).
+* **2D.** Little gain from per-frame Tucker; use checkpointing or time blocks.
+* **Approximate gradients.** Errors are measured, not bounded a priori for a
+  given rank; the sigma gradient is more sensitive than eps (Section 7).
+* **`rhs="from_e"`** matched or beat `"stored"` in every measured case (2D,
+  3D, five seeds, `nt = 1200`) at half the storage and less time, but the
+  default stays `"stored"` (conservative; it also supports sampling intervals
+  above 1).
+* **Peak memory** is dominated by the full-resolution segment buffer; shorter
+  segments lower it at the cost of more native calls. The native 2D TM adjoint
+  allocates and frees a scratch buffer per call (one `cudaFree` per segment).
+* **Not offered:** lossy compression of checkpoint states, async offload of
+  the compressed history, INT8/FP16 storage combined with the sketch, adaptive
+  ranks with an error tolerance (ranks are fixed; `measure_error` reports the
+  achieved error).
+* **FWI evidence** is limited to one synthetic 3D model with an inverse crime;
+  no field data.
+* Unchanged existing behaviour is verified by the full suite (341 tests, OK,
+  4 skips) on the server and the bitwise default-path tests.

@@ -1,0 +1,132 @@
+{
+ "tucker_r8": {
+  "name": "tucker_r8",
+  "shape": [
+   120,
+   120,
+   100
+  ],
+  "ranks": [
+   8,
+   8,
+   8
+  ],
+  "full_grid": 1440000,
+  "core": 512,
+  "factors": 2720,
+  "total": 3232,
+  "compression_ratio": 445.54455445544556,
+  "eps_hosvd_rel_l2": 0.05999958756445082,
+  "eps_init_hosvd_rel_l2": 0.005967901049993805,
+  "sigma_hosvd_rel_l2": 0.06007041512339898,
+  "reconstruct_ms": 0.27725635445676744,
+  "reconstruct_fwd_bwd_ms": 1.8729458970483392,
+  "module_parameter_bytes": 12928,
+  "module_gradient_bytes": 12928,
+  "module_reconstructed_bytes": 5760000,
+  "module_dense_parameter_bytes": 5760000,
+  "fdtd_forward_s": 0.2411128410603851,
+  "fdtd_backward_s": 0.36475816601887345,
+  "fdtd_peak_allocated_gib": 15.990495204925537,
+  "gpu": "1"
+ },
+ "_environment": {
+  "torch": "2.0.1",
+  "gpu": "NVIDIA GeForce RTX 4090",
+  "git": "c501456",
+  "date": "2026-11-05 17:43:14"
+ },
+ "tucker_r12": {
+  "name": "tucker_r12",
+  "shape": [
+   120,
+   120,
+   100
+  ],
+  "ranks": [
+   12,
+   12,
+   12
+  ],
+  "full_grid": 1440000,
+  "core": 1728,
+  "factors": 4080,
+  "total": 5808,
+  "compression_ratio": 247.93388429752065,
+  "eps_hosvd_rel_l2": 0.04829319481672149,
+  "eps_init_hosvd_rel_l2": 0.0011708210588248697,
+  "sigma_hosvd_rel_l2": 0.04834911703338356,
+  "reconstruct_ms": 2.8163784532807767,
+  "reconstruct_fwd_bwd_ms": 1.906368398340419,
+  "module_parameter_bytes": 23232,
+  "module_gradient_bytes": 23232,
+  "module_reconstructed_bytes": 5760000,
+  "module_dense_parameter_bytes": 5760000,
+  "fdtd_forward_s": 0.24517438595648855,
+  "fdtd_backward_s": 0.36549598805140704,
+  "fdtd_peak_allocated_gib": 15.990923404693604,
+  "gpu": "1"
+ },
+ "tucker_r16": {
+  "name": "tucker_r16",
+  "shape": [
+   120,
+   120,
+   100
+  ],
+  "ranks": [
+   16,
+   16,
+   16
+  ],
+  "full_grid": 1440000,
+  "core": 4096,
+  "factors": 5440,
+  "total": 9536,
+  "compression_ratio": 151.00671140939596,
+  "eps_hosvd_rel_l2": 0.03886337257983445,
+  "eps_init_hosvd_rel_l2": 0.0001651069085861945,
+  "sigma_hosvd_rel_l2": 0.038908047658859905,
+  "reconstruct_ms": 0.3407194511964917,
+  "reconstruct_fwd_bwd_ms": 1.894167048158124,
+  "module_parameter_bytes": 38144,
+  "module_gradient_bytes": 38144,
+  "module_reconstructed_bytes": 5760000,
+  "module_dense_parameter_bytes": 5760000,
+  "fdtd_forward_s": 0.24641987204086035,
+  "fdtd_backward_s": 0.4729573139920831,
+  "fdtd_peak_allocated_gib": 15.99137258529663,
+  "gpu": "1"
+ },
+ "tucker_r24": {
+  "name": "tucker_r24",
+  "shape": [
+   120,
+   120,
+   100
+  ],
+  "ranks": [
+   24,
+   24,
+   24
+  ],
+  "full_grid": 1440000,
+  "core": 13824,
+  "factors": 8160,
+  "total": 21984,
+  "compression_ratio": 65.50218340611353,
+  "eps_hosvd_rel_l2": 0.027688461479554474,
+  "eps_init_hosvd_rel_l2": 1.2328524895859189e-05,
+  "sigma_hosvd_rel_l2": 0.027719085837006247,
+  "reconstruct_ms": 0.5227445508353412,
+  "reconstruct_fwd_bwd_ms": 2.420985297067091,
+  "module_parameter_bytes": 87936,
+  "module_gradient_bytes": 87936,
+  "module_reconstructed_bytes": 5760000,
+  "module_dense_parameter_bytes": 5760000,
+  "fdtd_forward_s": 0.6310786480316892,
+  "fdtd_backward_s": 0.3676394720096141,
+  "fdtd_peak_allocated_gib": 15.992347240447998,
+  "gpu": "1"
+ }
+}

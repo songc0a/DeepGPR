@@ -1,0 +1,77 @@
+[wavefield] tucker_r12_fromE ...
+    {'name': 'tucker_r12_fromE', 'loss': 0.1696297824382782, 'forward_s': 1.9913597429404035, 'backward_s': 0.8782037299824879, 'total_s': 2.8695634729228914, 'forward_peak_gib': 0.5653424263000488, 'peak_allocated_gib': 0.5653424263000488, 'peak_reserved_gib': 0.630859375, 'raw_e_frame_bytes': 28224000, 'reference': 'none', 'nt': 600, 'theoretical_ratio': 360.29411764705884, 'actual_ratio_vs_er': 353.6684590880568, 'actual_ratio_vs_default': 353.6684590880568, 'history_bytes': 47961936, 'raw_er_bytes': 16962624000, 'map_bytes': 388800, 'segment_buffer_bytes': 254016000, 'segments': 75, 'native_forward_s': 0.34876206412445754, 'compress_s': 1.6108994641108438, 'native_backward_s': 0.6390507217729464, 'decompress_s': 0.23372546012979}
+[wavefield] tucker_r16_fromE ...
+    {'name': 'tucker_r16_fromE', 'loss': 0.1696297824382782, 'forward_s': 2.1857041839975864, 'backward_s': 0.9604628750821576, 'total_s': 3.146167059079744, 'forward_peak_gib': 0.6004557609558105, 'peak_allocated_gib': 0.6004557609558105, 'peak_reserved_gib': 0.68359375, 'raw_e_frame_bytes': 28224000, 'reference': 'none', 'nt': 600, 'theoretical_ratio': 224.08536585365854, 'actual_ratio_vs_er': 221.50446377363906, 'actual_ratio_vs_default': 221.50446377363906, 'history_bytes': 76579152, 'raw_er_bytes': 16962624000, 'map_bytes': 465600, 'segment_buffer_bytes': 254016000, 'segments': 75, 'native_forward_s': 0.35057573788799345, 'compress_s': 1.806831119931303, 'native_backward_s': 0.7056430431548506, 'decompress_s': 0.24840759369544685}
+[wavefield] tucker_r24_fromE ...
+    {'name': 'tucker_r24_fromE', 'loss': 0.1696297824382782, 'forward_s': 2.9113064479315653, 'backward_s': 1.1127291989978403, 'total_s': 4.024035646929406, 'forward_peak_gib': 0.7095036506652832, 'peak_allocated_gib': 0.7095036506652832, 'peak_reserved_gib': 0.79296875, 'raw_e_frame_bytes': 28224000, 'reference': 'none', 'nt': 600, 'theoretical_ratio': 100.40983606557377, 'actual_ratio_vs_er': 99.88832140370752, 'actual_ratio_vs_default': 99.88832140370752, 'history_bytes': 169815888, 'raw_er_bytes': 16962624000, 'map_bytes': 619200, 'segment_buffer_bytes': 254016000, 'segments': 75, 'native_forward_s': 0.373953923699446, 'compress_s': 2.506422067177482, 'native_backward_s': 0.769922153907828, 'decompress_s': 0.3378551892237738}
+[wavefield] tucker_r16_tb8 ...
+    {'name': 'tucker_r16_tb8', 'loss': 0.1696297824382782, 'forward_s': 3.3932971539907157, 'backward_s': 1.1891599079826847, 'total_s': 4.5824570619734, 'forward_peak_gib': 0.7711505889892578, 'peak_allocated_gib': 0.7711505889892578, 'peak_reserved_gib': 0.845703125, 'raw_e_frame_bytes': 28224000, 'reference': 'none', 'nt': 600, 'theoretical_ratio': 824.6844319775596, 'actual_ratio_vs_er': 790.7211296016137, 'actual_ratio_vs_default': 396.01949907547487, 'history_bytes': 42832800, 'raw_er_bytes': 33868800000, 'map_bytes': 1023360, 'segment_buffer_bytes': 451584000, 'segments': 75, 'native_forward_s': 0.4168300398159772, 'compress_s': 2.9211038681678474, 'native_backward_s': 0.6612639196682721, 'decompress_s': 0.5227856987621635}
+[wavefield] tucker_r24_tb8 ...
+    {'name': 'tucker_r24_tb8', 'loss': 0.1696297824382782, 'forward_s': 4.164964522002265, 'backward_s': 1.2960340570425615, 'total_s': 5.460998579044826, 'forward_peak_gib': 0.8765425682067871, 'peak_allocated_gib': 0.8765425682067871, 'peak_reserved_gib': 0.95703125, 'raw_e_frame_bytes': 28224000, 'reference': 'none', 'nt': 600, 'theoretical_ratio': 289.7979300147856, 'actual_ratio_vs_er': 285.4888632639437, 'actual_ratio_vs_default': 142.98233901802513, 'history_bytes': 118634400, 'raw_er_bytes': 33868800000, 'map_bytes': 1335168, 'segment_buffer_bytes': 451584000, 'segments': 75, 'native_forward_s': 0.4206716896733269, 'compress_s': 3.4365474674850702, 'native_backward_s': 0.6684317069593817, 'decompress_s': 0.6217855580616742}
+[wavefield] long_none ...
+ Traceback (most recent call last):
+  File "/home/ll/DeepGPR-tucker/examples/tucker/benchmark_tucker.py", line 676, in <module>
+    main()
+  File "/home/ll/DeepGPR-tucker/examples/tucker/benchmark_tucker.py", line 663, in main
+    result = WORKERS[kind][0](spec, options.quick)
+  File "/home/ll/DeepGPR-tucker/examples/tucker/benchmark_tucker.py", line 241, in wavefield_worker
+    outputs = DeepGPR.compute(eps_r=eps, sigma=sigma, wavefield_sketch=sketch, wavefield_sketch_stats=stats, **options)
+  File "/home/ll/DeepGPR-tucker/src/DeepGPR/solver/modeling.py", line 728, in compute
+    outputs = DeepGPR.apply(
+  File "/home/ll/anaconda3/envs/gprmax/lib/python3.10/site-packages/torch/autograd/function.py", line 506, in apply
+    return super().apply(*args, **kwargs)  # type: ignore[misc]
+  File "/home/ll/DeepGPR-tucker/src/DeepGPR/solver/autograd.py", line 581, in forward
+    e_saved, r_saved, history_shape = _allocate_histories(
+  File "/home/ll/DeepGPR-tucker/src/DeepGPR/solver/autograd.py", line 452, in _allocate_histories
+    e_saved = torch.empty(shape, device=device, dtype=storage.dtype)
+torch.cuda.OutOfMemoryError: CUDA out of memory. Tried to allocate 31.54 GiB (GPU 0; 23.65 GiB total capacity; 178.07 MiB already allocated; 21.86 GiB free; 220.00 MiB reserved in total by PyTorch) If reserved memory is >> allocated memory try setting max_split_size_mb to avoid fragmentation.  See documentation for Memory Management and PYTORCH_CUDA_ALLOC_CONF
+
+[wavefield] long_checkpoint_150 ...
+    {'name': 'long_checkpoint_150', 'loss': 0.1703323870897293, 'forward_s': 1.0652008060133085, 'backward_s': 2.4905851719668135, 'total_s': 3.555785977980122, 'forward_peak_gib': 4.60730504989624, 'peak_allocated_gib': 4.775190353393555, 'peak_reserved_gib': 8.333984375, 'raw_e_frame_bytes': 28224000, 'history_bytes': 4261824000, 'reference': 'long_checkpoint_150', 'nt': 1200}
+[wavefield] long_tucker_r16 ...
+    {'name': 'long_tucker_r16', 'loss': 0.1703323870897293, 'forward_s': 8.191871502087452, 'backward_s': 2.367884523002431, 'total_s': 10.559756025089882, 'forward_peak_gib': 1.0184998512268066, 'peak_allocated_gib': 1.0184998512268066, 'peak_reserved_gib': 1.1171875, 'raw_e_frame_bytes': 28224000, 'reference': 'long_checkpoint_150', 'nt': 1200, 'theoretical_ratio': 224.08536585365854, 'actual_ratio_vs_er': 222.78528972980652, 'actual_ratio_vs_default': 111.48547206895735, 'history_bytes': 304048800, 'raw_er_bytes': 67737600000, 'map_bytes': 931200, 'segment_buffer_bytes': 451584000, 'segments': 150, 'native_forward_s': 0.8187843784689903, 'compress_s': 7.093798336922191, 'native_backward_s': 1.4566605755826458, 'decompress_s': 0.9041406763717532}
+[wavefield] long_tucker_r16_fromE ...
+    {'name': 'long_tucker_r16_fromE', 'loss': 0.1703323870897293, 'forward_s': 4.274431920028292, 'backward_s': 1.8511167909018695, 'total_s': 6.125548710930161, 'forward_peak_gib': 0.6719546318054199, 'peak_allocated_gib': 0.6719546318054199, 'peak_reserved_gib': 0.75390625, 'raw_e_frame_bytes': 28224000, 'reference': 'long_checkpoint_150', 'nt': 1200, 'theoretical_ratio': 224.08536585365854, 'actual_ratio_vs_er': 222.7863659493867, 'actual_ratio_vs_default': 222.7863659493867, 'history_bytes': 152150352, 'raw_er_bytes': 33897024000, 'map_bytes': 465600, 'segment_buffer_bytes': 254016000, 'segments': 150, 'native_forward_s': 0.7089014353696257, 'compress_s': 3.524715215433389, 'native_backward_s': 1.396734249428846, 'decompress_s': 0.4473327330779284}
+[wavefield] long_tucker_r16_tb8 ...
+    {'name': 'long_tucker_r16_tb8', 'loss': 0.1703323870897293, 'forward_s': 6.363723236019723, 'backward_s': 2.3189658580813557, 'total_s': 8.682689094101079, 'forward_peak_gib': 0.8132939338684082, 'peak_allocated_gib': 0.8132939338684082, 'peak_reserved_gib': 0.86328125, 'raw_e_frame_bytes': 28224000, 'reference': 'long_checkpoint_150', 'nt': 1200, 'theoretical_ratio': 824.6844319775596, 'actual_ratio_vs_er': 807.3457478760835, 'actual_ratio_vs_default': 404.00926799965674, 'history_bytes': 83901600, 'raw_er_bytes': 67737600000, 'map_bytes': 1023360, 'segment_buffer_bytes': 451584000, 'segments': 150, 'native_forward_s': 0.8244785191491246, 'compress_s': 5.4844699441455305, 'native_backward_s': 1.3729030687827617, 'decompress_s': 0.9357597538037226}
+[wavefield] long_checkpoint_150+tucker_r16 ...
+    {'name': 'long_checkpoint_150+tucker_r16', 'loss': 0.1703323870897293, 'forward_s': 0.9454349359730259, 'backward_s': 9.48668250895571, 'total_s': 10.432117444928735, 'forward_peak_gib': 0.6685895919799805, 'peak_allocated_gib': 1.3682446479797363, 'peak_reserved_gib': 1.603515625, 'raw_e_frame_bytes': 28224000, 'reference': 'long_checkpoint_150', 'nt': 1200, 'theoretical_ratio': 224.08536585365854, 'actual_ratio_vs_er': 214.09066084107045, 'actual_ratio_vs_default': 857.0762789004187, 'history_bytes': 39549600, 'raw_er_bytes': 8467200000, 'map_bytes': 931200, 'segment_buffer_bytes': 451584000, 'segments': 19, 'native_forward_s': 0.07513443566858768, 'compress_s': 7.189208982046694, 'native_backward_s': 0.16605597850866616, 'decompress_s': 0.7341176818590611}
+# Tucker benchmark (full)
+
+Environment: {'torch': '2.0.1', 'gpu': 'NVIDIA GeForce RTX 4090', 'git': 'cbcc434', 'date': '2026-11-05 17:45:05'}
+
+## Wavefield history (1 shot)
+
+| method | history MiB | theoretical ratio | actual vs E+R | actual vs default | peak GiB | peak vs default | fwd s | bwd s | total s | compress s | decompress s | e_g eps | cos eps | e_g sigma | cos sigma | max e_W |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| none | 1.62e+04 | - | - | 1 | 16 | 1 | 0.208 | 0.365 | 0.574 | - | - | 0 | 1 | 0 | 1 | - |
+| tucker_r12_fromE | 45.7 | 360 | 354 | 354 | 0.565 | 0.0354 | 1.99 | 0.878 | 2.87 | 1.61 | 0.234 | 2.23e-03 | 0.9999976 | 1.03e-03 | 0.9999995 | 0.0298 |
+| none_ER_stored | failed: torch.cuda.OutOfMemoryError: CUDA out of memory. Tried to allocate 15.77 GiB (GPU 0; 23.65 GiB total capacity; 15.92 GiB already allocated; 7.25 GiB free; 15.95 GiB reserved in total by PyTorch) If reserved memory is >> allocated memory try setting max_split_size_mb to avoid fragmentation.  See documentation for Memory Management and PYTORCH_CUDA_ALLOC_CONF |
+| checkpoint_60 | 1.64e+03 | - | - | 9.85 | 2.55 | 0.16 | 0.492 | 1.02 | 1.51 | - | - | 3.12e-07 | 1 | 2.56e-07 | 1 | - |
+| tucker_r16_fromE | 73 | 224 | 222 | 222 | 0.6 | 0.0376 | 2.19 | 0.96 | 3.15 | 1.81 | 0.248 | 8.65e-04 | 0.9999996 | 4.29e-04 | 0.9999999 | 0.0152 |
+| checkpoint_150 | 4.06e+03 | - | - | 3.98 | 4.49 | 0.281 | 0.232 | 0.598 | 0.83 | - | - | 1.75e-07 | 1 | 1.79e-07 | 1 | - |
+| tucker_r24_fromE | 162 | 100 | 99.9 | 99.9 | 0.71 | 0.0444 | 2.91 | 1.11 | 4.02 | 2.51 | 0.338 | 1.67e-04 | 1 | 1.03e-04 | 1 | 3.01e-03 |
+| tucker_r8 | 52.7 | 634 | 613 | 307 | 0.763 | 0.0478 | 2.36 | 0.688 | 3.04 | 2.04 | 0.282 | 0.0104 | 0.9999463 | 3.62e-03 | 0.9999935 | 0.137 |
+| tucker_r12 | 91.3 | 360 | 354 | 177 | 0.809 | 0.0507 | 2.43 | 0.674 | 3.11 | 2.12 | 0.28 | 2.34e-03 | 0.9999973 | 1.03e-03 | 0.9999995 | 0.0674 |
+| tucker_r16_tb8 | 40.8 | 825 | 791 | 396 | 0.771 | 0.0483 | 3.39 | 1.19 | 4.58 | 2.92 | 0.523 | 1.16e-03 | 0.9999993 | 5.05e-04 | 0.9999999 | 0.0348 |
+| tucker_r16 | 146 | 224 | 222 | 111 | 0.875 | 0.0548 | 3.38 | 0.662 | 4.04 | 3.06 | 0.274 | 1.02e-03 | 0.9999995 | 4.25e-04 | 0.9999999 | 0.0334 |
+| tucker_r24_tb8 | 113 | 290 | 285 | 143 | 0.877 | 0.0549 | 4.16 | 1.3 | 5.46 | 3.44 | 0.622 | 1.80e-04 | 1 | 1.32e-04 | 1 | 6.20e-03 |
+| long_none | failed: torch.cuda.OutOfMemoryError: CUDA out of memory. Tried to allocate 31.54 GiB (GPU 0; 23.65 GiB total capacity; 178.07 MiB already allocated; 21.86 GiB free; 220.00 MiB reserved in total by PyTorch) If reserved memory is >> allocated memory try setting max_split_size_mb to avoid fragmentation.  See documentation for Memory Management and PYTORCH_CUDA_ALLOC_CONF |
+| long_checkpoint_150 | 4.06e+03 | - | - | 7.95 | 4.78 | - | 1.07 | 2.49 | 3.56 | - | - | 0 | 1 | 0 | 1 | - |
+| tucker_r24 | 323 | 100 | 99.9 | 50 | 1.09 | 0.068 | 6.45 | 1.64 | 8.09 | 5.66 | 0.728 | 1.71e-04 | 1 | 1.04e-04 | 1 | 6.02e-03 |
+| tucker_r16_seg32 | 146 | 224 | 222 | 111 | 2.49 | 0.156 | 4.52 | 1.03 | 5.55 | 3.34 | 0.414 | 1.02e-03 | 0.9999995 | 4.25e-04 | 0.9999999 | 0.0334 |
+| long_tucker_r16 | 290 | 224 | 223 | 111 | 1.02 | - | 8.19 | 2.37 | 10.6 | 7.09 | 0.904 | 1.03e-03 | 0.9999995 | 4.45e-04 | 0.9999999 | 0.0344 |
+| checkpoint_150+tucker_r16 | 37.7 | 224 | 214 | 429 | 1.08 | 0.0678 | 0.561 | 6.54 | 7.1 | 4.13 | 0.5 | 1.02e-03 | 0.9999995 | 4.25e-04 | 0.9999999 | 0.0334 |
+| long_tucker_r16_fromE | 145 | 224 | 223 | 223 | 0.672 | - | 4.27 | 1.85 | 6.13 | 3.52 | 0.447 | 8.68e-04 | 0.9999996 | 4.48e-04 | 0.9999999 | 0.0158 |
+| long_tucker_r16_tb8 | 80 | 825 | 807 | 404 | 0.813 | - | 6.36 | 2.32 | 8.68 | 5.48 | 0.936 | 1.16e-03 | 0.9999993 | 5.23e-04 | 0.9999999 | 0.0357 |
+| long_checkpoint_150+tucker_r16 | 37.7 | 224 | 214 | 857 | 1.37 | - | 0.945 | 9.49 | 10.4 | 7.19 | 0.734 | 1.03e-03 | 0.9999995 | 4.45e-04 | 0.9999999 | 0.0344 |
+
+## Model parameterization
+
+| ranks | params | ratio | HOSVD err true eps | err init eps | err sigma | reconstruct ms | rec. fwd+bwd ms | FDTD fwd s | FDTD bwd s | peak GiB |
+|---|---|---|---|---|---|---|---|---|---|---|
+| (8, 8, 8) | 3232 | 446 | 0.06 | 5.97e-03 | 0.0601 | 0.277 | 1.87 | 0.241 | 0.365 | 16 |
+| (12, 12, 12) | 5808 | 248 | 0.0483 | 1.17e-03 | 0.0483 | 2.82 | 1.91 | 0.245 | 0.365 | 16 |
+| (16, 16, 16) | 9536 | 151 | 0.0389 | 1.65e-04 | 0.0389 | 0.341 | 1.89 | 0.246 | 0.473 | 16 |
+| (24, 24, 24) | 21984 | 65.5 | 0.0277 | 1.23e-05 | 0.0277 | 0.523 | 2.42 | 0.631 | 0.368 | 16 |
+
