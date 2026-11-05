@@ -45,6 +45,37 @@ Environment: {'torch': '2.0.1', 'gpu': 'NVIDIA GeForce RTX 4090', 'git': '1f007e
 | 2d_tucker_r32_fromE | 4.54e+03 | 2.22 | 2.22 | 2.22 | 4.86 | - | 61.2 | 0.821 | 62 | 61 | 0.0971 | 1.12e-04 | 1 | 1.24e-04 | 1 | 8.45e-05 |
 | 2d_tucker_r32_tb8_fromE | 719 | 14 | 14 | 14 | 1.15 | - | 8.39 | 0.373 | 8.81 | 8.02 | 0.102 | 3.07e-04 | 1 | 3.75e-04 | 0.9999999 | 2.64e-04 |
 
+## Scaling: longer records (T), finer grids (G), larger domains (D)
+
+| run | cells (M, with CPML) | nt | default history GiB (computed) | history MiB | peak GiB | total s | e_g eps | cos eps | e_g sigma | max e_W |
+|---|---|---|---|---|---|---|---|---|---|---|
+| T600_checkpoint_opt | 2.35 | 600 | 15.8 | 969 | 2.41 | 0.983 | 0 | 1 | 0 | - |
+| T600_checkpoint_150 | 2.35 | 600 | 15.8 | 4.06e+03 | 4.5 | 0.821 | 3.16e-07 | 1 | 2.67e-07 | - |
+| G1.5_checkpoint_opt | 6.8 | 900 | 68.5 | 3.35e+03 | 7.93 | 3.89 | 0 | 1 | 0 | - |
+| T600_tucker_r16_fromE | 2.35 | 600 | 15.8 | 73 | 0.6 | 1.96 | 8.65e-04 | 0.9999996 | 4.29e-04 | 0.0152 |
+| D2_checkpoint_opt | failed: torch.cuda.OutOfMemoryError: CUDA out of memory. Tried to allocate 7.83 GiB (GPU 0; 23.65 GiB total capacity; 10.25 GiB  |
+| G2_checkpoint_opt | failed: torch.cuda.OutOfMemoryError: CUDA out of memory. Tried to allocate 8.14 GiB (GPU 0; 23.65 GiB total capacity; 10.64 GiB  |
+| T600_tucker_r16_i4 | 2.35 | 600 | 15.8 | 37.7 | 0.366 | 1.61 | 1.04e-03 | 0.9999995 | 4.25e-04 | 0.0334 |
+| T1200_checkpoint_opt | 2.35 | 1200 | 31.6 | 1.35e+03 | 3.28 | 1.83 | 0 | 1 | 0 | - |
+| G1.5_tucker_r16_fromE | 6.8 | 900 | 68.5 | 139 | 1.58 | 7.58 | 2.54e-04 | 1 | 1.10e-03 | 9.78e-03 |
+| T1200_checkpoint_150 | 2.35 | 1200 | 31.6 | 4.06e+03 | 4.78 | 1.64 | 2.03e-07 | 1 | 2.19e-07 | - |
+| T1200_tucker_r16_fromE | 2.35 | 1200 | 31.6 | 145 | 0.673 | 3.99 | 8.68e-04 | 0.9999996 | 4.48e-04 | 0.0158 |
+| G1.5_tucker_r24_fromE | 6.8 | 900 | 68.5 | 286 | 1.76 | 7.71 | 5.99e-05 | 1 | 4.63e-04 | 1.95e-03 |
+| T1200_tucker_r16_i4 | 2.35 | 1200 | 31.6 | 73.8 | 0.4 | 3.13 | 1.04e-03 | 0.9999995 | 4.45e-04 | 0.0344 |
+| D1.5_checkpoint_opt | 6.63 | 900 | 66.8 | 3.26e+03 | 7.74 | 4.02 | 0 | 1 | 0 | - |
+| T2400_checkpoint_opt | 2.35 | 2400 | 63.1 | 1.88e+03 | 4.52 | 3.48 | 0 | 1 | 0 | - |
+| D2_tucker_r16_fromE | 14.3 | 1200 | 192 | 222 | 3.2 | 18.2 | 4.43e-04 | 0.9999999 | 7.16e-04 | 0.0725 |
+| G2_tucker_r16_fromE | 14.9 | 1200 | 200 | 224 | 3.32 | 18.1 | 1.03e-04 | 1 | 3.89e-03 | 7.29e-03 |
+| T2400_checkpoint_150 | 2.35 | 2400 | 63.1 | 4.06e+03 | 5.36 | 3.26 | 2.69e-07 | 1 | 2.45e-07 | - |
+| D1.5_tucker_r16_fromE | 6.63 | 900 | 66.8 | 138 | 1.55 | 6.63 | 7.11e-04 | 0.9999997 | 5.80e-04 | 0.041 |
+| T2400_tucker_r16_fromE | 2.35 | 2400 | 63.1 | 289 | 0.814 | 7.8 | 8.68e-04 | 0.9999996 | 4.47e-04 | 0.0158 |
+| D1.5_tucker_r24_fromE | 6.63 | 900 | 66.8 | 285 | 1.73 | 7.87 | 1.59e-04 | 1 | 2.93e-04 | 0.0159 |
+| T2400_tucker_r16_i4 | 2.35 | 2400 | 63.1 | 146 | 0.47 | 7.05 | 1.04e-03 | 0.9999995 | 4.44e-04 | 0.0344 |
+| D2_tucker_r24_fromE | 14.3 | 1200 | 192 | 436 | 3.45 | 18 | 1.40e-04 | 1 | 4.67e-04 | 0.0368 |
+| G2_tucker_r24_fromE | 14.9 | 1200 | 200 | 439 | 3.57 | 18.5 | 3.97e-05 | 1 | 1.35e-03 | 1.66e-03 |
+| D2_offload_checkpoint | 14.3 | 1200 | 192 | 6.71e+03 | 8.38 | 16.9 | 0 | 1 | 0 | - |
+| G2_offload_checkpoint | 14.9 | 1200 | 200 | 6.98e+03 | 8.71 | 17.4 | 0 | 1 | 0 | - |
+
 ## Model parameterization
 
 | ranks | params | ratio | HOSVD err true eps | err init eps | err sigma | reconstruct ms | rec. fwd+bwd ms | FDTD fwd s | FDTD bwd s | peak GiB |

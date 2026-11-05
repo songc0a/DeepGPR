@@ -593,6 +593,48 @@ exact one (same misfit decade, same zone error) at 1/15 of the peak memory and
 6x the time per evaluation. This is one synthetic, low-rank-friendly model
 (layered section with a smooth dip), four shots, eps only.
 
+### 9.5 Scaling: longer records, finer grids, larger domains
+
+`python examples/tucker/benchmark_tucker.py scaling` (results in
+`examples/tucker/results/full/scaling_with_errors.json`). "Checkpoint opt" uses
+segments of `sqrt(2 nt)` steps (minimum of boundary-state plus segment-history
+memory). Errors are against the exact gradient (checkpointing; for the 2x runs
+against checkpointing with the boundary states in host memory, because no
+single-level checkpointing fits). Tucker = rank r, `rhs="from_e"`.
+
+Longer records (same 120 x 120 x 100 model, 2.35 M cells):
+
+| nt | default history | checkpoint opt | Tucker r16 | Tucker r16 + interval 4 | e_g eps (Tucker r16) |
+|---|---|---|---|---|---|
+| 600 | 15.8 GiB | 2.41 GiB, 0.98 s | 0.60 GiB, 1.96 s | 0.37 GiB, 1.61 s | 8.7e-4 |
+| 1200 | 31.6 GiB | 3.28 GiB, 1.83 s | 0.67 GiB, 3.99 s | 0.40 GiB, 3.13 s | 8.7e-4 |
+| 2400 | 63.1 GiB | 4.52 GiB, 3.48 s | 0.81 GiB, 7.80 s | 0.47 GiB, 7.05 s | 8.7e-4 |
+
+Checkpoint memory grows like `sqrt(nt)`, the Tucker footprint almost not at
+all (segment buffer + 0.12 MB per step); the ratio grows from 4.0 to 5.6. Time
+stays about 2x that of checkpointing; the error does not depend on `nt`.
+
+Larger models (record length scaled with the model):
+
+| Case | cells | nt | default history | exact reference | Tucker r16 | Tucker r24 |
+|---|---|---|---|---|---|---|
+| grid x1.5 (same model, dx/1.5) | 6.8 M | 900 | 68.5 GiB | ckpt opt 7.93 GiB, 3.9 s | 1.58 GiB, 7.6 s, e_g 2.5e-4 / 1.1e-3 | 1.76 GiB, 7.7 s, 6.0e-5 / 4.6e-4 |
+| domain x1.5 (same dx) | 6.6 M | 900 | 66.8 GiB | ckpt opt 7.74 GiB, 4.0 s | 1.55 GiB, 6.6 s, 7.1e-4 / 5.8e-4 | 1.73 GiB, 7.9 s, 1.6e-4 / 2.9e-4 |
+| grid x2 | 14.9 M | 1200 | 200 GiB | ckpt opt: OOM; host-offloaded ckpt 8.71 GiB GPU + 11 GB host, 17.4 s | 3.32 GiB, 18.1 s, 1.0e-4 / 3.9e-3 | 3.57 GiB, 18.5 s, 4.0e-5 / 1.4e-3 |
+| domain x2 | 14.3 M | 1200 | 192 GiB | ckpt opt: OOM; host-offloaded ckpt 8.38 GiB GPU + 11 GB host, 16.9 s | 3.20 GiB, 18.2 s, 4.4e-4 / 7.2e-4 | 3.45 GiB, 18.0 s, 1.4e-4 / 4.7e-4 |
+
+(e_g given as eps / sigma.) Refining the grid of the same model keeps the
+wavefield equally low-rank: at fixed rank the eps error decreases (8.7e-4 →
+2.5e-4 → 1.0e-4) and the per-frame storage ratio grows with the cell count
+(the frame wavefield error of rank 16 is 0.7 % at grid x2). A larger domain at
+the same dx holds more wavelengths, so the same rank is less accurate (frame
+error 7 % at domain x2) and the rank has to grow with the domain. The sigma
+error does not follow the eps trend on the finer grids (3.9e-3 at grid x2,
+rank 16), consistent with its cancellation-limited floor (Section 7). At
+~15 M cells single-level checkpointing no longer fits on a 24 GB GPU, the
+Tucker run needs 3.3 GiB, and its time equals that of the host-offloaded
+exact reference (18 s vs 17 s).
+
 ## 10. Limitations and open items
 
 * **Speed.** The sketch costs 3-5x the native forward + backward in 3D and
@@ -602,9 +644,11 @@ exact one (same misfit decade, same zone error) at 1/15 of the peak memory and
   factorizations are per frame on the host. No custom CUDA kernel was written;
   given the measured split (half contractions, half host linear algebra), a
   kernel would only address part of the cost.
-* **When to use it.** Checkpointing is exact and faster whenever ~2.5 GiB
-  (3D example) is available. The sketch is for memory-bound cases: 4-7x below
-  the best checkpoint setting, and growing far more slowly with `nt`.
+* **When to use it.** Checkpointing is exact and faster whenever its memory
+  (2.4 GiB for the 3D example) is available. The sketch is for memory-bound
+  cases: 4-6x below the best checkpoint setting, growing far more slowly with
+  `nt` and with grid refinement; at ~15 M cells it is the only tested option
+  that fits on 24 GB (Section 9.5).
   Combined with the existing temporal subsampling (nearly exact up to the
   recommended interval), it gives the smallest footprint measured (0.37 GiB).
 * **2D.** Little gain from per-frame Tucker; use checkpointing or time blocks.

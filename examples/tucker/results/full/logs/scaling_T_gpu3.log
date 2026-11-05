@@ -1,0 +1,118 @@
+[scaling] T600_checkpoint_opt ...
+    {'name': 'T600_checkpoint_opt', 'repeats': 3, 'interval': 1, 'forward_s': 0.30019770190119743, 'forward_min_s': 0.29996354796458036, 'backward_s': 0.6834218819858506, 'backward_min_s': 0.675250196014531, 'total_s': 0.983385429950431, 'total_min_s': 0.9754478979157284, 'forward_peak_gib': 2.2324233055114746, 'peak_allocated_gib': 2.4107699394226074, 'peak_reserved_gib': 3.43359375, 'loss': 0.1696297824382782, 'raw_e_frame_bytes': 28224000, 'history_bytes': 1016064000, 'reference': 'T600_checkpoint_opt', 'nt': 600}
+[scaling] T600_checkpoint_150 ...
+    {'name': 'T600_checkpoint_150', 'repeats': 3, 'interval': 1, 'forward_s': 0.22428683994803578, 'forward_min_s': 0.2237961390055716, 'backward_s': 0.5973221419844776, 'backward_min_s': 0.5960087080020458, 'total_s': 0.8211182809900492, 'total_min_s': 0.8202955479500815, 'forward_peak_gib': 4.326719284057617, 'peak_allocated_gib': 4.496217250823975, 'peak_reserved_gib': 4.658203125, 'loss': 0.1696297824382782, 'raw_e_frame_bytes': 28224000, 'history_bytes': 4261824000, 'reference': 'T600_checkpoint_opt', 'nt': 600}
+[scaling] T600_tucker_r16_fromE ...
+    {'name': 'T600_tucker_r16_fromE', 'repeats': 3, 'interval': 1, 'forward_s': 1.4295104329939932, 'forward_min_s': 1.4230863410048187, 'backward_s': 0.5317130510229617, 'backward_min_s': 0.5296299930196255, 'total_s': 1.9591404260136187, 'total_min_s': 1.9547993920277804, 'forward_peak_gib': 0.6004557609558105, 'peak_allocated_gib': 0.6004557609558105, 'peak_reserved_gib': 0.68359375, 'loss': 0.1696297824382782, 'raw_e_frame_bytes': 28224000, 'reference': 'T600_checkpoint_opt', 'nt': 600, 'theoretical_ratio': 224.08536585365854, 'actual_ratio_vs_er': 221.50446377363906, 'actual_ratio_vs_default': 221.50446377363906, 'mask_bytes': 882000, 'history_bytes': 76579152, 'raw_er_bytes': 16962624000, 'map_bytes': 465600, 'segment_buffer_bytes': 254016000, 'segments': 75, 'native_forward_s': 0.2251319142524153, 'compress_s': 1.1819438247475773, 'native_backward_s': 0.38844404730480164, 'decompress_s': 0.13853856804780662}
+[scaling] T600_tucker_r16_i4 ...
+    {'name': 'T600_tucker_r16_i4', 'repeats': 3, 'interval': 4, 'forward_s': 1.1850591970141977, 'forward_min_s': 1.1771098100580275, 'backward_s': 0.4224232599372044, 'backward_min_s': 0.42000776599161327, 'total_s': 1.6074824569514021, 'total_min_s': 1.5971175760496408, 'forward_peak_gib': 0.3655567169189453, 'peak_allocated_gib': 0.3655567169189453, 'peak_reserved_gib': 0.439453125, 'loss': 0.1696297824382782, 'raw_e_frame_bytes': 28224000, 'reference': 'T600_checkpoint_opt', 'nt': 600, 'theoretical_ratio': 224.08536585365854, 'actual_ratio_vs_er': 214.09066084107045, 'actual_ratio_vs_default': 428.8949572182778, 'mask_bytes': 1764000, 'history_bytes': 39549600, 'raw_er_bytes': 8467200000, 'map_bytes': 931200, 'segment_buffer_bytes': 112896000, 'segments': 75, 'native_forward_s': 0.21323279303032905, 'compress_s': 0.9437637951923534, 'native_backward_s': 0.3085823600413278, 'decompress_s': 0.1064313380047679}
+[scaling] T1200_checkpoint_opt ...
+    {'name': 'T1200_checkpoint_opt', 'repeats': 3, 'interval': 1, 'forward_s': 0.5362026540096849, 'forward_min_s': 0.5360532720806077, 'backward_s': 1.2912035579793155, 'backward_min_s': 1.2857044659322128, 'total_s': 1.8274062119890004, 'total_min_s': 1.8217577380128205, 'forward_peak_gib': 3.1009068489074707, 'peak_allocated_gib': 3.279486656188965, 'peak_reserved_gib': 4.71484375, 'loss': 0.1703323870897293, 'raw_e_frame_bytes': 28224000, 'history_bytes': 1411200000, 'reference': 'T1200_checkpoint_opt', 'nt': 1200}
+[scaling] T1200_checkpoint_150 ...
+    {'name': 'T1200_checkpoint_150', 'repeats': 3, 'interval': 1, 'forward_s': 0.44536906701978296, 'forward_min_s': 0.44456740003079176, 'backward_s': 1.1920028839958832, 'backward_min_s': 1.1792820539558306, 'total_s': 1.6407564220717177, 'total_min_s': 1.6238494539866224, 'forward_peak_gib': 4.612810134887695, 'peak_allocated_gib': 4.782530307769775, 'peak_reserved_gib': 4.97265625, 'loss': 0.1703323870897293, 'raw_e_frame_bytes': 28224000, 'history_bytes': 4261824000, 'reference': 'T1200_checkpoint_opt', 'nt': 1200}
+[scaling] T1200_tucker_r16_fromE ...
+    {'name': 'T1200_tucker_r16_fromE', 'repeats': 3, 'interval': 1, 'forward_s': 2.8792412779293954, 'forward_min_s': 2.8734884990844876, 'backward_s': 1.054857645998709, 'backward_min_s': 1.0450574499554932, 'total_s': 3.99287626799196, 'total_min_s': 3.9185459490399808, 'forward_peak_gib': 0.6726412773132324, 'peak_allocated_gib': 0.6726412773132324, 'peak_reserved_gib': 0.79296875, 'loss': 0.1703323870897293, 'raw_e_frame_bytes': 28224000, 'reference': 'T1200_checkpoint_opt', 'nt': 1200, 'theoretical_ratio': 224.08536585365854, 'actual_ratio_vs_er': 222.7863659493867, 'actual_ratio_vs_default': 222.7863659493867, 'mask_bytes': 882000, 'history_bytes': 152150352, 'raw_er_bytes': 33897024000, 'map_bytes': 465600, 'segment_buffer_bytes': 254016000, 'segments': 150, 'native_forward_s': 0.45102003298234195, 'compress_s': 2.3969919360242784, 'native_backward_s': 0.768157264799811, 'decompress_s': 0.27138376783113927}
+[scaling] T1200_tucker_r16_i4 ...
+    {'name': 'T1200_tucker_r16_i4', 'repeats': 3, 'interval': 4, 'forward_s': 2.2893947779666632, 'forward_min_s': 2.288600245025009, 'backward_s': 0.8384373519802466, 'backward_min_s': 0.8373546249931678, 'total_s': 3.1270375970052555, 'total_min_s': 3.126749402959831, 'forward_peak_gib': 0.4003744125366211, 'peak_allocated_gib': 0.4003744125366211, 'peak_reserved_gib': 0.478515625, 'loss': 0.1703323870897293, 'raw_e_frame_bytes': 28224000, 'reference': 'T1200_checkpoint_opt', 'nt': 1200, 'theoretical_ratio': 224.08536585365854, 'actual_ratio_vs_er': 218.97402476491948, 'actual_ratio_vs_default': 438.3130062377805, 'mask_bytes': 1764000, 'history_bytes': 77335200, 'raw_er_bytes': 16934400000, 'map_bytes': 931200, 'segment_buffer_bytes': 112896000, 'segments': 150, 'native_forward_s': 0.42658450512681156, 'compress_s': 1.8329376368783414, 'native_backward_s': 0.6239009205019102, 'decompress_s': 0.20780820085201412}
+[scaling] T2400_checkpoint_opt ...
+    {'name': 'T2400_checkpoint_opt', 'repeats': 3, 'interval': 1, 'forward_s': 0.9934687899658456, 'forward_min_s': 0.9934266119962558, 'backward_s': 2.4895266010425985, 'backward_min_s': 2.4784611890790984, 'total_s': 3.482995391008444, 'total_min_s': 3.471887801075354, 'forward_peak_gib': 4.342456817626953, 'peak_allocated_gib': 4.52150821685791, 'peak_reserved_gib': 6.55078125, 'loss': 0.17033416032791138, 'raw_e_frame_bytes': 28224000, 'history_bytes': 1975680000, 'reference': 'T2400_checkpoint_opt', 'nt': 2400}
+[scaling] T2400_checkpoint_150 ...
+    {'name': 'T2400_checkpoint_150', 'repeats': 3, 'interval': 1, 'forward_s': 0.8905488699674606, 'forward_min_s': 0.8884273850126192, 'backward_s': 2.3666363080265, 'backward_min_s': 2.3548658959334716, 'total_s': 3.2571851779939607, 'total_min_s': 3.243293280946091, 'forward_peak_gib': 5.184991836547852, 'peak_allocated_gib': 5.3551554679870605, 'peak_reserved_gib': 5.599609375, 'loss': 0.17033416032791138, 'raw_e_frame_bytes': 28224000, 'history_bytes': 4261824000, 'reference': 'T2400_checkpoint_opt', 'nt': 2400}
+[scaling] T2400_tucker_r16_fromE ...
+    {'name': 'T2400_tucker_r16_fromE', 'repeats': 3, 'interval': 1, 'forward_s': 5.700663698953576, 'forward_min_s': 5.678027922986075, 'backward_s': 2.0950655820779502, 'backward_min_s': 2.0936057190410793, 'total_s': 7.795729281031527, 'total_min_s': 7.771633642027155, 'forward_peak_gib': 0.813819408416748, 'peak_allocated_gib': 0.813819408416748, 'peak_reserved_gib': 0.94140625, 'loss': 0.17033416032791138, 'raw_e_frame_bytes': 28224000, 'reference': 'T2400_checkpoint_opt', 'nt': 2400, 'theoretical_ratio': 224.08536585365854, 'actual_ratio_vs_er': 223.4337073772208, 'actual_ratio_vs_default': 223.4337073772208, 'mask_bytes': 882000, 'history_bytes': 303292752, 'raw_er_bytes': 67765824000, 'map_bytes': 465600, 'segment_buffer_bytes': 254016000, 'segments': 300, 'native_forward_s': 0.8980404854519293, 'compress_s': 4.760956846410409, 'native_backward_s': 1.535853237612173, 'decompress_s': 0.5497547598788515}
+[scaling] T2400_tucker_r16_i4 ...
+    {'name': 'T2400_tucker_r16_i4', 'repeats': 3, 'interval': 4, 'forward_s': 5.281137933023274, 'forward_min_s': 4.883547042962164, 'backward_s': 1.7680322739761323, 'backward_min_s': 1.761722975061275, 'total_s': 7.049170206999406, 'total_min_s': 6.645270018023439, 'forward_peak_gib': 0.4700760841369629, 'peak_allocated_gib': 0.4700760841369629, 'peak_reserved_gib': 0.560546875, 'loss': 0.17033416032791138, 'raw_e_frame_bytes': 28224000, 'reference': 'T2400_checkpoint_opt', 'nt': 2400, 'theoretical_ratio': 224.08536585365854, 'actual_ratio_vs_er': 221.50021189433537, 'actual_ratio_vs_default': 443.18500729858266, 'mask_bytes': 1764000, 'history_bytes': 152906400, 'raw_er_bytes': 33868800000, 'map_bytes': 931200, 'segment_buffer_bytes': 112896000, 'segments': 300, 'native_forward_s': 0.8626423020614311, 'compress_s': 4.360764935729094, 'native_backward_s': 1.26224677846767, 'decompress_s': 0.49490630137734115}
+# Tucker benchmark (full)
+
+Environment: {'torch': '2.0.1', 'gpu': 'NVIDIA GeForce RTX 4090', 'git': '1f007e0', 'date': '2026-11-05 18:07:12'}
+
+## Wavefield history (1 shot)
+
+| method | history MiB | theoretical ratio | actual vs E+R | actual vs default | peak GiB | peak vs default | fwd s | bwd s | total s | compress s | decompress s | e_g eps | cos eps | e_g sigma | cos sigma | max e_W |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| none | 1.62e+04 | - | - | 1 | 16 | 1 | 0.209 | 0.368 | 0.576 | - | - | 0 | 1 | 0 | 1 | - |
+| tucker_r12_fromE | 45.7 | 360 | 354 | 354 | 0.565 | 0.0354 | 1.48 | 0.539 | 2.02 | 1.07 | 0.136 | 2.23e-03 | 0.9999976 | 1.03e-03 | 0.9999995 | 0.0298 |
+| none_ER_stored | failed: torch.cuda.OutOfMemoryError: CUDA out of memory. Tried to allocate 15.77 GiB (GPU 0; 23.65 GiB total capacity; 15.92 GiB already allocated; 7.21 GiB free; 15.99 GiB reserved in total by PyTorch) If reserved memory is >> allocated memory try setting max_split_size_mb to avoid fragmentation.  See documentation for Memory Management and PYTORCH_CUDA_ALLOC_CONF |
+| checkpoint_60 | 1.64e+03 | - | - | 9.85 | 2.56 | 0.16 | 0.272 | 0.646 | 0.92 | - | - | 3.31e-07 | 1 | 2.43e-07 | 1 | - |
+| tucker_r16_fromE | 73 | 224 | 222 | 222 | 0.6 | 0.0376 | 1.56 | 0.531 | 2.14 | 1.37 | 0.137 | 8.65e-04 | 0.9999996 | 4.29e-04 | 0.9999999 | 0.0152 |
+| checkpoint_150 | 4.06e+03 | - | - | 3.98 | 4.5 | 0.282 | 0.228 | 0.601 | 0.839 | - | - | 2.84e-07 | 1 | 1.81e-07 | 1 | - |
+| tucker_r24_fromE | 162 | 100 | 99.9 | 99.9 | 0.709 | 0.0444 | 2.18 | 0.536 | 2.75 | 1.99 | 0.145 | 1.67e-04 | 1 | 1.03e-04 | 1 | 3.01e-03 |
+| tucker_r8 | 52.7 | 634 | 613 | 307 | 0.763 | 0.0478 | 2.12 | 0.619 | 2.77 | 1.79 | 0.227 | 0.0104 | 0.9999463 | 3.62e-03 | 0.9999935 | 0.137 |
+| tucker_r12 | 91.3 | 360 | 354 | 177 | 0.809 | 0.0507 | 2.47 | 0.625 | 3.14 | 2.08 | 0.232 | 2.34e-03 | 0.9999973 | 1.03e-03 | 0.9999995 | 0.0674 |
+| tucker_r16_tb8 | 40.8 | 825 | 791 | 396 | 0.771 | 0.0483 | 2.17 | 0.637 | 2.81 | 1.77 | 0.241 | 1.16e-03 | 0.9999993 | 5.05e-04 | 0.9999999 | 0.0348 |
+| tucker_r16 | 146 | 224 | 222 | 111 | 0.875 | 0.0548 | 2.93 | 0.628 | 3.56 | 2.61 | 0.234 | 1.02e-03 | 0.9999995 | 4.25e-04 | 0.9999999 | 0.0334 |
+| tucker_r24_tb8 | 113 | 290 | 285 | 143 | 0.877 | 0.0549 | 2.48 | 0.644 | 3.12 | 2.05 | 0.247 | 1.80e-04 | 1 | 1.32e-04 | 1 | 6.20e-03 |
+| long_none | failed: torch.cuda.OutOfMemoryError: CUDA out of memory. Tried to allocate 31.54 GiB (GPU 0; 23.65 GiB total capacity; 178.07 MiB already allocated; 22.98 GiB free; 222.00 MiB reserved in total by PyTorch) If reserved memory is >> allocated memory try setting max_split_size_mb to avoid fragmentation.  See documentation for Memory Management and PYTORCH_CUDA_ALLOC_CONF |
+| long_checkpoint_150 | 4.06e+03 | - | - | 7.95 | 4.78 | - | 0.449 | 1.19 | 1.65 | - | - | 0 | 1 | 0 | 1 | - |
+| tucker_r24 | 323 | 100 | 99.9 | 50 | 1.09 | 0.068 | 3.86 | 0.639 | 4.49 | 3.54 | 0.245 | 1.71e-04 | 1 | 1.04e-04 | 1 | 6.02e-03 |
+| tucker_r16_seg32 | 146 | 224 | 222 | 111 | 2.49 | 0.156 | 2.44 | 0.597 | 3.06 | 2 | 0.225 | 1.02e-03 | 0.9999995 | 4.25e-04 | 0.9999999 | 0.0334 |
+| long_tucker_r16 | 290 | 224 | 223 | 111 | 1.02 | - | 5.67 | 1.24 | 6.91 | 5.05 | 0.463 | 1.03e-03 | 0.9999995 | 4.45e-04 | 0.9999999 | 0.0344 |
+| checkpoint_150+tucker_r16 | 37.7 | 224 | 214 | 429 | 1.08 | 0.0678 | 0.195 | 3.35 | 3.54 | 2.66 | 0.205 | 1.02e-03 | 0.9999995 | 4.25e-04 | 0.9999999 | 0.0334 |
+| long_tucker_r16_fromE | 145 | 224 | 223 | 223 | 0.673 | - | 3.01 | 1.06 | 4.12 | 2.4 | 0.279 | 8.68e-04 | 0.9999996 | 4.48e-04 | 0.9999999 | 0.0158 |
+| long_tucker_r16_tb8 | 80 | 825 | 807 | 404 | 0.812 | - | 4.02 | 1.27 | 5.27 | 3.41 | 0.475 | 1.16e-03 | 0.9999993 | 5.23e-04 | 0.9999999 | 0.0357 |
+| long_checkpoint_150+tucker_r16 | 37.7 | 224 | 214 | 857 | 1.37 | - | 0.377 | 6.52 | 6.9 | 5.15 | 0.41 | 1.03e-03 | 0.9999995 | 4.45e-04 | 0.9999999 | 0.0344 |
+| tucker_r16_seed1 | 146 | 224 | 222 | 111 | 0.875 | 0.0548 | 3.01 | 0.627 | 3.64 | 2.7 | 0.233 | 1.01e-03 | 0.9999995 | 4.41e-04 | 0.9999999 | 0.0339 |
+| tucker_r16_fromE_seed1 | 73 | 224 | 222 | 222 | 0.6 | 0.0376 | 1.53 | 0.529 | 2.11 | 1.26 | 0.137 | 7.74e-04 | 0.9999997 | 4.48e-04 | 0.9999999 | 0.0153 |
+| tucker_r16_seed2 | 146 | 224 | 222 | 111 | 0.875 | 0.0548 | 2.98 | 0.621 | 3.65 | 2.57 | 0.231 | 8.96e-04 | 0.9999996 | 5.17e-04 | 0.9999999 | 0.0349 |
+| tucker_r16_fromE_seed2 | 73 | 224 | 222 | 222 | 0.6 | 0.0376 | 1.51 | 0.531 | 2.11 | 1.34 | 0.136 | 8.80e-04 | 0.9999996 | 5.21e-04 | 0.9999999 | 0.0155 |
+| tucker_r16_seed3 | 146 | 224 | 222 | 111 | 0.875 | 0.0548 | 2.91 | 0.628 | 3.54 | 2.5 | 0.233 | 9.34e-04 | 0.9999996 | 3.60e-04 | 0.9999999 | 0.0337 |
+| tucker_r16_fromE_seed3 | 73 | 224 | 222 | 222 | 0.6 | 0.0376 | 1.51 | 0.537 | 2.1 | 1.27 | 0.143 | 7.56e-04 | 0.9999997 | 3.64e-04 | 0.9999999 | 0.0156 |
+| tucker_r16_seed4 | 146 | 224 | 222 | 111 | 0.875 | 0.0548 | 2.76 | 0.621 | 3.44 | 2.4 | 0.232 | 7.59e-04 | 0.9999997 | 4.45e-04 | 0.9999999 | 0.0331 |
+| tucker_r16_fromE_seed4 | 73 | 224 | 222 | 222 | 0.6 | 0.0376 | 1.5 | 0.529 | 2.03 | 1.26 | 0.137 | 7.56e-04 | 0.9999997 | 4.50e-04 | 0.9999999 | 0.0154 |
+| none_interval2 | 1.61e+04 | - | - | 1 | 15.9 | 0.998 | 0.228 | 0.317 | 0.548 | - | - | 3.16e-07 | 1 | 3.50e-07 | 1 | - |
+| tucker_r16_interval2 | 73.8 | 224 | 219 | 219 | 0.535 | 0.0335 | 1.72 | 0.466 | 2.2 | 1.59 | 0.122 | 1.03e-03 | 0.9999995 | 4.25e-04 | 0.9999999 | 0.0334 |
+| none_interval4 | 8.07e+03 | - | - | 2 | 8.06 | 0.505 | 0.201 | 0.289 | 0.492 | - | - | 5.54e-06 | 1 | 1.46e-06 | 1 | - |
+| tucker_r16_interval4 | 37.7 | 224 | 214 | 429 | 0.366 | 0.0229 | 1.21 | 0.425 | 1.63 | 0.975 | 0.108 | 1.04e-03 | 0.9999995 | 4.25e-04 | 0.9999999 | 0.0334 |
+| 2d_none | 1.01e+04 | - | - | 1 | 10.2 | - | 0.127 | 0.197 | 0.324 | - | - | 0 | 1 | 0 | 1 | - |
+| 2d_checkpoint_200 | 1.01e+03 | - | - | 9.96 | 1.97 | - | 0.178 | 0.578 | 0.753 | - | - | 2.66e-07 | 1 | 2.95e-07 | 1 | - |
+| 2d_tucker_r16_fromE | 2.17e+03 | 4.63 | 4.63 | 4.63 | 2.53 | - | 31.2 | 0.582 | 31.5 | 31 | 0.0924 | 8.15e-03 | 0.9999682 | 9.89e-03 | 0.9999559 | 3.54e-03 |
+| 2d_tucker_r32_fromE | 4.54e+03 | 2.22 | 2.22 | 2.22 | 4.86 | - | 61.2 | 0.821 | 62 | 61 | 0.0971 | 1.12e-04 | 1 | 1.24e-04 | 1 | 8.45e-05 |
+| 2d_tucker_r32_tb8_fromE | 719 | 14 | 14 | 14 | 1.15 | - | 8.39 | 0.373 | 8.81 | 8.02 | 0.102 | 3.07e-04 | 1 | 3.75e-04 | 0.9999999 | 2.64e-04 |
+
+## Scaling: longer records (T), finer grids (G), larger domains (D)
+
+| run | cells (M, with CPML) | nt | default history GiB (computed) | history MiB | peak GiB | total s | e_g eps | cos eps | e_g sigma | max e_W |
+|---|---|---|---|---|---|---|---|---|---|---|
+| T600_checkpoint_opt | 2.35 | 600 | 15.8 | 969 | 2.41 | 0.983 | 0 | 1 | 0 | - |
+| T600_checkpoint_150 | 2.35 | 600 | 15.8 | 4.06e+03 | 4.5 | 0.821 | 3.16e-07 | 1 | 2.67e-07 | - |
+| G1.5_checkpoint_opt | 6.8 | 900 | 68.5 | 3.35e+03 | 7.93 | 3.89 | 0 | 1 | 0 | - |
+| T600_tucker_r16_fromE | 2.35 | 600 | 15.8 | 73 | 0.6 | 1.96 | 8.65e-04 | 0.9999996 | 4.29e-04 | 0.0152 |
+| D2_checkpoint_opt | failed: torch.cuda.OutOfMemoryError: CUDA out of memory. Tried to allocate 7.83 GiB (GPU 0; 23.65 GiB total capacity; 10.25 GiB  |
+| G2_checkpoint_opt | failed: torch.cuda.OutOfMemoryError: CUDA out of memory. Tried to allocate 8.14 GiB (GPU 0; 23.65 GiB total capacity; 10.64 GiB  |
+| T600_tucker_r16_i4 | 2.35 | 600 | 15.8 | 37.7 | 0.366 | 1.61 | 1.04e-03 | 0.9999995 | 4.25e-04 | 0.0334 |
+| T1200_checkpoint_opt | 2.35 | 1200 | 31.6 | 1.35e+03 | 3.28 | 1.83 | 0 | 1 | 0 | - |
+| G1.5_tucker_r16_fromE | 6.8 | 900 | 68.5 | 139 | 1.58 | 7.58 | 2.54e-04 | 1 | 1.10e-03 | 9.78e-03 |
+| T1200_checkpoint_150 | 2.35 | 1200 | 31.6 | 4.06e+03 | 4.78 | 1.64 | 2.03e-07 | 1 | 2.19e-07 | - |
+| T1200_tucker_r16_fromE | 2.35 | 1200 | 31.6 | 145 | 0.673 | 3.99 | 8.68e-04 | 0.9999996 | 4.48e-04 | 0.0158 |
+| G1.5_tucker_r24_fromE | 6.8 | 900 | 68.5 | 286 | 1.76 | 7.71 | 5.99e-05 | 1 | 4.63e-04 | 1.95e-03 |
+| T1200_tucker_r16_i4 | 2.35 | 1200 | 31.6 | 73.8 | 0.4 | 3.13 | 1.04e-03 | 0.9999995 | 4.45e-04 | 0.0344 |
+| D1.5_checkpoint_opt | 6.63 | 900 | 66.8 | 3.26e+03 | 7.74 | 4.02 | 0 | 1 | 0 | - |
+| T2400_checkpoint_opt | 2.35 | 2400 | 63.1 | 1.88e+03 | 4.52 | 3.48 | 0 | 1 | 0 | - |
+| D2_tucker_r16_fromE | 14.3 | 1200 | 192 | 222 | 3.2 | 18 | - | - | - | 0.0725 |
+| G2_tucker_r16_fromE | 14.9 | 1200 | 200 | 224 | 3.32 | 18 | - | - | - | 7.29e-03 |
+| T2400_checkpoint_150 | 2.35 | 2400 | 63.1 | 4.06e+03 | 5.36 | 3.26 | 2.69e-07 | 1 | 2.45e-07 | - |
+| D1.5_tucker_r16_fromE | 6.63 | 900 | 66.8 | 138 | 1.55 | 6.63 | 7.11e-04 | 0.9999997 | 5.80e-04 | 0.041 |
+| T2400_tucker_r16_fromE | 2.35 | 2400 | 63.1 | 289 | 0.814 | 7.8 | 8.68e-04 | 0.9999996 | 4.47e-04 | 0.0158 |
+| D1.5_tucker_r24_fromE | 6.63 | 900 | 66.8 | 285 | 1.73 | 7.87 | 1.59e-04 | 1 | 2.93e-04 | 0.0159 |
+| T2400_tucker_r16_i4 | 2.35 | 2400 | 63.1 | 146 | 0.47 | 7.05 | 1.04e-03 | 0.9999995 | 4.44e-04 | 0.0344 |
+
+## Model parameterization
+
+| ranks | params | ratio | HOSVD err true eps | err init eps | err sigma | reconstruct ms | rec. fwd+bwd ms | FDTD fwd s | FDTD bwd s | peak GiB |
+|---|---|---|---|---|---|---|---|---|---|---|
+| (8, 8, 8) | 3232 | 446 | 0.06 | 5.97e-03 | 0.0601 | 0.277 | 1.87 | 0.241 | 0.365 | 16 |
+| (12, 12, 12) | 5808 | 248 | 0.0483 | 1.17e-03 | 0.0483 | 2.82 | 1.91 | 0.245 | 0.365 | 16 |
+| (16, 16, 16) | 9536 | 151 | 0.0389 | 1.65e-04 | 0.0389 | 0.341 | 1.89 | 0.246 | 0.473 | 16 |
+| (24, 24, 24) | 21984 | 65.5 | 0.0277 | 1.23e-05 | 0.0277 | 0.523 | 2.42 | 0.631 | 0.368 | 16 |
+
+## FWI (L-BFGS, eps only)
+
+| method | trainable | evals | initial loss | best loss | zone eps RMSE start | zone eps RMSE end | volume eps RMSE start | volume eps RMSE end | s / eval | peak GiB |
+|---|---|---|---|---|---|---|---|---|---|---|
+| dense+none | 1440000 | 74 | 0.0692 | 1.65e-04 | 0.566 | 0.564 | 0.48 | 0.48 | 2.25 | 16.2 |
+| dense+tucker_sketch_r16 | 1440000 | 76 | 0.0692 | 2.48e-04 | 0.566 | 0.565 | 0.48 | 0.48 | 13.5 | 1.06 |
+| tucker_r8+none | 3232 | 67 | 0.0579 | 2.10e-04 | 0.566 | 0.52 | 0.48 | 0.505 | 2.24 | 16 |
+| tucker_r12+none | 5808 | 68 | 0.0705 | 2.06e-04 | 0.566 | 0.5 | 0.48 | 0.471 | 2.24 | 16 |
+| tucker_r16+none | 9536 | 65 | 0.0698 | 1.96e-04 | 0.566 | 0.496 | 0.48 | 0.461 | 2.25 | 16 |
+| tucker_r24+none | 21984 | 76 | 0.0692 | 1.45e-04 | 0.566 | 0.521 | 0.48 | 0.498 | 2.24 | 16 |
+| tucker_r16+tucker_sketch_r16 | 9536 | 73 | 0.0698 | 1.90e-04 | 0.566 | 0.513 | 0.48 | 0.475 | 13.2 | 0.895 |
