@@ -1,0 +1,6 @@
+2026-11-05 21:10:56 start
+2026-11-05 21:11:25 gpu checkpoints gpu7 exit 0
+2026-11-05 21:14:08 offload checkpoints gpu1 exit 0
+2026-11-05 21:16:19 tucker XLD gpu5 exit 0
+2026-11-05 21:16:23 tucker XLG gpu3 exit 0
+2026-11-05 21:16:35 XL DONE

@@ -22,8 +22,8 @@
  "_environment": {
   "torch": "2.0.1",
   "gpu": "NVIDIA GeForce RTX 4090",
-  "git": "0beb599",
-  "date": "2026-11-05 20:48:37"
+  "git": "75a5321",
+  "date": "2026-11-05 21:16:11"
  },
  "T600_checkpoint_150": {
   "name": "T600_checkpoint_150",
@@ -1154,5 +1154,309 @@
   "reference": "G2_offload_checkpoint",
   "nt": 1200,
   "gpu": "1"
+ },
+ "XLG_checkpoint_gpu": {
+  "name": "XLG_checkpoint_gpu",
+  "error": "torch.cuda.OutOfMemoryError: CUDA out of memory. Tried to allocate 25.50 GiB (GPU 0; 23.65 GiB total capacity; 3.19 GiB already allocated; 19.82 GiB free; 3.38 GiB reserved in total by PyTorch) If reserved memory is >> allocated memory try setting max_split_size_mb to avoid fragmentation.  See documentation for Memory Management and PYTORCH_CUDA_ALLOC_CONF",
+  "gpu": "7"
+ },
+ "XLD_checkpoint_gpu": {
+  "name": "XLD_checkpoint_gpu",
+  "error": "torch.cuda.OutOfMemoryError: CUDA out of memory. Tried to allocate 24.14 GiB (GPU 0; 23.65 GiB total capacity; 3.01 GiB already allocated; 19.99 GiB free; 3.21 GiB reserved in total by PyTorch) If reserved memory is >> allocated memory try setting max_split_size_mb to avoid fragmentation.  See documentation for Memory Management and PYTORCH_CUDA_ALLOC_CONF",
+  "gpu": "7"
+ },
+ "XLG_offload_checkpoint": {
+  "name": "XLG_offload_checkpoint",
+  "repeats": 1,
+  "interval": 1,
+  "forward_s": 79.92607929499354,
+  "forward_min_s": 79.92607929499354,
+  "backward_s": 0.00019762699957937002,
+  "backward_min_s": 0.00019762699957937002,
+  "total_s": 79.92627692199312,
+  "total_min_s": 79.92627692199312,
+  "forward_peak_gib": 15.884820938110352,
+  "peak_allocated_gib": 15.884820938110352,
+  "peak_reserved_gib": 20.416015625,
+  "loss": 0.04190212860703468,
+  "host_peak_gib": 79.45473098754883,
+  "raw_e_frame_bytes": 608509440,
+  "history_bytes": 10344660480,
+  "reference": "XLG_offload_checkpoint",
+  "nt": 1000,
+  "gpu": "1"
+ },
+ "XLD_tucker_r16_fromE": {
+  "name": "XLD_tucker_r16_fromE",
+  "repeats": 2,
+  "interval": 1,
+  "forward_s": 26.953776163049042,
+  "forward_min_s": 26.603776331990957,
+  "backward_s": 19.454925040947273,
+  "backward_min_s": 19.406106251990423,
+  "total_s": 46.408701203996316,
+  "total_min_s": 46.00988258398138,
+  "forward_peak_gib": 7.068005084991455,
+  "peak_allocated_gib": 7.068005084991455,
+  "peak_reserved_gib": 8.95703125,
+  "loss": 0.07339829206466675,
+  "host_peak_gib": 0.9223480224609375,
+  "raw_e_frame_bytes": 575910720,
+  "reference": "XLD_offload_checkpoint",
+  "nt": 1000,
+  "theoretical_ratio": 2223.524833209785,
+  "actual_ratio_vs_er": 2079.1959196119565,
+  "actual_ratio_vs_default": 2079.1959196119565,
+  "mask_bytes": 17997210,
+  "history_bytes": 277264218,
+  "raw_er_bytes": 576486630720,
+  "map_bytes": 1272252,
+  "segment_buffer_bytes": 2879553600,
+  "segments": 250,
+  "native_forward_s": 7.954528532340191,
+  "compress_s": 18.58367758546956,
+  "native_backward_s": 11.675614501000382,
+  "decompress_s": 7.7149643920129165,
+  "components": {
+   "Ex": {
+    "stored": 92421406,
+    "raw": 192162210240,
+    "compressed": true,
+    "reason": "selected"
+   },
+   "Ey": {
+    "stored": 92421406,
+    "raw": 192162210240,
+    "compressed": true,
+    "reason": "selected"
+   },
+   "Ez": {
+    "stored": 92421406,
+    "raw": 192162210240,
+    "compressed": true,
+    "reason": "selected"
+   }
+  },
+  "wavefield_rel_l2": {
+   "Ex": 0.05733349832169412,
+   "Ey": 0.05937787733689491,
+   "Ez": 0.08666317382777398
+  },
+  "wavefield_max_frame_rel": {
+   "Ex": 0.7307866314385507,
+   "Ey": 0.8187179319551474,
+   "Ez": 0.6700849776463179
+  },
+  "gpu": "5"
+ },
+ "XLG_tucker_r16_fromE": {
+  "name": "XLG_tucker_r16_fromE",
+  "repeats": 2,
+  "interval": 1,
+  "forward_s": 28.87219115893822,
+  "forward_min_s": 28.446433319943026,
+  "backward_s": 18.148131628055125,
+  "backward_min_s": 18.140245646005496,
+  "total_s": 47.01243680494372,
+  "total_min_s": 46.59456494799815,
+  "forward_peak_gib": 7.462225914001465,
+  "peak_allocated_gib": 7.462225914001465,
+  "peak_reserved_gib": 9.451171875,
+  "loss": 0.04190212860703468,
+  "host_peak_gib": 0.9517822265625,
+  "raw_e_frame_bytes": 608509440,
+  "reference": "XLG_offload_checkpoint",
+  "nt": 1000,
+  "theoretical_ratio": 2313.3722627737225,
+  "actual_ratio_vs_er": 2157.5523990312236,
+  "actual_ratio_vs_default": 2157.5523990312236,
+  "mask_bytes": 19015920,
+  "history_bytes": 282318960,
+  "raw_er_bytes": 609117949440,
+  "map_bytes": 1296696,
+  "segment_buffer_bytes": 3042547200,
+  "segments": 250,
+  "native_forward_s": 8.369331353344023,
+  "compress_s": 20.022645495366305,
+  "native_backward_s": 12.344255977193825,
+  "decompress_s": 5.788147322367877,
+  "components": {
+   "Ex": {
+    "stored": 94106320,
+    "raw": 203039316480,
+    "compressed": true,
+    "reason": "selected"
+   },
+   "Ey": {
+    "stored": 94106320,
+    "raw": 203039316480,
+    "compressed": true,
+    "reason": "selected"
+   },
+   "Ez": {
+    "stored": 94106320,
+    "raw": 203039316480,
+    "compressed": true,
+    "reason": "selected"
+   }
+  },
+  "wavefield_rel_l2": {
+   "Ex": 0.0022397841964518473,
+   "Ey": 0.0023454007023675175,
+   "Ez": 0.002489859660029276
+  },
+  "wavefield_max_frame_rel": {
+   "Ex": 0.1735247204818199,
+   "Ey": 0.14824020004267163,
+   "Ez": 0.10589280194943895
+  },
+  "gpu": "3"
+ },
+ "XLD_offload_checkpoint": {
+  "name": "XLD_offload_checkpoint",
+  "repeats": 1,
+  "interval": 1,
+  "forward_s": 75.5153833089862,
+  "forward_min_s": 75.5153833089862,
+  "backward_s": 0.00021101103629916906,
+  "backward_min_s": 0.00021101103629916906,
+  "total_s": 75.5155943200225,
+  "total_min_s": 75.5155943200225,
+  "forward_peak_gib": 15.034946918487549,
+  "peak_allocated_gib": 15.034946918487549,
+  "peak_reserved_gib": 19.328125,
+  "loss": 0.07339829206466675,
+  "host_peak_gib": 75.3718490600586,
+  "raw_e_frame_bytes": 575910720,
+  "history_bytes": 9790482240,
+  "reference": "XLD_offload_checkpoint",
+  "nt": 1000,
+  "gpu": "1"
+ },
+ "XLD_tucker_r24_fromE": {
+  "name": "XLD_tucker_r24_fromE",
+  "repeats": 2,
+  "interval": 1,
+  "forward_s": 28.782375411014073,
+  "forward_min_s": 28.369568938040175,
+  "backward_s": 19.66447268903721,
+  "backward_min_s": 19.51210790697951,
+  "total_s": 48.446848100051284,
+  "total_min_s": 47.88167684501968,
+  "forward_peak_gib": 7.310750961303711,
+  "peak_allocated_gib": 7.310750961303711,
+  "peak_reserved_gib": 9.13671875,
+  "loss": 0.07339829206466675,
+  "host_peak_gib": 0.9233016967773438,
+  "raw_e_frame_bytes": 575910720,
+  "reference": "XLD_offload_checkpoint",
+  "nt": 1000,
+  "theoretical_ratio": 1198.1366087477531,
+  "actual_ratio_vs_er": 1154.936926780642,
+  "actual_ratio_vs_default": 1154.936926780642,
+  "mask_bytes": 17997210,
+  "history_bytes": 499149882,
+  "raw_er_bytes": 576486630720,
+  "map_bytes": 1691964,
+  "segment_buffer_bytes": 2879553600,
+  "segments": 250,
+  "native_forward_s": 7.950785318389535,
+  "compress_s": 20.355520926066674,
+  "native_backward_s": 11.681514689698815,
+  "decompress_s": 7.812597381067462,
+  "components": {
+   "Ex": {
+    "stored": 166383294,
+    "raw": 192162210240,
+    "compressed": true,
+    "reason": "selected"
+   },
+   "Ey": {
+    "stored": 166383294,
+    "raw": 192162210240,
+    "compressed": true,
+    "reason": "selected"
+   },
+   "Ez": {
+    "stored": 166383294,
+    "raw": 192162210240,
+    "compressed": true,
+    "reason": "selected"
+   }
+  },
+  "wavefield_rel_l2": {
+   "Ex": 0.03781267252527692,
+   "Ey": 0.03924283937831572,
+   "Ez": 0.05671559978618848
+  },
+  "wavefield_max_frame_rel": {
+   "Ex": 0.529081817327676,
+   "Ey": 0.562540434193786,
+   "Ez": 0.45900762293472885
+  },
+  "gpu": "5"
+ },
+ "XLG_tucker_r24_fromE": {
+  "name": "XLG_tucker_r24_fromE",
+  "repeats": 2,
+  "interval": 1,
+  "forward_s": 30.29932769399602,
+  "forward_min_s": 30.023712357971817,
+  "backward_s": 18.258356102043763,
+  "backward_min_s": 18.238880935008638,
+  "total_s": 48.53820862900466,
+  "total_min_s": 48.28206846001558,
+  "forward_peak_gib": 7.709511756896973,
+  "peak_allocated_gib": 7.709511756896973,
+  "peak_reserved_gib": 9.640625,
+  "loss": 0.04190212860703468,
+  "host_peak_gib": 0.9504470825195312,
+  "raw_e_frame_bytes": 608509440,
+  "reference": "XLG_offload_checkpoint",
+  "nt": 1000,
+  "theoretical_ratio": 1250.224852071006,
+  "actual_ratio_vs_er": 1203.2609790822473,
+  "actual_ratio_vs_default": 1203.2609790822473,
+  "mask_bytes": 19015920,
+  "history_bytes": 506222640,
+  "raw_er_bytes": 609117949440,
+  "map_bytes": 1724472,
+  "segment_buffer_bytes": 3042547200,
+  "segments": 250,
+  "native_forward_s": 8.3801831897581,
+  "compress_s": 21.85313273826614,
+  "native_backward_s": 12.336831106455065,
+  "decompress_s": 5.882807886693627,
+  "components": {
+   "Ex": {
+    "stored": 168740880,
+    "raw": 203039316480,
+    "compressed": true,
+    "reason": "selected"
+   },
+   "Ey": {
+    "stored": 168740880,
+    "raw": 203039316480,
+    "compressed": true,
+    "reason": "selected"
+   },
+   "Ez": {
+    "stored": 168740880,
+    "raw": 203039316480,
+    "compressed": true,
+    "reason": "selected"
+   }
+  },
+  "wavefield_rel_l2": {
+   "Ex": 0.0007348705835818072,
+   "Ey": 0.0007594089288322638,
+   "Ez": 0.000688399544006564
+  },
+  "wavefield_max_frame_rel": {
+   "Ex": 0.06472265554591515,
+   "Ey": 0.058077188901726404,
+   "Ez": 0.030519749023390608
+  },
+  "gpu": "3"
  }
 }

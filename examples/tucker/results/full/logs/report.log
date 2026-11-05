@@ -75,6 +75,14 @@ Environment: {'torch': '2.0.1', 'gpu': 'NVIDIA GeForce RTX 4090', 'git': '1f007e
 | G2_tucker_r24_fromE | 14.9 | 1200 | 200 | 439 | 3.57 | 18.5 | 3.97e-05 | 1 | 1.35e-03 | 1.66e-03 |
 | D2_offload_checkpoint | 14.3 | 1200 | 192 | 6.71e+03 | 8.38 | 16.9 | 0 | 1 | 0 | - |
 | G2_offload_checkpoint | 14.9 | 1200 | 200 | 6.98e+03 | 8.71 | 17.4 | 0 | 1 | 0 | - |
+| XLG_checkpoint_gpu | failed: torch.cuda.OutOfMemoryError: CUDA out of memory. Tried to allocate 25.50 GiB (GPU 0; 23.65 GiB total capacity; 3.19 GiB  |
+| XLD_checkpoint_gpu | failed: torch.cuda.OutOfMemoryError: CUDA out of memory. Tried to allocate 24.14 GiB (GPU 0; 23.65 GiB total capacity; 3.01 GiB  |
+| XLG_offload_checkpoint | 50.7 | 1000 | 567 | 9.87e+03 | 15.9 | 79.9 | 0 | 1 | 0 | - |
+| XLD_tucker_r16_fromE | 48 | 1000 | 537 | 264 | 7.07 | 46.4 | 1.73e-04 | 1 | 1.23e-03 | 0.0867 |
+| XLG_tucker_r16_fromE | 50.7 | 1000 | 567 | 269 | 7.46 | 47 | 6.51e-05 | 1 | 4.21e-03 | 2.49e-03 |
+| XLD_offload_checkpoint | 48 | 1000 | 537 | 9.34e+03 | 15 | 75.5 | 0 | 1 | 0 | - |
+| XLD_tucker_r24_fromE | 48 | 1000 | 537 | 476 | 7.31 | 48.4 | 5.55e-05 | 1 | 9.01e-04 | 0.0567 |
+| XLG_tucker_r24_fromE | 50.7 | 1000 | 567 | 483 | 7.71 | 48.5 | 1.74e-05 | 1 | 1.02e-03 | 7.59e-04 |
 
 ## Model parameterization
 

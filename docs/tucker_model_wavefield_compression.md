@@ -635,6 +635,40 @@ rank 16), consistent with its cancellation-limited floor (Section 7). At
 Tucker run needs 3.3 GiB, and its time equals that of the host-offloaded
 exact reference (18 s vs 17 s).
 
+### 9.6 About 50 M cells, nt = 1000
+
+The 3D model scaled by 3.1: **XLG** = same physical model on a 3.1x finer
+grid (`392 x 392 x 330` = 50.7 M cells with CPML, dx 0.65 cm, dt 9.7 ps), and
+**XLD** = 3.1x larger domain at dx 2 cm (`392 x 371 x 330` = 48.0 M cells,
+dt 30 ps). One shot, mode 3, Tucker with `rhs="from_e"` and 4-step segments;
+exact reference = checkpointing with 16-step segments and the boundary
+states in host memory (`offloaded_checkpoint_gradients` in the benchmark).
+Times are medians of two runs for Tucker (one run for the reference).
+
+| Run | Method | GPU peak (reserved) | Host RAM peak | Time | History kept | e_g eps / cos | e_g sigma / cos |
+|---|---|---|---|---|---|---|---|
+| XLG | default history | needs 567 GiB | - | - | - | - | - |
+| XLG | single-level checkpoint (45-step segments) | OOM: one segment's history alone is 25.5 GiB | - | - | - | - | - |
+| XLG | checkpoint, states in host memory | 15.9 (20.4) GiB | 79.5 GiB | 79.9 s | 9.6 GiB / segment | exact | exact |
+| XLG | Tucker r16 | 7.5 (9.5) GiB | 1.0 GiB | 47.0 s | 0.26 GiB | 6.5e-5 / 1.0000000 | 4.2e-3 / 0.999995 |
+| XLG | Tucker r24 | 7.7 (9.6) GiB | 1.0 GiB | 48.5 s | 0.47 GiB | 1.7e-5 / 1.0000000 | 1.0e-3 / 0.9999997 |
+| XLD | default history | needs 537 GiB | - | - | - | - | - |
+| XLD | single-level checkpoint | OOM (24.1 GiB for one segment) | - | - | - | - | - |
+| XLD | checkpoint, states in host memory | 15.0 (19.3) GiB | 75.4 GiB | 75.5 s | 9.1 GiB / segment | exact | exact |
+| XLD | Tucker r16 | 7.1 (9.0) GiB | 0.9 GiB | 46.4 s | 0.26 GiB | 1.7e-4 / 1.0000000 | 1.2e-3 / 0.9999996 |
+| XLD | Tucker r24 | 7.3 (9.1) GiB | 0.9 GiB | 48.4 s | 0.46 GiB | 5.6e-5 / 1.0000000 | 9.0e-4 / 0.9999998 |
+
+At this size the sketch is faster than the only exact method that fits
+(47 s vs 80 s), needs half the GPU memory and 1/80 of the host memory; the
+compressed history (0.26 GiB) is 2000x smaller than the default one. Its GPU
+peak is the solver state and coefficients (~2.4 GB), the 4-step
+full-resolution buffer (~3 GB) and transient sketch tensors. The time splits
+into native forward/backward ~20 s, sketching 19-22 s and decompression
+6-8 s. The eps error keeps falling with grid refinement (6.5e-5 at r16); the
+sigma error at r16 is 1.2-4.2e-3 and needs r24 for ~1e-3. A multi-level
+(revolve-type) checkpointing scheme would lower the reference's memory at the
+cost of more recomputation; it is not implemented in DeepGPR.
+
 ## 10. Limitations and open items
 
 * **Speed.** The sketch costs 3-5x the native forward + backward in 3D and
@@ -648,7 +682,8 @@ exact reference (18 s vs 17 s).
   (2.4 GiB for the 3D example) is available. The sketch is for memory-bound
   cases: 4-6x below the best checkpoint setting, growing far more slowly with
   `nt` and with grid refinement; at ~15 M cells it is the only tested option
-  that fits on 24 GB (Section 9.5).
+  that fits on 24 GB without host memory, and at ~50 M cells it is 1.7x faster than
+  checkpointing with host-held states (Sections 9.5, 9.6).
   Combined with the existing temporal subsampling (nearly exact up to the
   recommended interval), it gives the smallest footprint measured (0.37 GiB).
 * **2D.** Little gain from per-frame Tucker; use checkpointing or time blocks.
