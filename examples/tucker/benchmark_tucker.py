@@ -460,12 +460,20 @@ def fwi_worker(spec: Dict[str, Any], quick: bool) -> Dict[str, Any]:
     sketch = sketch_config(spec)
     parameters = [p for p in model.parameters() if p.requires_grad]
     optimizer = torch.optim.LBFGS(
-        parameters, lr=1.0, max_iter=spec.get("max_iter", 20), max_eval=spec.get("max_eval", 25),
+        parameters, lr=1.0, max_iter=spec.get("max_iter", 60), max_eval=spec.get("max_eval", 75),
         history_size=10, line_search_fn="strong_wolfe",
     )
     history: List[Dict[str, float]] = []
     start = time.perf_counter()
     scale = sum(float(d.square().sum()) for d in observed)
+    # Illuminated zone: below the air, above the depth the record can image
+    # (18 ns two-way at ~0.13 m/ns is ~1.2 m; 40 cells = 0.8 m), inside the
+    # receiver footprint. Whole-volume errors are dominated by the unseen deep part.
+    depth_cells = 40 if not quick else 12
+    zone = (slice(4, -4), slice(air, air + depth_cells), slice(4, -4))
+
+    def zone_rmse(eps: torch.Tensor) -> float:
+        return float((eps[zone] - case["eps"][zone]).square().mean().sqrt())
 
     def closure():
         optimizer.zero_grad()
@@ -481,16 +489,27 @@ def fwi_worker(spec: Dict[str, Any], quick: bool) -> Dict[str, Any]:
         with torch.no_grad():
             eps = model.epsilon()
             rmse = float((eps[:, air:] - case["eps"][:, air:]).square().mean().sqrt())
-        history.append(dict(loss=total, eps_rmse=rmse, seconds=time.perf_counter() - start, eval_s=time.perf_counter() - t0))
+        history.append(
+            dict(
+                loss=total, eps_rmse=rmse, eps_rmse_zone=zone_rmse(eps),
+                seconds=time.perf_counter() - start, eval_s=time.perf_counter() - t0,
+            )
+        )
         return torch.tensor(total, device=device)
 
     base = fresh_peak()
     optimizer.step(closure)
     initial_rmse = float((case["eps_init"][:, air:] - case["eps"][:, air:]).square().mean().sqrt())
+    with torch.no_grad():
+        final_eps = model.epsilon().detach()
+    safe = spec["name"].replace("+", "_plus_")
+    atomic_save(final_eps.cpu(), RESULTS / scale_name(quick) / "cache" / f"fwi_eps_{safe}.pt")
     return dict(
         name=spec["name"], evaluations=len(history), history=history,
         initial_loss=history[0]["loss"], final_loss=min(h["loss"] for h in history),
         initial_eps_rmse=initial_rmse, final_eps_rmse=history[-1]["eps_rmse"],
+        initial_eps_rmse_zone=zone_rmse(case["eps_init"]), final_eps_rmse_zone=zone_rmse(final_eps),
+        zone_depth_cells=depth_cells,
         mean_eval_s=sum(h["eval_s"] for h in history) / len(history),
         peak_allocated_gib=(torch.cuda.max_memory_allocated() - base) / GIB,
         trainable_parameters=sum(p.numel() for p in parameters),
@@ -635,8 +654,11 @@ def report(quick: bool) -> None:
     if fwi_path.exists():
         fwi = json.loads(fwi_path.read_text())
         lines += ["## FWI (L-BFGS, eps only)", ""]
-        lines.append("| method | trainable | evals | initial loss | best loss | eps RMSE start | eps RMSE end | s / eval | peak GiB |")
-        lines.append("|---|---|---|---|---|---|---|---|---|")
+        lines.append(
+            "| method | trainable | evals | initial loss | best loss | zone eps RMSE start | zone eps RMSE end "
+            "| volume eps RMSE start | volume eps RMSE end | s / eval | peak GiB |"
+        )
+        lines.append("|---|---|---|---|---|---|---|---|---|---|---|")
         for name, r in fwi.items():
             if name.startswith("_"):
                 continue
@@ -645,6 +667,7 @@ def report(quick: bool) -> None:
                 continue
             lines.append(
                 f"| {name} | {r['trainable_parameters']} | {r['evaluations']} | {_fmt(r['initial_loss'])} | {_fmt(r['final_loss'])} | "
+                f"{_fmt(r.get('initial_eps_rmse_zone'))} | {_fmt(r.get('final_eps_rmse_zone'))} | "
                 f"{_fmt(r['initial_eps_rmse'])} | {_fmt(r['final_eps_rmse'])} | {_fmt(r['mean_eval_s'])} | {_fmt(r['peak_allocated_gib'])} |"
             )
     (out_dir / "report.md").write_text("\n".join(lines) + "\n")
