@@ -42,6 +42,30 @@ CUDA = torch.cuda.is_available()
 DEVICE = torch.device("cuda" if CUDA else "cpu")
 
 
+def setUpModule():
+    # Test discovery imports every test module first and each one re-imports
+    # DeepGPR. Bind this module's names to the instance that is current when
+    # its tests run (the one tucker_cases calls), so the isinstance checks in
+    # DeepGPR.compute see the same TuckerSketchConfig class.
+    current = sys.modules["DeepGPR"]
+    globals().update(
+        DeepGPR=current,
+        WavefieldSketchStats=current.solver.sketched.WavefieldSketchStats,
+        **{
+            name: getattr(current.tucker, name)
+            for name in (
+                "TuckerMaterialModel",
+                "TuckerModelConfig",
+                "TuckerSketchConfig",
+                "cosine_similarity",
+                "relative_error",
+                "tucker_project",
+                "tucker_reconstruct",
+            )
+        },
+    )
+
+
 def _bitwise_equal(a, b):
     return a.shape == b.shape and bool(torch.equal(a, b))
 

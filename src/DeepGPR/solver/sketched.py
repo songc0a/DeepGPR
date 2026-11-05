@@ -274,7 +274,7 @@ class DeepGPRSketched(torch.autograd.Function):
             history_shape = saved_history_shape(
                 config.mode, frames, config.nstep, *config.history_cells
             )
-            e_view = _prefix_view(e_buffer, history_shape) if history else e_buffer
+            e_view = _prefix_view(e_buffer, history_shape) if history is not None else e_buffer
             if history is None:
                 r_view = r_buffer
             elif rhs_from_e:
