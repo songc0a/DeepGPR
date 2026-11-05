@@ -329,6 +329,34 @@ kernels, so its results are unchanged.
 - CUDA kernels index at most `2^31 - 1` field cells per shot (cells of all
   shots together may exceed that); larger grids raise `NativeLibraryError`.
 
+### 4.8 Tucker-sketched history (`wavefield_sketch`, optional)
+
+| Parameter | Data Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| **`wavefield_sketch`** | `TuckerSketchConfig` / `None` | `None` | Compress the history read by the material-gradient adjoint (`E^n`, `R^n` of the gradient components) online with a streaming randomized Tucker sketch. The native solver runs `segment_steps` steps per call; the E/H/CPML state is never approximated, so receiver data, source and initial-state gradients stay exact while `eps_r`/`sigma` gradients become approximations. `None` or `enabled=False` keeps the original path bit for bit. `E_saved` is returned empty. |
+| **`wavefield_sketch_stats`** | `WavefieldSketchStats` / `None` | `None` | Filled with measured history sizes, segment-buffer bytes, phase timings and (with `measure_error=True`) reconstruction errors. |
+
+Requires float32, uncompressed (`wavefield_compression="none"`), device-resident
+storage; `use_async_offload`, `save_forward_wavefield_path` and
+`wavefield_rhs_history="reconstructed"` are rejected with `ValueError`. Works with
+both native backends, gradient modes 2 and 3, sampling intervals > 1 (segments are
+multiples of the interval), the 2D TM fast path, both history regions and
+user-level checkpointing (pass it to each checkpointed `compute` call).
+
+```python
+from DeepGPR.tucker import TuckerSketchConfig
+from DeepGPR.solver.sketched import WavefieldSketchStats
+
+stats = WavefieldSketchStats()
+out = DeepGPR.compute(..., mode=3,
+                      wavefield_sketch=TuckerSketchConfig(ranks=16, oversampling=8, seed=0),
+                      wavefield_sketch_stats=stats)
+```
+
+Algorithm, accuracy, memory and the Tucker model parameterization
+(`DeepGPR.tucker.TuckerMaterialModel`, `tucker_reconstruct`) are documented in
+[`tucker_model_wavefield_compression.md`](tucker_model_wavefield_compression.md).
+
 ### 5. Field Variable States (Checkpoints / Initial Fields)
 
 For starting a forward simulation from scratch ($t=0$), these three parameters should be passed as `None` (the system will automatically initialize zero-tensors).

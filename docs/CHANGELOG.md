@@ -4,6 +4,27 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased] — Tucker model parameterization and Tucker-sketched adjoint history (branch `feat/tucker-model-wavefield-sketch`)
+
+### Added
+
+- `DeepGPR.tucker.model` (Module A): `tucker_reconstruct` (pure, differentiable; works
+  with core/factors produced by external code), `TuckerTensor` (trainable core and
+  factors, `"rms"` gauge-fixing factor normalization by default, `orthogonalize_`,
+  `gauge_penalty`, export/load), `MaterialMapping` (sigmoid/softplus/exp bounds),
+  `TuckerModelConfig`, `TuckerMaterialModel` (independent eps/sigma fields, Tucker or
+  dense), `hosvd`, `randomized_hosvd`, `tucker_parameter_count`.
+- `DeepGPR.tucker.sketch` / `wavefield` (Module B): one-pass streaming randomized Tucker
+  sketch (Sun, Guo, Luo, Tropp, Udell 2020) with Khatri-Rao factor maps, optional
+  streamed time blocks, support masks that restore exact zeros, raw fallback.
+- `DeepGPR.compute(..., wavefield_sketch=TuckerSketchConfig(...), wavefield_sketch_stats=...)`
+  and `DeepGPR.solver.sketched.DeepGPRSketched`: the native solver runs in segments and
+  the E/R history read by the material-gradient adjoint is kept only in compressed form.
+  Off by default; the original path is unchanged.
+- Tests `tests/test_tucker_{model,sketch,fdtd_integration}.py`, cases `tests/tucker_cases.py`,
+  examples `examples/tucker/{external_factors,four_modes,benchmark_tucker}.py`,
+  documentation `docs/tucker_model_wavefield_compression.md`.
+
 ## [Unreleased] — Huygens subgridding for 3D FDTD (experimental, branch `feature/hybrid-dgtd-topography`)
 
 ### Added

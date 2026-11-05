@@ -14,6 +14,7 @@ DeepGPR provides a wave propagation module for PyTorch, designed for application
 - Large models: checkpointing, DDP, temporal sub-sampling (fixed or `"auto"` from the source spectrum), E-only float32 histories (default; half the memory of E+R), FP16/BF16 or GPU-native INT8 wavefield histories and asynchronous offload to host memory. Material gradients with PML require `wavefield_history_region="extended"`; physical-only histories remain available for diagnostics, source/initial-state gradients and models without PML. See [`docs/API.md`](docs/API.md) §4.3-4.6.
 
 - Experimental (2D and 3D): `DeepGPR.hybrid.HybridTM2D` / `HybridMaxwell3D` couple a body-fitted DGTD band (triangles / tetrahedra, fused CUDA kernels with hand-written adjoints in 2D and 3D) that carries the ground surface (topography) to the Yee grid, with a discrete adjoint for FWI; see [`docs/HYBRID_DGTD.md`](docs/HYBRID_DGTD.md).
+- Optional Tucker tools (`DeepGPR.tucker`): a differentiable Tucker parameterization of `eps_r`/`sigma` (`TuckerMaterialModel`, `tucker_reconstruct`, also for factors produced by external networks) and a streaming randomized Tucker sketch of the adjoint wavefield history (`compute(..., wavefield_sketch=TuckerSketchConfig(...))`); both off by default and independent; see [`docs/tucker_model_wavefield_compression.md`](docs/tucker_model_wavefield_compression.md).
 - Experimental (3D): `DeepGPR.subgrid` adds Huygens subgridding to the 3D Yee grid (refined boxes with their own time step, fused CUDA coupling kernels), an a priori refinement planner, the exact discrete adjoint, an adjoint-weighted error indicator for dynamic refinement in FWI, and subgrids below the DGTD surface band; see [`docs/SUBGRID.md`](docs/SUBGRID.md).
 
 ## System requirements
@@ -130,6 +131,7 @@ The figures show the true model, the initial model and the inverted result.
 | `DeepGPR.estimate_compute_memory(...)` | memory estimate (also printed by `print_parameters=True`) |
 | `DeepGPR.recommended_sampling_interval(...)`, `DeepGPR.source_max_frequency(...)` | gradient sampling interval bound `floor(1 / (4 f_max dt))` from a source waveform (what `model_gradient_sampling_interval="auto"` uses) |
 | `DeepGPR.decompress_wavefield_history(...)` | decode a packed INT8 history for diagnostics |
+| `DeepGPR.tucker_reconstruct`, `DeepGPR.TuckerMaterialModel`, `DeepGPR.TuckerSketchConfig` | Tucker model parameterization and Tucker-sketched adjoint history ([`docs/tucker_model_wavefield_compression.md`](docs/tucker_model_wavefield_compression.md)) |
 | `DeepGPR.visualization.plot_*` | models, radargrams, traces, true/initial/inverted comparison |
 | `DeepGPR.configure_logging(level)` | enable DeepGPR log output |
 
@@ -160,6 +162,7 @@ src/DeepGPR/
 ├── solver/                CPML, field state, history storage, autograd bridge, compute()
 ├── postprocessing/        FIR filter, envelope, forward-wavefield files
 ├── inversion/             TV regularisation
+├── tucker/                Tucker model parameterization, streaming Tucker sketch of the history
 ├── visualization/         matplotlib helpers
 ├── utils/                 logging, exceptions, validators, diagnostics
 ├── lib/                   deepgpr.cu, deepgpr_cpu.c, deepgpr.h and prebuilt binaries

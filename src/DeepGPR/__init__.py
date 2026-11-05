@@ -22,6 +22,8 @@ Package layout
 ``solver``          CPML, field state, history storage, autograd, ``compute``
 ``postprocessing``  receiver-data filters, envelopes, output files
 ``inversion``       FWI building blocks (TV regularisation)
+``tucker``          optional Tucker model parameterization and streaming
+                    Tucker sketch of the adjoint wavefield history
 ``visualization``   matplotlib helpers
 ``utils``           logging, validation, exceptions
 
@@ -42,6 +44,7 @@ from .native.loader import (
 from .utils.logger import configure_logging, get_logger
 
 from . import native, preprocessing, solver, postprocessing, inversion, visualization
+from . import tucker
 from . import common, compute2, multiscale, wavelet
 from .common import (
     CFS,
@@ -68,7 +71,15 @@ from .solver.autograd import DeepGPR
 from .solver.modeling import compute
 from .solver.memory import estimate_compute_memory
 from .solver.sampling import recommended_sampling_interval, source_max_frequency
+from .solver.sketched import WavefieldSketchStats
 from .solver.storage import decompress_wavefield_history
+from .tucker import (
+    TuckerMaterialModel,
+    TuckerModelConfig,
+    TuckerSketchConfig,
+    TuckerTensor,
+    tucker_reconstruct,
+)
 from .utils.exceptions import (
     CFLConditionError,
     DeepGPRError,
@@ -88,6 +99,11 @@ __all__ = [
     "NativeLibraryNotFoundError",
     "NonFiniteTensorError",
     "TVRegularization",
+    "TuckerMaterialModel",
+    "TuckerModelConfig",
+    "TuckerSketchConfig",
+    "TuckerTensor",
+    "WavefieldSketchStats",
     "__version__",
     "apply_filter",
     "build_pml_coeffs",
@@ -131,6 +147,8 @@ __all__ = [
     "sine_burst",
     "solver",
     "source_max_frequency",
+    "tucker",
+    "tucker_reconstruct",
     "utils",
     "visualization",
     "wavelet",

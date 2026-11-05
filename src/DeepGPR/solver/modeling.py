@@ -33,12 +33,14 @@ from ..postprocessing.io import normalize_forward_wavefield_directory, save_forw
 from ..preprocessing.grid import normalize_grid_spacing
 from ..preprocessing.model_setup import PreparedModel, _shift_locations, initialization
 from ..native.loader import get_deepgpr_lib, library_supports
+from ..tucker.sketch import TuckerSketchConfig
 from ..utils.logger import get_logger
 from ..utils.validators import require_bool, require_positive_finite
 from .autograd import TM2D_INACTIVE_STATE_INDICES, DeepGPR, SolverConfig, SolverTensors
 from .fields import create_or_separate
 from .memory import format_compute_preview
 from .pml import build_pml_coeffs, build_pml_phi
+from .sketched import DeepGPRSketched, WavefieldSketchStats
 from .sampling import AUTO_SAMPLING_INTERVAL, recommended_sampling_interval, source_max_frequency
 from .storage import (
     WavefieldStorageConfig,
@@ -258,6 +260,59 @@ def _tm2d_fast_path_applies(
     return int(nonzero) == 0
 
 
+def _resolve_wavefield_sketch(
+    sketch: Any,
+    stats: Any,
+    *,
+    storage_dtype: torch.dtype,
+    compression: str,
+    use_async_offload: bool,
+    has_output_directory: bool,
+    rhs_history: str,
+) -> Optional[TuckerSketchConfig]:
+    """Validate ``wavefield_sketch`` and return it when it is enabled.
+
+    The sketched history is built from float32 E/R frames written by the
+    native solver segment by segment. Options that change that layout are
+    rejected explicitly instead of being silently ignored.
+    """
+    if sketch is None:
+        if stats is not None:
+            raise ValueError("wavefield_sketch_stats requires an enabled wavefield_sketch.")
+        return None
+    if not isinstance(sketch, TuckerSketchConfig):
+        raise TypeError("wavefield_sketch must be a DeepGPR.tucker.TuckerSketchConfig or None.")
+    if stats is not None and not isinstance(stats, WavefieldSketchStats):
+        raise TypeError("wavefield_sketch_stats must be a WavefieldSketchStats or None.")
+    if not sketch.enabled:
+        if stats is not None:
+            raise ValueError("wavefield_sketch_stats requires an enabled wavefield_sketch.")
+        return None
+    if compression != "none":
+        raise ValueError(
+            "wavefield_sketch replaces the history storage; it cannot be combined with "
+            f"wavefield_compression={compression!r}."
+        )
+    if storage_dtype != torch.float32:
+        raise ValueError(
+            "wavefield_sketch compresses float32 frames; keep wavefield_storage_dtype=float32."
+        )
+    if use_async_offload:
+        raise ValueError("wavefield_sketch is incompatible with use_async_offload=True.")
+    if has_output_directory:
+        raise ValueError(
+            "save_forward_wavefield_path is unavailable with wavefield_sketch (the "
+            "full-resolution history is never formed)."
+        )
+    if rhs_history == "reconstructed":
+        raise ValueError(
+            "wavefield_sketch keeps R^n explicitly: rebuilding R^n = (E^(n+1) - ca E^n) / cb "
+            "from lossy E frames amplifies the compression error. Use "
+            "wavefield_rhs_history='auto' or 'stored'."
+        )
+    return sketch
+
+
 def compute(
     device,
     dx=None,
@@ -296,6 +351,8 @@ def compute(
     wavefield_rhs_history=DEFAULT_WAVEFIELD_RHS_HISTORY,
     wavefield_history_region=DEFAULT_WAVEFIELD_HISTORY_REGION,
     pml_max_velocity=SPEED_OF_LIGHT,
+    wavefield_sketch=None,
+    wavefield_sketch_stats=None,
 ):
     """Run 2D/3D FDTD forward modelling of Maxwell's equations with autograd.
 
@@ -373,6 +430,17 @@ def compute(
             physical model cells (``E_saved`` then has the physical spatial
             shape). ``"physical"`` is incompatible with material gradients
             when PML is present, since it omits the required PML history.
+        wavefield_sketch: Optional :class:`DeepGPR.tucker.TuckerSketchConfig`.
+            When enabled, the native solver runs in segments and the E/R
+            history read by the material-gradient adjoint is compressed online
+            by a streaming randomized Tucker sketch; ``E_saved`` is returned
+            empty. ``None`` (default) or ``enabled=False`` keeps the original
+            path bit for bit. Requires float32, uncompressed, device-resident
+            storage. Material gradients become approximations whose error
+            depends on the ranks (see ``docs/tucker_model_wavefield_compression.md``).
+        wavefield_sketch_stats: Optional
+            :class:`DeepGPR.solver.sketched.WavefieldSketchStats` filled with
+            measured sizes, timings and (with ``measure_error``) errors.
 
     Returns:
         ``(E_saved, (Ex, Ey, Ez), (Hx, Hy, Hz), PML, receiver_amplitudes)``
@@ -429,6 +497,16 @@ def compute(
     )
     wavefield_rhs_history = normalize_wavefield_rhs_history(wavefield_rhs_history)
     wavefield_history_region = normalize_wavefield_history_region(wavefield_history_region)
+    wavefield_sketch = _resolve_wavefield_sketch(
+        wavefield_sketch,
+        wavefield_sketch_stats,
+        storage_dtype=wavefield_storage_dtype,
+        compression=wavefield_compression,
+        use_async_offload=bool(use_async_offload),
+        has_output_directory=output_directory is not None,
+        rhs_history=wavefield_rhs_history,
+    )
+    sketch_history = wavefield_sketch is not None and save_wavefield_history
     if source_direction not in FIELD_COMPONENTS or receiver_component not in FIELD_COMPONENTS:
         raise ValueError("source_direction and receiver_component must be 0, 1, or 2.")
     if getattr(mu_r, "requires_grad", False):
@@ -495,7 +573,8 @@ def compute(
             or (wavefield_rhs_history == "auto" and lossless_storage)
         )
     )
-    reconstruct_rhs = resolve_rhs_reconstruction(
+    # The sketched history always keeps R^n (see _resolve_wavefield_sketch).
+    reconstruct_rhs = not sketch_history and resolve_rhs_reconstruction(
         wavefield_rhs_history,
         sampling_interval=model_gradient_sampling_interval,
         stores_model_history=stores_model_history,
@@ -632,9 +711,23 @@ def compute(
         wavefield_compression,
     )
 
-    outputs = DeepGPR.apply(
-        config, tensors, eps_r, sigma, source_amplitudes, *electric, *magnetic, *phi
-    )
+    if sketch_history:
+        outputs = DeepGPRSketched.apply(
+            config,
+            tensors,
+            wavefield_sketch,
+            wavefield_sketch_stats,
+            eps_r,
+            sigma,
+            source_amplitudes,
+            *electric,
+            *magnetic,
+            *phi,
+        )
+    else:
+        outputs = DeepGPR.apply(
+            config, tensors, eps_r, sigma, source_amplitudes, *electric, *magnetic, *phi
+        )
     states, e_saved, receiver_amplitudes = outputs[:30], outputs[30], outputs[31]
 
     if output_directory is not None:

@@ -15,6 +15,7 @@ from .pml import (
     pml_phi_element_count,
 )
 from .sampling import recommended_sampling_interval, source_max_frequency
+from .sketched import DeepGPRSketched, WavefieldSketchStats
 from .storage import (
     WavefieldStorageConfig,
     decompress_wavefield_history,
@@ -25,8 +26,10 @@ __all__ = [
     "CFS",
     "CFSParameter",
     "DeepGPR",
+    "DeepGPRSketched",
     "SolverConfig",
     "SolverTensors",
+    "WavefieldSketchStats",
     "WavefieldStorageConfig",
     "build_pml_coeffs",
     "build_pml_phi",

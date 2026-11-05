@@ -77,6 +77,19 @@ GPU), and the 3D discrete adjoint (dot product, finite differences, native
 pure-Yee gradient, hand-written against autograd sweep). See
 `docs/HYBRID_DGTD.md`.
 
+`test_tucker_model.py` (Test A), `test_tucker_sketch.py` (Test B) and
+`test_tucker_fdtd_integration.py` (Test C) cover `DeepGPR.tucker`: Tucker
+reconstruction against an independent einsum (2D/3D, many rank shapes, axis-order
+detection, dtypes, CPU/GPU, gradcheck), decompositions, parameter counts, the scale
+gauge, dual eps/sigma fields and gradients of external factor tensors; exact recovery of
+low-rank tensors by the one-pass sketch (unfolding/axis-order/core errors are caught),
+streaming equals one-shot sketching, byte accounting without raw-frame retention, the
+support mask, fallbacks; and, on reduced versions of the 2D and 3D FWI examples
+(`tucker_cases.py`), the unchanged default path, bitwise-lossless segmentation, gradient
+accuracy for eps and sigma, Tucker gradients through the exact and sketched adjoint, the
+four on/off modes, checkpoint + sketch, exact source/state gradients, rejected
+combinations and measured peak memory. See `docs/tucker_model_wavefield_compression.md`.
+
 `test_subgrid_3d.py`, `test_subgrid_adapt.py`, `test_subgrid_adjoint.py`,
 `test_subgrid_indicators.py` and `test_subgrid_hybrid.py` cover the experimental 3D
 Huygens subgridding (`DeepGPR.subgrid`): exact precursors of linear fields, outer-surface
