@@ -9,7 +9,8 @@ Cases (identical physics, data and loss for every method):
   200 x 100, 50 shots, nt 2000).
 
 Wavefield Tucker sketching is OFF in every run (only the model
-parameterization differs). Loss ``0.5 sum ||d - d_obs||^2 / sum ||d_obs||^2``.
+parameterization differs). Loss ``0.5 sum ||d - d_obs||^2 / sum ||d_obs||^2``
+(protocol v3 adds the TV term of the FWI notebooks, see ``PROTOCOLS``).
 
 Per run: pre-fit to the common initial model (time reported separately), Adam
 with the learning rate chosen by a short search (cost reported), per-iteration
@@ -70,8 +71,16 @@ SEARCH_ITERATIONS = 15
 # notebooks), air fixed at its true values and excluded from every
 # parameterization, sigma mapping range from the subsurface (0.5 min .. 1.5 max),
 # eps only for the first third of the iterations, then eps and sigma.
-PROTOCOLS = ("v1", "v2")
-ITERATIONS = {"v1": {"3d": 100, "2d": 150}, "v2": {"3d": 150, "2d": 200}}
+# v3 = v2 plus (a) the TV regularisation of examples/{2.2DFWI,3.3DFWI}.ipynb
+# for every method: anisotropic TV (DeepGPR.TVRegularization) of eps and of
+# sigma over the parameterized region, its gradient rescaled to TV_RATIO times
+# the norm of the data gradient and added to it in model space (then
+# back-propagated through the parameterization), and (b) in 3D 16 shots on a
+# 4 x 4 grid instead of 4 shots on a diagonal.
+PROTOCOLS = ("v1", "v2", "v3")
+ITERATIONS = {"v1": {"3d": 100, "2d": 150}, "v2": {"3d": 150, "2d": 200}, "v3": {"3d": 150, "2d": 200}}
+TV_RATIO = {"2d": (0.1, 0.1), "3d": (0.1, 0.08)}  # (eps, sigma), as in the notebooks
+SHOT_GRID_3D = 4
 
 
 def result_dir(quick: bool, protocol: str = "v1") -> Path:
@@ -104,12 +113,34 @@ def make_mapping(case: Dict[str, Any], region, protocol: str) -> PropertyMapping
 # ---------------------------------------------------------------------------
 
 
-def load_case(case_name: str, quick: bool, device):
+def grid_shots_3d(case: Dict[str, Any], quick: bool, device) -> List[torch.Tensor]:
+    """v3: sources on a regular grid over the central 60 % of the surface."""
+    import benchmark_tucker as bt
+
+    n = SHOT_GRID_3D if not quick else 2
+    nx, _, nz = case["eps"].shape
+    gx = torch.linspace(nx * 0.2, nx * 0.8, n).round().int()
+    gz = torch.linspace(nz * 0.2, nz * 0.8, n).round().int()
+    grid = torch.stack(torch.meshgrid(gx, gz, indexing="ij"), dim=-1).reshape(-1, 2)
+    source = torch.zeros((n * n, 1, 3), dtype=torch.int32)
+    source[:, 0, 0], source[:, 0, 1], source[:, 0, 2] = grid[:, 0], case["air"], grid[:, 1]
+    receivers = case["receiver_location"][:1].cpu().repeat(n * n, 1, 1)
+    case["source_location"], case["receiver_location"], case["shots"] = source.to(device), receivers.to(device), n * n
+    cache = RESULTS / ("quick" if quick else "full") / "cache" / f"observed3d_grid{n}x{n}_{case['nt']}.pt"
+    if cache.exists():
+        return [t.to(device) for t in torch.load(cache)]
+    with torch.no_grad():
+        data = [DeepGPR.compute(eps_r=case["eps"], sigma=case["sigma"], save_wavefield_history=False, **bt.shot_kwargs(case, s))[-1].clone() for s in range(n * n)]
+    bt.atomic_save([t.cpu() for t in data], cache)
+    return data
+
+
+def load_case(case_name: str, quick: bool, device, protocol: str = "v1"):
     import benchmark_tucker as bt
 
     if case_name == "3d":
         case = bt.build_case(quick, device)
-        observed = bt.observed_data(case, quick)
+        observed = grid_shots_3d(case, quick, device) if protocol == "v3" else bt.observed_data(case, quick)
         shots = [bt.shot_kwargs(case, s) for s in range(case["shots"])]
         air = case["air"]
         region = (slice(None), slice(air, None), slice(None))
@@ -156,8 +187,8 @@ def build_field(spec, case, mapping, device):
 def _build_field(spec, case, mapping, device):
     protocol = spec.get("protocol", "v1")
     eps_init, sigma_init = case["eps_start"], case["sigma_start"]
-    air = case.get("air", 0) if (protocol == "v2" and spec["case"] == "3d") else 0
-    # v2: the air layer is known and fixed; only the subsurface is parameterized.
+    air = case.get("air", 0) if (protocol != "v1" and spec["case"] == "3d") else 0
+    # v2, v3: the air layer is known and fixed; only the subsurface is parameterized.
     eps_sub, sigma_sub = eps_init[:, air:], sigma_init[:, air:]
     shape = tuple(eps_sub.shape)
     t_eps0 = mapping.eps_inverse(eps_sub)
@@ -199,7 +230,7 @@ def fwi(spec: Dict[str, Any]) -> Dict[str, Any]:
     torch.backends.cuda.matmul.allow_tf32 = False
     quick = bool(spec.get("quick"))
     protocol = spec.get("protocol", "v1")
-    case, observed, shots, region, zone = load_case(spec["case"], quick, device)
+    case, observed, shots, region, zone = load_case(spec["case"], quick, device, protocol)
     case["eps_start"], case["sigma_start"] = initial_models(spec["case"], case, protocol)
     mapping = make_mapping(case, region, protocol)
     scale = sum(float(d.square().sum()) for d in observed)
@@ -209,10 +240,23 @@ def fwi(spec: Dict[str, Any]) -> Dict[str, Any]:
     out_dir.mkdir(parents=True, exist_ok=True)
     if not (out_dir / "initial.pt").exists():
         torch.save({"eps": case["eps_start"].cpu(), "sigma": case["sigma_start"].cpu()}, out_dir / "initial.pt")
-    # v2: eps only for the first third of the iterations (examples/2.2DFWI.ipynb).
-    eps_only_iterations = spec["iterations"] // 3 if protocol == "v2" else 0
-    if protocol == "v2" and spec.get("lr_search"):
-        eps_only_iterations = ITERATIONS["v2"][spec["case"]] // 3
+    # v2, v3: eps only for the first third of the iterations (examples/2.2DFWI.ipynb).
+    eps_only_iterations = spec["iterations"] // 3 if protocol != "v1" else 0
+    if protocol != "v1" and spec.get("lr_search"):
+        eps_only_iterations = ITERATIONS[protocol][spec["case"]] // 3
+    tv = DeepGPR.TVRegularization(weight_ep=1.0, weight_sigma=1.0).to(device) if protocol == "v3" else None
+    tv_ratio = TV_RATIO[spec["case"]]
+
+    def add_tv(leaf, ratio, conductivity):
+        # Notebook rule: grad = g_data + ratio |g_data| / |g_TV| g_TV, over the
+        # parameterized region (3D: below the fixed air layer).
+        values = leaf.detach()[region].clone().requires_grad_(True)
+        penalty = tv(ep=None, sigma=values) if conductivity else tv(ep=values, sigma=None)
+        (g_tv,) = torch.autograd.grad(penalty, values)
+        g_data = leaf.grad[region]
+        weight = ratio * (g_data.norm() + 1e-8) / (g_tv.norm() + 1e-8)
+        leaf.grad[region] += weight * g_tv
+        return float(weight)
     ckpt_path = out_dir / f"{spec['name']}.ckpt"
     history: List[Dict[str, Any]] = []
     start_iteration = 0
@@ -264,6 +308,12 @@ def fwi(spec: Dict[str, Any]) -> Dict[str, Any]:
             adjoint += b.elapsed_time(c) / 1e3
             loss_total += float(loss)
         timer.mark("fdtd")
+        tv_weights = {}
+        if tv is not None:
+            tv_weights["eps"] = add_tv(eps_leaf, tv_ratio[0], False)
+            if iteration >= eps_only_iterations:
+                tv_weights["sigma"] = add_tv(sig_leaf, tv_ratio[1], True)
+        timer.mark("regularization")
         if iteration < eps_only_iterations:
             # eps only: sigma parameters receive no gradient (separate fields)
             # or only the eps-driven part (the shared SIREN network).
@@ -285,6 +335,9 @@ def fwi(spec: Dict[str, Any]) -> Dict[str, Any]:
             iteration_s=phases["total"],
             wall_s=time.perf_counter() - wall0,
         )
+        if tv is not None:
+            record["regularization_s"] = phases["regularization"]
+            record["tv_weights"] = tv_weights
         if iteration % 5 == 4 or iteration == iterations - 1:
             record["errors"] = evaluate()
         history.append(record)

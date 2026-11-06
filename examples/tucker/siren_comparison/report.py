@@ -179,7 +179,7 @@ def fwi_tables(fwi: Dict, search: Dict) -> List[str]:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--quick", action="store_true")
-    parser.add_argument("--protocol", default="v1", choices=["v1", "v2"])
+    parser.add_argument("--protocol", default="v1", choices=["v1", "v2", "v3"])
     args = parser.parse_args()
     base = "quick" if args.quick else "full"
     results = HERE / "results" / (base if args.protocol == "v1" else f"{base}_{args.protocol}")
