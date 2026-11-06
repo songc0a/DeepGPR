@@ -205,6 +205,30 @@ def v4_tables(fwi: Dict, search: Dict, search_sigma: Dict) -> List[str]:
             pick = chosen.get(label)
             lines.append(f"| {label} | {'; '.join(stage_a[label])} | {'; '.join(stage_b.get(label, []))} | {f'{pick[0]:g}, {pick[1]:g}' if pick else '-'} |")
         lines.append("")
+        # Selection check (uses the truth, for reference only): model error after
+        # the search for the candidate each criterion picks and for the best one.
+        key = "eps_zone" if case == "3d" else "eps"
+        lines += [f"### C. v4 selection check ({case.upper()}): {key} RMSE after the search of the candidate picked by each criterion", ""]
+        lines.append("| method | training misfit (v3 rule): lr -> RMSE | validation misfit (v4): lr -> RMSE | lowest RMSE (truth): lr -> RMSE "
+                     "| stage B validation pick: scale -> zone log10 sigma RMSE | stage B lowest sigma RMSE (truth): scale -> RMSE |")
+        lines.append("|---|---|---|---|---|---|")
+        for label in sorted(stage_a, key=lambda l: (l != "dense", l)):
+            cands = {r["spec"]["lr"]: r for n, r in search.items() if n.startswith(f"{case}|search|{label}|") and "history" in r}
+            if not cands:
+                continue
+            err = {lr: r["history"][-1]["errors"][key]["rmse"] for lr, r in cands.items()}
+            train = {lr: statistics.fmean(h["loss"] for h in r["history"][-3:]) for lr, r in cands.items()}
+            val = {lr: r.get("validation_loss", math.inf) for lr, r in cands.items()}
+            cells = [f"{lr:g} -> {err[lr]:.3f}" for lr in (min(train, key=train.get), min(val, key=val.get), min(err, key=err.get))]
+            scales = {r["spec"]["sigma_scale"]: r for n, r in search_sigma.items() if n.startswith(f"{case}|search_sigma|{label}|") and "history" in r}
+            if scales:
+                serr = {sc: r["history"][-1]["errors"]["sigma_log_zone"]["rmse"] for sc, r in scales.items()}
+                sval = {sc: r.get("validation_loss", math.inf) for sc, r in scales.items()}
+                cells += [f"{sc:g} -> {serr[sc]:.3f}" for sc in (min(sval, key=sval.get), min(serr, key=serr.get))]
+            else:
+                cells += ["-", "-"]
+            lines.append(f"| {label} | " + " | ".join(cells) + " |")
+        lines.append("")
         groups: Dict[str, List[Dict]] = {}
         for name, r in fwi.items():
             if name.startswith(f"{case}|") and "history" in r:
