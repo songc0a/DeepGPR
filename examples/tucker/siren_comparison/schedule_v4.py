@@ -29,6 +29,8 @@ DETERMINISTIC = ("dense", "direct_tucker_r16")
 def need_mib(task) -> int:
     if task["name"].startswith("2d"):
         return 13000
+    if int(__import__("os").environ.get("FWI_CHECKPOINT_STEPS", "0")):  # exact checkpointing: ~2.7 GiB (+5 GiB SIREN graph)
+        return 10000 if "siren_4x128" in task["name"] else 5000
     return 23000 if "siren_4x128" in task["name"] else 19000
 
 
