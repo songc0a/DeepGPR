@@ -7,3 +7,4 @@ results/*/fwi_runs/
 results/*/representation_models/
 results/*/*.lock
 results/*/*.tmp
+results/*/search_states/

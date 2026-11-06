@@ -309,6 +309,18 @@ class FixedTopField(MaterialField):
         return self.field.parameter_breakdown()
 
 
+def split_parameters(field: MaterialField):
+    """``(eps parameters, sigma parameters, shared parameters)`` of a field."""
+    inner = field.field if isinstance(field, FixedTopField) else field
+    if isinstance(inner, DenseField):
+        return [inner.t_eps], [inner.t_sigma], []
+    if isinstance(inner, DirectTuckerField):
+        return list(inner.eps_tucker.parameters()), list(inner.sigma_tucker.parameters()), []
+    if isinstance(inner, TuckerSirenField):
+        return list(inner.eps_field.parameters()), list(inner.sigma_field.parameters()), []
+    return [], [], list(inner.parameters())  # one network for both properties
+
+
 def gaussian_smooth(x: torch.Tensor, sigma: float) -> torch.Tensor:
     """Separable Gaussian filter, edge-replicating (as skimage.filters.gaussian, mode 'nearest')."""
     radius = int(4.0 * sigma + 0.5)

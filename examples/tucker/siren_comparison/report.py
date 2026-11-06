@@ -176,10 +176,63 @@ def fwi_tables(fwi: Dict, search: Dict) -> List[str]:
     return lines
 
 
+def v4_tables(fwi: Dict, search: Dict, search_sigma: Dict) -> List[str]:
+    """Protocol v4: held-out validation misfit of every search candidate, and zone metrics."""
+    lines = []
+    for case in ("3d", "2d"):
+        stage_a: Dict[str, List[str]] = {}
+        for name, r in search.items():
+            if name.startswith(f"{case}|search|"):
+                label = name.split("|")[2]
+                value = r.get("validation_loss")
+                stage_a.setdefault(label, []).append(f"{r['spec']['lr']:g}: {f(value) if value is not None else 'failed'}")
+        stage_b: Dict[str, List[str]] = {}
+        for name, r in search_sigma.items():
+            if name.startswith(f"{case}|search_sigma|"):
+                label = name.split("|")[2]
+                value = r.get("validation_loss")
+                stage_b.setdefault(label, []).append(f"{r['spec']['sigma_scale']:g}: {f(value) if value is not None else 'failed'}")
+        if not stage_a:
+            continue
+        chosen = {}
+        for name, r in fwi.items():
+            if name.startswith(f"{case}|") and "spec" in r:
+                chosen[name.split("|")[1]] = (r["spec"]["lr"], r["spec"].get("sigma_scale"))
+        lines += [f"### C. v4 hyper-parameter selection ({case.upper()}): validation misfit (held-out shots) after the search", ""]
+        lines.append("| method | stage A, eps-only: lr: validation misfit | stage B, joint: sigma scale: validation misfit | chosen lr, sigma scale |")
+        lines.append("|---|---|---|---|")
+        for label in sorted(stage_a, key=lambda l: (l != "dense", l)):
+            pick = chosen.get(label)
+            lines.append(f"| {label} | {'; '.join(stage_a[label])} | {'; '.join(stage_b.get(label, []))} | {f'{pick[0]:g}, {pick[1]:g}' if pick else '-'} |")
+        lines.append("")
+        groups: Dict[str, List[Dict]] = {}
+        for name, r in fwi.items():
+            if name.startswith(f"{case}|") and "history" in r:
+                groups.setdefault(name.split("|")[1], []).append(r)
+        if not groups:
+            continue
+        lines += [f"### C. v4 model errors ({case.upper()}, mean over seeds; zone = {'top 40 subsurface cells' if case == '3d' else 'whole model'})", ""]
+        lines.append("| method | zone eps RMSE start -> end | zone log10 sigma RMSE start -> end | deep eps RMSE start -> end | eps RMSE start -> end | log10 sigma RMSE start -> end |")
+        lines.append("|---|---|---|---|---|---|")
+
+        def pair(runs, key):
+            if key not in runs[0]["info"]["initial_errors"]:
+                return "-"
+            start = statistics.fmean(r["info"]["initial_errors"][key]["rmse"] for r in runs)
+            end = statistics.fmean(r["history"][-1]["errors"][key]["rmse"] for r in runs)
+            return f"{start:.3f} -> {end:.3f}"
+
+        for label in sorted(groups, key=lambda l: (l != "dense", l)):
+            runs = groups[label]
+            lines.append(f"| {label} | {pair(runs, 'eps_zone')} | {pair(runs, 'sigma_log_zone')} | {pair(runs, 'eps_deep')} | {pair(runs, 'eps')} | {pair(runs, 'sigma_log')} |")
+        lines.append("")
+    return lines
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--quick", action="store_true")
-    parser.add_argument("--protocol", default="v1", choices=["v1", "v2", "v3"])
+    parser.add_argument("--protocol", default="v1", choices=["v1", "v2", "v3", "v4"])
     args = parser.parse_args()
     base = "quick" if args.quick else "full"
     results = HERE / "results" / (base if args.protocol == "v1" else f"{base}_{args.protocol}")
@@ -189,6 +242,8 @@ def main() -> None:
     lines += generation_tables(load(shared / "generation.json"))
     lines += representation_tables(load(shared / "representation.json"))
     lines += fwi_tables(load(results / "fwi.json"), load(results / "fwi_search.json"))
+    if args.protocol == "v4":
+        lines += v4_tables(load(results / "fwi.json"), load(results / "fwi_search.json"), load(results / "fwi_search_sigma.json"))
     (results / "report_tables.md").write_text("\n".join(lines) + "\n")
     print("\n".join(lines[:5]))
 

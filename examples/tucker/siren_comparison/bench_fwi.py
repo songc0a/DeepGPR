@@ -53,6 +53,7 @@ from networks import (  # noqa: E402
     TuckerSirenField,
     prefit_field,
     prefit_tucker_siren,
+    split_parameters,
 )
 from runner import RESULTS, PhaseTimer, load_results, optimizer_state_bytes, parameter_bytes, run_specs, worker_main  # noqa: E402
 
@@ -77,10 +78,23 @@ SEARCH_ITERATIONS = 15
 # the norm of the data gradient and added to it in model space (then
 # back-propagated through the parameterization), and (b) in 3D 16 shots on a
 # 4 x 4 grid instead of 4 shots on a diagonal.
-PROTOCOLS = ("v1", "v2", "v3")
-ITERATIONS = {"v1": {"3d": 100, "2d": 150}, "v2": {"3d": 150, "2d": 200}, "v3": {"3d": 150, "2d": 200}}
+# v4 = v3 with a hyper-parameter selection that does not use the truth and
+# tests the sigma step: held-out validation shots (VALIDATION_SHOTS, not used
+# by the search's gradients); stage A chooses the learning rate by the
+# validation misfit after SEARCH_ITERATIONS eps-only iterations; stage B
+# continues the chosen stage-A state for SEARCH_ITERATIONS joint iterations
+# for each sigma step scale in SIGMA_SCALES and chooses the scale by the
+# validation misfit. Sigma step scale: sigma learning rate = scale x lr for
+# methods with separate eps and sigma parameters; sigma data+TV gradient x
+# scale for the SIREN (one network for both properties). The FWI runs use all
+# shots. 3D metrics add the zone sigma error and the eps error below the zone.
+PROTOCOLS = ("v1", "v2", "v3", "v4")
+ITERATIONS = {"v1": {"3d": 100, "2d": 150}, "v2": {"3d": 150, "2d": 200}, "v3": {"3d": 150, "2d": 200}, "v4": {"3d": 150, "2d": 200}}
 TV_RATIO = {"2d": (0.1, 0.1), "3d": (0.1, 0.08)}  # (eps, sigma), as in the notebooks
 SHOT_GRID_3D = 4
+SIGMA_SCALES = (0.0, 0.03, 0.1, 0.3, 1.0)
+VALIDATION_SHOTS = {"3d": (1, 7, 8, 14), "2d": tuple(range(2, 50, 5))}  # 3D: one per row and column of the 4 x 4 grid
+VALIDATION_SHOTS_QUICK = {"3d": (1,), "2d": (2, 7)}
 
 
 def result_dir(quick: bool, protocol: str = "v1") -> Path:
@@ -135,12 +149,29 @@ def grid_shots_3d(case: Dict[str, Any], quick: bool, device) -> List[torch.Tenso
     return data
 
 
+def split_shots(case_name: str, shots, observed, quick: bool):
+    """v4 search: (training shots, training data, validation (shot, data) pairs)."""
+    held = set((VALIDATION_SHOTS_QUICK if quick else VALIDATION_SHOTS)[case_name])
+    if case_name == "3d":
+        train = [i for i in range(len(shots)) if i not in held]
+        return [shots[i] for i in train], [observed[i] for i in train], [(shots[i], observed[i]) for i in sorted(held)]
+    options, data = shots[0], observed[0]  # 2D: all shots in one batched call
+    n = data.shape[0]
+    train = torch.tensor([i for i in range(n) if i not in held], device=data.device)
+    val = torch.tensor(sorted(held), device=data.device)
+
+    def subset(index):
+        return dict(options, source_location=options["source_location"][index], receiver_location=options["receiver_location"][index])
+
+    return [subset(train)], [data[train]], [(subset(val), data[val])]
+
+
 def load_case(case_name: str, quick: bool, device, protocol: str = "v1"):
     import benchmark_tucker as bt
 
     if case_name == "3d":
         case = bt.build_case(quick, device)
-        observed = grid_shots_3d(case, quick, device) if protocol == "v3" else bt.observed_data(case, quick)
+        observed = grid_shots_3d(case, quick, device) if protocol in ("v3", "v4") else bt.observed_data(case, quick)
         shots = [bt.shot_kwargs(case, s) for s in range(case["shots"])]
         air = case["air"]
         region = (slice(None), slice(air, None), slice(None))
@@ -171,7 +202,7 @@ def build_field(spec, case, mapping, device):
     originally measured time is reported with every run that uses it.
     """
     quick = bool(spec.get("quick"))
-    label = spec["name"].split("|")[-2] if "|search|" in spec["name"] else spec["name"].split("|")[1]
+    label = spec["name"].split("|")[2] if "|search" in spec["name"] else spec["name"].split("|")[1]
     cache = result_dir(quick, spec.get("protocol", "v1")) / "prefit" / f"{spec['case']}|{label}|seed{spec.get('seed', 0)}.pt"
     field, info = _build_field(spec, case, mapping, device)
     if cache.exists():
@@ -233,18 +264,38 @@ def fwi(spec: Dict[str, Any]) -> Dict[str, Any]:
     case, observed, shots, region, zone = load_case(spec["case"], quick, device, protocol)
     case["eps_start"], case["sigma_start"] = initial_models(spec["case"], case, protocol)
     mapping = make_mapping(case, region, protocol)
+    validation: List = []
+    if spec.get("train_only"):
+        shots, observed, validation = split_shots(spec["case"], shots, observed, quick)
     scale = sum(float(d.square().sum()) for d in observed)
     field, info = build_field(spec, case, mapping, device)
-    optimizer = torch.optim.Adam(field.parameters(), lr=spec["lr"])
+    sigma_scale = float(spec.get("sigma_scale", 1.0))
+    eps_params, sigma_params, shared_params = split_parameters(field)
+    if protocol == "v4":
+        groups = [dict(params=eps_params + shared_params, lr=spec["lr"])]
+        if sigma_params:
+            groups.append(dict(params=sigma_params, lr=spec["lr"] * sigma_scale))
+        optimizer = torch.optim.Adam(groups)
+    else:
+        optimizer = torch.optim.Adam(field.parameters(), lr=spec["lr"])
+    sigma_grad_scale = sigma_scale if (protocol == "v4" and shared_params) else 1.0
+    if spec.get("init_state"):
+        # v4 stage B: continue the chosen stage-A state; keep this spec's rates.
+        state = torch.load(spec["init_state"], map_location=device)
+        field.load_state_dict(state["field"])
+        optimizer.load_state_dict(state["optimizer"])
+        for group, rate in zip(optimizer.param_groups, (spec["lr"], spec["lr"] * sigma_scale)):
+            group["lr"] = rate
     out_dir = result_dir(quick, protocol) / "fwi_runs" / spec["case"]
     out_dir.mkdir(parents=True, exist_ok=True)
     if not (out_dir / "initial.pt").exists():
         torch.save({"eps": case["eps_start"].cpu(), "sigma": case["sigma_start"].cpu()}, out_dir / "initial.pt")
-    # v2, v3: eps only for the first third of the iterations (examples/2.2DFWI.ipynb).
+    # v2-v4: eps only for the first third of the iterations (examples/2.2DFWI.ipynb).
     eps_only_iterations = spec["iterations"] // 3 if protocol != "v1" else 0
     if protocol != "v1" and spec.get("lr_search"):
         eps_only_iterations = ITERATIONS[protocol][spec["case"]] // 3
-    tv = DeepGPR.TVRegularization(weight_ep=1.0, weight_sigma=1.0).to(device) if protocol == "v3" else None
+    eps_only_iterations = spec.get("eps_only_iterations", eps_only_iterations)
+    tv = DeepGPR.TVRegularization(weight_ep=1.0, weight_sigma=1.0).to(device) if protocol in ("v3", "v4") else None
     tv_ratio = TV_RATIO[spec["case"]]
 
     def add_tv(leaf, ratio, conductivity):
@@ -270,11 +321,27 @@ def fwi(spec: Dict[str, Any]) -> Dict[str, Any]:
     def evaluate():
         with torch.no_grad():
             eps, sigma = field()
-        return dict(
+        errors = dict(
             eps=model_errors(eps, case["eps"], region),
             eps_zone=model_errors(eps, case["eps"], zone),
             sigma_log=model_errors(sigma, case["sigma"], region, log=True),
         )
+        if protocol == "v4":
+            errors["sigma_log_zone"] = model_errors(sigma, case["sigma"], zone, log=True)
+            if spec["case"] == "3d":
+                deep = (slice(None), slice(zone[1].stop, None), slice(None))
+                errors["eps_deep"] = model_errors(eps, case["eps"], deep)
+        return errors
+
+    def misfit(pairs) -> float:
+        total = energy = 0.0
+        with torch.no_grad():
+            eps, sigma = field()
+            for options, data_obs in pairs:
+                data = DeepGPR.compute(eps_r=eps, sigma=sigma, save_wavefield_history=False, **options)[-1]
+                total += float((data - data_obs).square().sum())
+                energy += float(data_obs.square().sum())
+        return 0.5 * total / energy
 
     if start_iteration == 0:
         info["initial_errors"] = evaluate()
@@ -319,7 +386,7 @@ def fwi(spec: Dict[str, Any]) -> Dict[str, Any]:
             # or only the eps-driven part (the shared SIREN network).
             torch.autograd.backward([eps], [eps_leaf.grad])
         else:
-            torch.autograd.backward([eps, sigma], [eps_leaf.grad, sig_leaf.grad])
+            torch.autograd.backward([eps, sigma], [eps_leaf.grad, sig_leaf.grad * sigma_grad_scale])
         timer.mark("network_backward")
         optimizer.step()
         timer.mark("optimizer")
@@ -354,6 +421,13 @@ def fwi(spec: Dict[str, Any]) -> Dict[str, Any]:
         history=history,
         resumed_from=start_iteration,
     )
+    if validation:
+        result["validation_loss"] = misfit(validation)
+        result["training_loss_end"] = misfit(list(zip(shots, observed)))
+    if spec.get("save_state"):
+        path = Path(spec["save_state"])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(dict(field=field.state_dict(), optimizer=optimizer.state_dict()), path)
     if not spec.get("lr_search"):
         with torch.no_grad():
             eps, sigma = field()
@@ -378,8 +452,44 @@ def search_specs(case: str, quick: bool, protocol: str = "v1") -> List[Dict[str,
     specs = []
     for m in methods(case):
         for lr in LR_CANDIDATES[m["method"]]:
-            specs.append(dict(m, name=f"{case}|search|{m['label']}|lr{lr:g}", case=case, lr=lr, iterations=SEARCH_ITERATIONS if not quick else 4, lr_search=True, quick=quick, seed=0, protocol=protocol))
+            spec = dict(m, name=f"{case}|search|{m['label']}|lr{lr:g}", case=case, lr=lr, iterations=SEARCH_ITERATIONS if not quick else 4, lr_search=True, quick=quick, seed=0, protocol=protocol)
+            if protocol == "v4":
+                spec.update(train_only=True, save_state=str(search_state(case, quick, protocol, m["label"], lr)))
+            specs.append(spec)
     return specs
+
+
+def search_state(case: str, quick: bool, protocol: str, label: str, lr: float) -> Path:
+    return result_dir(quick, protocol) / "search_states" / f"{case}|{label}|lr{lr:g}.pt"
+
+
+def search_sigma_specs(case: str, quick: bool, protocol: str) -> List[Dict[str, Any]]:
+    """v4 stage B: joint eps/sigma iterations from the chosen stage-A state."""
+    lrs = chosen_learning_rates(case, quick, protocol)
+    specs = []
+    for m in methods(case):
+        if m["label"] not in lrs:
+            continue
+        lr = lrs[m["label"]]
+        for scale in SIGMA_SCALES:
+            specs.append(dict(
+                m, name=f"{case}|search_sigma|{m['label']}|s{scale:g}", case=case, lr=lr, sigma_scale=scale,
+                iterations=SEARCH_ITERATIONS if not quick else 4, eps_only_iterations=0, lr_search=True, train_only=True,
+                init_state=str(search_state(case, quick, protocol, m["label"], lr)), quick=quick, seed=0, protocol=protocol,
+            ))
+    return specs
+
+
+def chosen_sigma_scales(case: str, quick: bool, protocol: str) -> Dict[str, float]:
+    results = load_results(result_dir(quick, protocol) / "fwi_search_sigma.json")
+    best: Dict[str, tuple] = {}
+    for name, r in results.items():
+        if not name.startswith(f"{case}|search_sigma|") or "validation_loss" not in r:
+            continue
+        label, value = name.split("|")[2], r["validation_loss"]
+        if math.isfinite(value) and (label not in best or value < best[label][0]):
+            best[label] = (value, r["spec"]["sigma_scale"])
+    return {label: scale for label, (_, scale) in best.items()}
 
 
 def chosen_learning_rates(case: str, quick: bool, protocol: str = "v1") -> Dict[str, float]:
@@ -392,27 +502,33 @@ def chosen_learning_rates(case: str, quick: bool, protocol: str = "v1") -> Dict[
         losses = [h["loss"] for h in r["history"]]
         # Mean of the last three losses: penalises oscillating learning rates.
         final = sum(losses[-3:]) / len(losses[-3:])
-        if all(math.isfinite(v) for v in losses) and (label not in best or final < best[label][0]):
+        if protocol == "v4":  # held-out shots
+            final = r.get("validation_loss", float("nan"))
+        if all(math.isfinite(v) for v in losses + [final]) and (label not in best or final < best[label][0]):
             best[label] = (final, r["spec"]["lr"])
     return {label: lr for label, (_, lr) in best.items()}
 
 
 def run_specs_for(case: str, quick: bool, seeds=(0, 1, 2), protocol: str = "v1") -> List[Dict[str, Any]]:
     lrs = chosen_learning_rates(case, quick, protocol)
+    scales = chosen_sigma_scales(case, quick, protocol) if protocol == "v4" else {}
     iterations = ITERATIONS[protocol][case] if not quick else 6
     specs = []
     for m in methods(case):
-        if m["label"] not in lrs:
+        if m["label"] not in lrs or (protocol == "v4" and m["label"] not in scales):
             continue
         deterministic = m["method"] in ("dense", "direct_tucker")
         for seed in ((0,) if deterministic else seeds):
-            specs.append(dict(m, name=f"{case}|{m['label']}|seed{seed}", case=case, lr=lrs[m["label"]], iterations=iterations, seed=seed, quick=quick, protocol=protocol))
+            spec = dict(m, name=f"{case}|{m['label']}|seed{seed}", case=case, lr=lrs[m["label"]], iterations=iterations, seed=seed, quick=quick, protocol=protocol)
+            if protocol == "v4":
+                spec["sigma_scale"] = scales[m["label"]]
+            specs.append(spec)
     return specs
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=["search", "run", "list", "_worker"])
+    parser.add_argument("command", choices=["search", "search_sigma", "run", "list", "_worker"])
     parser.add_argument("spec", nargs="?")
     parser.add_argument("--case", default="3d", choices=["2d", "3d"])
     parser.add_argument("--only", nargs="*")
@@ -427,6 +543,8 @@ def main() -> None:
     out_dir = result_dir(args.quick, args.protocol)
     if args.command == "search":
         specs, out, kind = search_specs(args.case, args.quick, args.protocol), out_dir / "fwi_search.json", "fwi-search"
+    elif args.command == "search_sigma":
+        specs, out, kind = search_sigma_specs(args.case, args.quick, args.protocol), out_dir / "fwi_search_sigma.json", "fwi-search-sigma"
     else:
         specs, out, kind = run_specs_for(args.case, args.quick, tuple(args.seeds), args.protocol), out_dir / "fwi.json", "fwi"
     if args.only:
