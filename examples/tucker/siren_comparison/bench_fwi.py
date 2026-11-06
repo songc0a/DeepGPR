@@ -93,6 +93,11 @@ ITERATIONS = {"v1": {"3d": 100, "2d": 150}, "v2": {"3d": 150, "2d": 200}, "v3": 
 TV_RATIO = {"2d": (0.1, 0.1), "3d": (0.1, 0.08)}  # (eps, sigma), as in the notebooks
 SHOT_GRID_3D = 4
 SIGMA_SCALES = (0.0, 0.03, 0.1, 0.3, 1.0)
+# v4 reference (``--select oracle``): the same searches, but each method gets
+# the candidates with the lowest model error after the search (zone eps RMSE
+# for the learning rate, zone log10 sigma RMSE for the sigma scale). It uses
+# the true model and is an upper bound of what each parameterization reaches,
+# not a usable selection rule.
 VALIDATION_SHOTS = {"3d": (1, 7, 8, 14), "2d": tuple(range(2, 50, 5))}  # 3D: one per row and column of the 4 x 4 grid
 VALIDATION_SHOTS_QUICK = {"3d": (1,), "2d": (2, 7)}
 
@@ -463,9 +468,10 @@ def search_state(case: str, quick: bool, protocol: str, label: str, lr: float) -
     return result_dir(quick, protocol) / "search_states" / f"{case}|{label}|lr{lr:g}.pt"
 
 
-def search_sigma_specs(case: str, quick: bool, protocol: str) -> List[Dict[str, Any]]:
+def search_sigma_specs(case: str, quick: bool, protocol: str, select: str = "data") -> List[Dict[str, Any]]:
     """v4 stage B: joint eps/sigma iterations from the chosen stage-A state."""
-    lrs = chosen_learning_rates(case, quick, protocol)
+    lrs = chosen_learning_rates(case, quick, protocol, select)
+    stage = "search_sigma" if select == "data" else "search_sigma_oracle"
     specs = []
     for m in methods(case):
         if m["label"] not in lrs:
@@ -473,26 +479,29 @@ def search_sigma_specs(case: str, quick: bool, protocol: str) -> List[Dict[str, 
         lr = lrs[m["label"]]
         for scale in SIGMA_SCALES:
             specs.append(dict(
-                m, name=f"{case}|search_sigma|{m['label']}|s{scale:g}", case=case, lr=lr, sigma_scale=scale,
+                m, name=f"{case}|{stage}|{m['label']}|s{scale:g}", case=case, lr=lr, sigma_scale=scale,
                 iterations=SEARCH_ITERATIONS if not quick else 4, eps_only_iterations=0, lr_search=True, train_only=True,
                 init_state=str(search_state(case, quick, protocol, m["label"], lr)), quick=quick, seed=0, protocol=protocol,
             ))
     return specs
 
 
-def chosen_sigma_scales(case: str, quick: bool, protocol: str) -> Dict[str, float]:
-    results = load_results(result_dir(quick, protocol) / "fwi_search_sigma.json")
+def chosen_sigma_scales(case: str, quick: bool, protocol: str, select: str = "data") -> Dict[str, float]:
+    stage = "search_sigma" if select == "data" else "search_sigma_oracle"
+    results = load_results(result_dir(quick, protocol) / f"fwi_{stage}.json")
     best: Dict[str, tuple] = {}
     for name, r in results.items():
-        if not name.startswith(f"{case}|search_sigma|") or "validation_loss" not in r:
+        if not name.startswith(f"{case}|{stage}|") or "validation_loss" not in r:
             continue
         label, value = name.split("|")[2], r["validation_loss"]
+        if select == "oracle":
+            value = r["history"][-1]["errors"]["sigma_log_zone"]["rmse"]
         if math.isfinite(value) and (label not in best or value < best[label][0]):
             best[label] = (value, r["spec"]["sigma_scale"])
     return {label: scale for label, (_, scale) in best.items()}
 
 
-def chosen_learning_rates(case: str, quick: bool, protocol: str = "v1") -> Dict[str, float]:
+def chosen_learning_rates(case: str, quick: bool, protocol: str = "v1", select: str = "data") -> Dict[str, float]:
     results = load_results(result_dir(quick, protocol) / "fwi_search.json")
     best: Dict[str, tuple] = {}
     for name, r in results.items():
@@ -504,14 +513,17 @@ def chosen_learning_rates(case: str, quick: bool, protocol: str = "v1") -> Dict[
         final = sum(losses[-3:]) / len(losses[-3:])
         if protocol == "v4":  # held-out shots
             final = r.get("validation_loss", float("nan"))
+        if select == "oracle":
+            final = r["history"][-1]["errors"]["eps_zone"]["rmse"]
         if all(math.isfinite(v) for v in losses + [final]) and (label not in best or final < best[label][0]):
             best[label] = (final, r["spec"]["lr"])
     return {label: lr for label, (_, lr) in best.items()}
 
 
-def run_specs_for(case: str, quick: bool, seeds=(0, 1, 2), protocol: str = "v1") -> List[Dict[str, Any]]:
-    lrs = chosen_learning_rates(case, quick, protocol)
-    scales = chosen_sigma_scales(case, quick, protocol) if protocol == "v4" else {}
+def run_specs_for(case: str, quick: bool, seeds=(0, 1, 2), protocol: str = "v1", select: str = "data") -> List[Dict[str, Any]]:
+    lrs = chosen_learning_rates(case, quick, protocol, select)
+    scales = chosen_sigma_scales(case, quick, protocol, select) if protocol == "v4" else {}
+    suffix = "" if select == "data" else f"|{select}"
     iterations = ITERATIONS[protocol][case] if not quick else 6
     specs = []
     for m in methods(case):
@@ -519,7 +531,7 @@ def run_specs_for(case: str, quick: bool, seeds=(0, 1, 2), protocol: str = "v1")
             continue
         deterministic = m["method"] in ("dense", "direct_tucker")
         for seed in ((0,) if deterministic else seeds):
-            spec = dict(m, name=f"{case}|{m['label']}|seed{seed}", case=case, lr=lrs[m["label"]], iterations=iterations, seed=seed, quick=quick, protocol=protocol)
+            spec = dict(m, name=f"{case}|{m['label']}|seed{seed}{suffix}", case=case, lr=lrs[m["label"]], iterations=iterations, seed=seed, quick=quick, protocol=protocol)
             if protocol == "v4":
                 spec["sigma_scale"] = scales[m["label"]]
             specs.append(spec)
@@ -536,6 +548,7 @@ def main() -> None:
     parser.add_argument("--quick", action="store_true")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--protocol", default="v1", choices=PROTOCOLS)
+    parser.add_argument("--select", default="data", choices=["data", "oracle"], help="v4: hyper-parameter selection (oracle: reference only)")
     args = parser.parse_args()
     if args.command == "_worker":
         worker_main(fwi)
@@ -544,9 +557,11 @@ def main() -> None:
     if args.command == "search":
         specs, out, kind = search_specs(args.case, args.quick, args.protocol), out_dir / "fwi_search.json", "fwi-search"
     elif args.command == "search_sigma":
-        specs, out, kind = search_sigma_specs(args.case, args.quick, args.protocol), out_dir / "fwi_search_sigma.json", "fwi-search-sigma"
+        stage = "search_sigma" if args.select == "data" else "search_sigma_oracle"
+        specs, out, kind = search_sigma_specs(args.case, args.quick, args.protocol, args.select), out_dir / f"fwi_{stage}.json", "fwi-search-sigma"
     else:
-        specs, out, kind = run_specs_for(args.case, args.quick, tuple(args.seeds), args.protocol), out_dir / "fwi.json", "fwi"
+        name = "fwi.json" if args.select == "data" else f"fwi_{args.select}.json"
+        specs, out, kind = run_specs_for(args.case, args.quick, tuple(args.seeds), args.protocol, args.select), out_dir / name, "fwi"
     if args.only:
         specs = [s for s in specs if any(token in s["name"] for token in args.only)]
     if args.command == "list":
