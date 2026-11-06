@@ -262,7 +262,16 @@ def _build_field(spec, case, mapping, device):
 
 
 def fwi(spec: Dict[str, Any]) -> Dict[str, Any]:
+    import os
+
+    import benchmark_tucker as bt
+
     device = torch.device("cuda")
+    # Exact temporal checkpointing of every shot (benchmark_tucker.checkpointed_shot;
+    # gradient cosine 1 - 1e-14 against the stored history, Section 9 of
+    # docs/tucker_model_wavefield_compression.md): the same results with ~1/6 of
+    # the memory on shared GPUs, at ~1.6x the FDTD time. Off unless set.
+    checkpoint_steps = int(os.environ.get("FWI_CHECKPOINT_STEPS", "0"))
     torch.backends.cuda.matmul.allow_tf32 = False
     quick = bool(spec.get("quick"))
     protocol = spec.get("protocol", "v1")
@@ -370,7 +379,10 @@ def fwi(spec: Dict[str, Any]) -> Dict[str, Any]:
             b = torch.cuda.Event(enable_timing=True)
             c = torch.cuda.Event(enable_timing=True)
             a.record()
-            data = DeepGPR.compute(eps_r=eps_leaf, sigma=sig_leaf, **options)[-1]
+            if checkpoint_steps:
+                data = bt.checkpointed_shot(eps_leaf, sig_leaf, options, checkpoint_steps, None)
+            else:
+                data = DeepGPR.compute(eps_r=eps_leaf, sigma=sig_leaf, **options)[-1]
             loss = 0.5 * (data - data_obs).square().sum() / scale
             b.record()
             loss.backward()
@@ -425,6 +437,7 @@ def fwi(spec: Dict[str, Any]) -> Dict[str, Any]:
         peak_reserved_bytes=torch.cuda.max_memory_reserved(),
         history=history,
         resumed_from=start_iteration,
+        checkpoint_steps=checkpoint_steps,
     )
     if validation:
         result["validation_loss"] = misfit(validation)
