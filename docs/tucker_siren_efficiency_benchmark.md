@@ -296,6 +296,84 @@ What the 3D runs show:
   dense and SIREN (which barely change sigma), with axis-aligned stripes along
   the surface (Fig. 7), as in 2D.
 
+### 5.4 Round 2 (protocol v2, after review of round 1)
+
+Review of the round-1 figures: the initial model was too close to the truth
+(four passes of a 9-cell box filter, effective Gaussian width ~5 cells, which
+kept the ellipse and the dipping layer), and sigma came out poorly for SIREN and
+Tucker-SIREN. Causes found: (1) sigma = 0 S/m in the air made the log10 mapping
+span 1e-9 ... sigma_max (6.6 decades), so the subsurface sat on the flat top of
+the sigmoid (derivative ~0.05) and (2) the air/ground step became a jump of
+~12 logit units, which a separable low-rank model cannot represent (the stripe
+below the surface in round 1); (3) eps and sigma were updated jointly from the
+first iteration although sigma is far less sensitive.
+
+Protocol v2 (`bench_fwi.py --protocol v2`, results in `results/full_v2/`),
+identical for every method:
+
+* start = Gaussian-smoothed true model with width 10 cells (3D) / 20 cells (2D),
+  for eps and for sigma, as in `examples/2.2DFWI.ipynb`, `examples/3.3DFWI.ipynb`
+  and the SIREN-IFWI notebooks (initial eps RMSE 0.575 in 3D, 0.748 in 2D,
+  vs 0.48 / 0.44 in round 1);
+* the air layer is fixed at its true values and is not parameterized (3D);
+* sigma mapping range from the subsurface (0.5 x minimum ... 1.5 x maximum,
+  ~1.7 decades in 3D);
+* eps only for the first third of the iterations, then eps and sigma
+  (`examples/2.2DFWI.ipynb`); 150 (3D) / 200 (2D) iterations;
+* new learning-rate search, three seeds; data, solver and loss unchanged.
+  Seven 3D runs failed with OOM because another user's process took GPU 3
+  during the run; they were rerun on free GPUs (logs in `results/full_v2/logs`).
+
+2D (200 iterations):
+
+| method | final loss | eps RMSE (start 0.748) | eps SSIM | log10 sigma RMSE (start 0.105) |
+|---|---|---|---|---|
+| dense (lr 0.1) | 9.2e-3 | 1.086 | 0.527 | 0.225 |
+| direct Tucker r16 | 1.3e-2 | 1.097 | 0.213 | 0.220 |
+| SIREN 4 x 128 | 2.2e-3 +- 6e-4 | **0.606** | 0.509 | **0.085** |
+| Tucker-SIREN r8 / r12 / r16 / r24 | 0.028 / 0.027 / 0.016 / 0.014 | 0.749 / 0.757 / 0.796 / 0.863 | 0.61 / 0.44 / 0.39 / 0.32 | 0.18 / 0.17 / 0.18 / 0.12 |
+
+From the poorer start, the SIREN is the only parameterization that improves both
+eps and sigma; it recovers the dipping layer and the round anomaly (Fig. 7,
+`results/full_v2/figures`). The dense inversion (learning rate chosen by the
+data loss over 15 iterations) fits the data with ring artefacts around the
+sources and a worse model. Tucker-SIREN and direct Tucker produce blocky,
+axis-aligned patterns in eps and sigma: the circle and the dipping layer are not
+separable, and a low-rank Tucker model is a poor prior for them. Note that the
+learning rate is chosen by the data loss after 15 iterations; with this poor
+start that criterion prefers the fastest data fit (dense lr 0.1), not the best
+model. The SIREN eps RMSE is lowest after ~20 s (0.586) and rises slightly
+afterwards (0.606 at 200 iterations).
+
+3D (150 iterations):
+
+| method | final loss | eps RMSE (start 0.575) | zone eps RMSE (start 0.683) | eps SSIM | log10 sigma RMSE (start 0.061) | iteration | peak |
+|---|---|---|---|---|---|---|---|
+| dense | 5.3e-5 | 0.572 | 0.677 | 0.388 | 0.061 | 2.293 s | 16.08 GiB |
+| direct Tucker r16 | 7.6e-5 | 0.580 | 0.690 | 0.387 | 0.071 | 2.292 s | 16.07 GiB |
+| SIREN 4 x 128 | 3.9e-5 | 0.592 | 0.700 | 0.388 | **0.053** | 2.360 s | 21.12 GiB |
+| Tucker-SIREN r8 | 5.6e-5 | 0.553 | 0.599 | 0.384 | 0.071 | 2.298 s | 16.07 GiB |
+| Tucker-SIREN r12 (lr 3e-4) | 7.0e-5 | 0.695 | 0.669 | 0.272 | 0.136 | 2.292 s | 16.07 GiB |
+| Tucker-SIREN r16 | 6.5e-5 | **0.551** | 0.611 | 0.388 | 0.068 | 2.292 s | 16.07 GiB |
+| Tucker-SIREN r24 | 6.0e-5 | 0.553 | 0.616 | 0.389 | 0.068 | 2.293 s | 16.07 GiB |
+
+In 3D every reconstruction stays close to the starting model (Fig. 7): four
+shots, an 18 ns record and 150 iterations constrain the 3D model weakly, so
+accuracy differences of 0.02 in RMSE are not decisive. Fixing the air removed
+the round-1 stripe below the surface; Tucker-SIREN r12 (whose search chose a
+10x larger learning rate) developed strong stripes. Sigma: only the SIREN
+improves it (0.061 -> 0.053); dense leaves it unchanged, and direct Tucker and
+all Tucker-SIREN ranks make it slightly worse (0.068-0.071; r12 0.136). The
+Tucker-SIREN r8/r16/r24 eps gains (0.575 -> 0.551-0.553, zone 0.683 -> 0.60) are
+small but consistent over three seeds. The cost and memory
+results of round 1 are reproduced (SIREN +5.0 GiB peak, +3 % time).
+
+Overall accuracy verdict across both rounds: the Tucker parameterizations
+are not more accurate than SIREN or dense in a way that holds across cases;
+in 2D from a poor start they are clearly worse than the SIREN, and their
+separable structure produces stripe artefacts in sigma (and in eps when the
+learning rate is large).
+
 ## 6. Answers
 
 | question | answer (measured) |
@@ -305,7 +383,7 @@ What the 3D runs show:
 | Does it reduce GPU memory? | Model generation: 7.08 GiB -> 63 MiB peak (120 x 120 x 100); 19.6 GiB -> 180 MiB at 160^3; 200^3 runs where the unchunked SIREN does not fit. Complete 3D FWI: 21.57 -> 16.06 GiB (-26 %), the remainder being the FDTD history. 2D FWI: no measurable difference (10.38 vs 10.30 GiB). |
 | Does it reduce the total FWI time? | Barely: 2.346 -> 2.294 s per 3D iteration (`S_FWI = 1.02`, `S_network = 17`); 2D unchanged (0.320 vs 0.319 s; there the Tucker-SIREN network stage is even slower than the SIREN's, 3.7 vs 2.2 ms, launch-bound at 20 000 points). Including the pre-fit, a 100-iteration 3D run takes 240 s vs 420 s. |
 | Fewer trainable parameters at equal accuracy? | For the data misfit in 3D FWI: yes (18 080 parameters reach a 5x lower loss than the 50 306-parameter SIREN). For representing the true model: no - SIREN 4 x 128 reaches 1.0 % error, Tucker-SIREN stops at the rank floor (4.1 % at r 16, 2.2 % at r 32 with 103 744 parameters); Tucker-SIREN reaches 5 % with 3x fewer parameters and 5x sooner. |
-| Does the low-rank constraint reduce resolution? | Yes. The representation error is set by the rank (direct Tucker at the same rank is within 1.16x); sharp structures (the air/ground step in log10 sigma, thin layers) are approximated by separable sums, which produces axis-aligned stripes in sigma in 2D and 3D FWI and lower eps SSIM than dense in 3D. |
+| Does the low-rank constraint reduce resolution? | Yes (both rounds; Section 5.4: in 2D from the poorer start Tucker-SIREN eps RMSE 0.75-0.86 vs SIREN 0.61). The representation error is set by the rank (direct Tucker at the same rank is within 1.16x); sharp structures (the air/ground step in log10 sigma, thin layers) are approximated by separable sums, which produces axis-aligned stripes in sigma in 2D and 3D FWI and lower eps SSIM than dense in 3D. |
 
 Summary: in this set-up Tucker-SIREN makes the *network* cheap (3x at 50^3,
 28x at the FWI grid and up to 220x at 200^3 in the generation stage; about
@@ -333,7 +411,9 @@ the Tucker rank and conductivity suffers from separable-structure artefacts.
 * **Chunked SIREN in FWI.** Would remove most of the SIREN's memory penalty
   at ~40 % more network time; not run.
 * **Limits of this study.** One synthetic model per dimension, inverse crime,
-  four 3D shots, 100 iterations, three seeds, PyTorch 1.11 (local) and 2.0.1
+  four 3D shots (too few to separate the methods by 3D accuracy), 100-150
+  iterations, no regularisation (the notebooks' TV term and gradient
+  normalisation were not used), learning rates chosen by data loss, three seeds, PyTorch 1.11 (local) and 2.0.1
   (server) on RTX 4090s; the 2D runs shared their GPU with an idle process of
   another user. Five seeds were not run.
 
@@ -348,6 +428,8 @@ python bench_representation.py run      # B  -> results/full/representation.json
 python bench_fwi.py search --case 2d && python bench_fwi.py run --case 2d   # C 2D
 python bench_fwi.py search --case 3d && python bench_fwi.py run --case 3d   # C 3D
 python report.py && python plots.py     # results/full/report_tables.md, figures/
+# round 2 (Section 5.4): same commands with --protocol v2 -> results/full_v2/
+# (server drivers: run_fwi_server.sh, run_v2_server.sh, rerun_v2_3d.sh)
 python -m unittest discover -s ../../../tests -p "test_tucker_siren*.py"
 ```
 
@@ -357,4 +439,6 @@ skipped on re-runs, FWI runs checkpoint every 10 iterations and resume. Code:
 `runner.py` (process isolation, timing helpers), `metrics.py` (RMSE, SSIM),
 `bench_*.py`, `profile_reconstruction.py`, `report.py`, `plots.py`.
 Figures: `results/full/figures/fig1_architecture.png` ...
-`fig7_reconstructions_{2d,3d}.png`.
+`fig7_reconstructions_{2d,3d}.png`; round 2: `results/full_v2/figures/fig4_*`,
+`fig6_*`, `fig7_*` (Fig. 7: 3D = x slice with depth downwards, 2D in the
+orientation of the FWI notebooks).

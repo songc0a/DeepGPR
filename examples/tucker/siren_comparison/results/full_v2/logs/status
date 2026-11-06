@@ -1,0 +1,13 @@
+2026-11-06 10:17:46 3d search start gpu7
+2026-11-06 10:17:46 2d search start gpu5
+2026-11-06 10:23:41 2d search exit 0
+2026-11-06 10:46:18 2d runs exit 0 DONE
+2026-11-06 10:51:36 3d search exit 0
+2026-11-06 10:53:33 3d runs gpu3 exit 0 DONE
+2026-11-06 12:03:53 3d runs gpu7 exit 0 DONE
+2026-11-06 12:03:53 ALL DONE
+2026-11-06 12:05:38 rerun of failed 3d runs (GPU 3 was taken by another process): r16 gpu7, r24 gpu5, direct gpu3
+2026-11-06 12:11:52 rerun direct exit 0
+2026-11-06 12:24:50 rerun r16 exit 0
+2026-11-06 12:24:50 rerun r24 exit 0
+2026-11-06 12:24:50 RERUN DONE

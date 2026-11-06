@@ -315,11 +315,12 @@ def main() -> None:
     results = HERE / "results" / (base if args.protocol == "v1" else f"{base}_{args.protocol}")
     shared = HERE / "results" / base  # generation / representation results are protocol-independent
     out = results / "figures"
-    figure1(out)
-    figure2_3(load(shared / "generation.json"), out)
     fwi = load(results / "fwi.json")
+    if args.protocol == "v1":  # protocol-independent figures are written once
+        figure1(out)
+        figure2_3(load(shared / "generation.json"), out)
+        figure5(load(shared / "representation.json"), out)
     figure4(fwi, out)
-    figure5(load(shared / "representation.json"), out)
     figure6(fwi, out)
     figure7(fwi, results, out, args.quick)
     print("figures in", out)

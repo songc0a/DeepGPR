@@ -1,5 +1,5 @@
 __pycache__/
-results/quick/
+results/quick*/
 results/server/
 results/*/cache/
 results/*/prefit/
