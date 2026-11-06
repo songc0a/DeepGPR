@@ -1,0 +1,6 @@
+120x120x100|r8 {'baseline_deepgpr': 0.189, 'order_012': 0.224, 'order_021': 0.206, 'order_102': 0.226, 'order_120': 0.216, 'order_201': 0.234, 'order_210': 0.232, 'einsum': 0.314}
+120x120x100|r16 {'baseline_deepgpr': 0.237, 'order_012': 0.238, 'order_021': 0.227, 'order_102': 0.235, 'order_120': 0.228, 'order_201': 0.227, 'order_210': 0.239, 'einsum': 0.31}
+120x120x100|r24 {'baseline_deepgpr': 0.249, 'order_012': 0.24, 'order_021': 0.224, 'order_102': 0.239, 'order_120': 0.226, 'order_201': 0.229, 'order_210': 0.228, 'einsum': 0.315}
+200x200x200|r8 {'baseline_deepgpr': 0.3, 'order_012': 0.291, 'order_021': 0.298, 'order_102': 0.307, 'order_120': 0.29, 'order_201': 0.3, 'order_210': 0.292, 'einsum': 0.336}
+200x200x200|r16 {'baseline_deepgpr': 0.318, 'order_012': 0.302, 'order_021': 0.308, 'order_102': 0.318, 'order_120': 0.307, 'order_201': 0.298, 'order_210': 0.299, 'einsum': 0.33}
+200x200x200|r24 {'baseline_deepgpr': 0.318, 'order_012': 0.327, 'order_021': 0.308, 'order_102': 0.325, 'order_120': 0.338, 'order_201': 0.321, 'order_210': 0.335, 'einsum': 0.389}

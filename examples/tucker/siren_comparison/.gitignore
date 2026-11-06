@@ -1,2 +1,9 @@
-results/
 __pycache__/
+results/quick/
+results/server/
+results/*/cache/
+results/*/prefit/
+results/*/fwi_runs/
+results/*/representation_models/
+results/*/*.lock
+results/*/*.tmp

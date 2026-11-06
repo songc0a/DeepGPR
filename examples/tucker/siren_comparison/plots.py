@@ -197,10 +197,12 @@ def figure5(rep: Dict, out: Path) -> None:
         axes[1].scatter(r["train_seconds"], err, color=color, marker=marker)
         if r.get("peak_allocated_bytes"):
             axes[2].scatter(r["peak_allocated_bytes"] / 2**20, err, color=color, marker=marker)
+        label = name + (" (diverged)" if err > 1.0 else "")
         for ax in axes[:3]:
-            ax.annotate(name, (p if ax is axes[0] else (r["train_seconds"] if ax is axes[1] else (r["peak_allocated_bytes"] or 0) / 2**20), err), fontsize=5)
+            ax.annotate(label, (p if ax is axes[0] else (r["train_seconds"] if ax is axes[1] else (r["peak_allocated_bytes"] or 0) / 2**20), err), fontsize=5)
     for ax, xl in zip(axes[:3], ("trainable parameters", "training time [s]", "peak GPU memory [MiB]")):
         ax.set_xscale("log")
+        ax.set_yscale("log")
         ax.set_xlabel(xl)
         ax.set_ylabel("eps RMSE (subsurface)")
     for prefix, color, label in (("tsiren_2x32_r", COLORS["r16"], "Tucker-SIREN 2x32"), ("direct_tucker_r", COLORS["direct"], "direct Tucker (optimized)")):
@@ -283,12 +285,13 @@ def figure7(fwi: Dict, results: Path, out: Path, quick: bool) -> None:
         sig = torch.log10(truth["sigma"].clamp_min(1e-6))
         sig_range = (float(sig.min()), float(sig.max()))
         for column, (label, eps, sigma) in enumerate(panels):
+            # Depth on the vertical axis: 3D slices are (y = depth, z); 2D models are (x, y = depth).
             if eps.dim() == 3:
                 eps_slice, sigma_slice = eps[eps.shape[0] // 2], sigma[sigma.shape[0] // 2]
             else:
-                eps_slice, sigma_slice = eps, sigma
-            axes[0, column].imshow(eps_slice.T.numpy(), cmap="viridis", vmin=eps_range[0], vmax=eps_range[1], aspect="auto")
-            axes[1, column].imshow(torch.log10(sigma_slice.clamp_min(1e-6)).T.numpy(), cmap="magma", vmin=sig_range[0], vmax=sig_range[1], aspect="auto")
+                eps_slice, sigma_slice = eps.T, sigma.T
+            axes[0, column].imshow(eps_slice.numpy(), cmap="viridis", vmin=eps_range[0], vmax=eps_range[1], aspect="auto")
+            axes[1, column].imshow(torch.log10(sigma_slice.clamp_min(1e-6)).numpy(), cmap="magma", vmin=sig_range[0], vmax=sig_range[1], aspect="auto")
             axes[0, column].set_title(label, fontsize=7)
             for row in (0, 1):
                 axes[row, column].set_xticks([])
