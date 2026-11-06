@@ -253,6 +253,36 @@ def v4_tables(fwi: Dict, search: Dict, search_sigma: Dict) -> List[str]:
     return lines
 
 
+def oracle_tables(fwi: Dict, oracle: Dict) -> List[str]:
+    """v4: data-selected runs vs the truth-selected reference (same searches)."""
+    lines = []
+    for case in ("3d", "2d"):
+        rows = {}
+        for source, results in (("data", fwi), ("oracle", oracle)):
+            for name, r in results.items():
+                if name.startswith(f"{case}|") and "history" in r:
+                    rows.setdefault(name.split("|")[1], {}).setdefault(source, []).append(r)
+        if not any("oracle" in v for v in rows.values()):
+            continue
+        lines += [f"### C. v4 reference ({case.upper()}): hyper-parameters selected by the data vs by the true model (oracle, reference only)", ""]
+        lines.append("| method | data: lr, sigma scale | data: zone eps RMSE | data: zone log10 sigma RMSE | oracle: lr, sigma scale | oracle: zone eps RMSE | oracle: zone log10 sigma RMSE | oracle runs |")
+        lines.append("|---|---|---|---|---|---|---|---|")
+        for label in sorted(rows, key=lambda l: (l != "dense", l)):
+            cells = []
+            for source in ("data", "oracle"):
+                runs = rows[label].get(source)
+                if not runs:
+                    cells += ["-", "-", "-"]
+                    continue
+                spec = runs[0]["spec"]
+                end = [r["history"][-1]["errors"] for r in runs]
+                cells += [f"{spec['lr']:g}, {spec.get('sigma_scale', 1):g}", f"{statistics.fmean(e['eps_zone']['rmse'] for e in end):.3f}",
+                          f"{statistics.fmean(e['sigma_log_zone']['rmse'] for e in end):.3f}" if "sigma_log_zone" in end[0] else "-"]
+            lines.append(f"| {label} | " + " | ".join(cells) + f" | {len(rows[label].get('oracle', []))} |")
+        lines.append("")
+    return lines
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--quick", action="store_true")
@@ -268,6 +298,7 @@ def main() -> None:
     lines += fwi_tables(load(results / "fwi.json"), load(results / "fwi_search.json"))
     if args.protocol == "v4":
         lines += v4_tables(load(results / "fwi.json"), load(results / "fwi_search.json"), load(results / "fwi_search_sigma.json"))
+        lines += oracle_tables(load(results / "fwi.json"), load(results / "fwi_oracle.json"))
     (results / "report_tables.md").write_text("\n".join(lines) + "\n")
     print("\n".join(lines[:5]))
 
