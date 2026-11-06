@@ -1,0 +1,19 @@
+2026-11-06 15:46:30 start
+2026-11-06 15:53:29 search_2d gpu5 pass1 exit 0
+2026-11-06 15:54:30 search_2d gpu5 pass2 exit 0
+2026-11-06 16:18:08 run_2d gpu5 pass1 exit 0
+2026-11-06 16:19:10 run_2d gpu5 pass2 exit 0
+2026-11-06 16:20:10 search_3d_b gpu3 pass1 exit 0
+2026-11-06 16:21:12 search_3d_b gpu3 pass2 exit 0
+2026-11-06 16:28:49 search_3d_a gpu7 pass1 exit 0
+2026-11-06 16:29:49 search_3d_c gpu5 pass1 exit 0
+2026-11-06 16:29:51 search_3d_a gpu7 pass2 exit 0
+2026-11-06 16:30:51 search_3d_c gpu5 pass2 exit 0
+2026-11-06 16:30:51 phase 1 done
+2026-11-06 18:30:03 run_3d_gpu5 gpu5 pass1 exit 0
+2026-11-06 18:31:04 run_3d_gpu5 gpu5 pass2 exit 0
+2026-11-06 18:53:35 run_3d_gpu3 gpu3 pass1 exit 0
+2026-11-06 18:54:36 run_3d_gpu3 gpu3 pass2 exit 0
+2026-11-06 19:02:41 run_3d_gpu7 gpu7 pass1 exit 0
+2026-11-06 19:03:42 run_3d_gpu7 gpu7 pass2 exit 0
+2026-11-06 19:03:42 ALL DONE

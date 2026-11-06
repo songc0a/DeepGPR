@@ -374,6 +374,110 @@ in 2D from a poor start they are clearly worse than the SIREN, and their
 separable structure produces stripe artefacts in sigma (and in eps when the
 learning rate is large).
 
+#### Why the 2D Tucker stripes are vertical
+
+The 2D case is a crosshole geometry: sources on the left edge of Fig. 7
+(y = 0), receivers on the right edge (y = ny - 1), waves travel along y.
+A separable model produces cross artefacts in both directions, but the data
+remove only one of them (`stripe_check.py`, `results/full_v2/stripe_check.json`):
+
+* adding 0.3 cos(2 pi y / L) to the true eps (stripes varying along the
+  propagation direction, vertical in Fig. 7) raises the loss to 1e-3 ... 3e-3,
+  the same stripes along x to 1.3e-2 ... 1.6e-1 (6-86 x more, L = 4 ... 20 cells):
+  transmission integrates along the path, so variations along it cancel;
+* removing the vertical-stripe part from the Tucker-SIREN r16 result
+  (rms 0.20) raises its loss from 0.0087 to 0.0116, removing the
+  horizontal-stripe part (rms 0.10) raises it to 0.0182;
+* the first dense gradient is nearly isotropic (vertical/horizontal 1.17),
+  the true update is mostly horizontal (0.53), the Tucker results are
+  vertical (1.3-2.5).
+
+The vertical stripes therefore sit in the near null space of the data;
+nothing in the v2 objective removes them.
+
+### 5.5 Round 3 (protocol v3: TV regularisation, 16 shots in 3D)
+
+Changes from v2 (`bench_fwi.py --protocol v3`, `results/full_v3/`,
+`run_v3_server.sh`), identical for every method:
+
+* the TV term of the FWI notebooks: anisotropic TV of eps and of sigma
+  (S/m) over the parameterized region, its gradient scaled to 0.1 (sigma in 3D:
+  0.08) times the norm of the data gradient and added to it in model space,
+  then back-propagated through the parameterization;
+* 3D: 16 shots on a 4 x 4 grid (x 24 ... 96, z 20 ... 80 cells) instead of
+  4 shots on a diagonal; each iteration now takes 9.2 s instead of 2.3 s.
+
+Start model, mapping, eps-only first third, iterations, learning-rate search
+and seeds are unchanged. All 56 search runs and 34 FWI runs completed (GPUs 3,
+5, 7, one job per GPU).
+
+2D (200 iterations):
+
+| method | final loss | eps RMSE (start 0.748) v2 -> v3 | eps SSIM v3 | log10 sigma RMSE (start 0.105) v2 -> v3 |
+|---|---|---|---|---|
+| dense (lr 0.1) | 8.4e-3 | 1.086 -> 0.939 | 0.650 | 0.225 -> 0.187 |
+| direct Tucker r16 | 8.4e-3 | 1.097 -> 0.844 | 0.706 | 0.220 -> 0.136 |
+| SIREN 4 x 128 | 2.0e-3 | 0.606 -> **0.543** | 0.654 | 0.085 -> **0.081** |
+| Tucker-SIREN r8 | 3.1e-2 | 0.749 -> 0.718 | 0.681 | 0.180 -> 0.162 |
+| Tucker-SIREN r12 | 2.1e-2 | 0.757 -> 0.710 | 0.568 | 0.173 -> 0.151 |
+| Tucker-SIREN r16 | 1.8e-2 | 0.796 -> 0.700 | 0.565 | 0.175 -> 0.157 |
+| Tucker-SIREN r24 | 1.4e-2 | 0.863 -> 0.707 | 0.540 | 0.123 -> 0.120 |
+
+TV improves every method; the Tucker parameterizations gain most (r24 0.86 ->
+0.71) and their stripes become weaker and coarser but do not disappear
+(Fig. 7). The SIREN stays clearly best and is the only method that improves
+sigma. Dense (learning rate 0.1 from the search) still moves away from the start
+in the first 25 iterations (0.735 -> 0.894).
+
+3D (150 iterations; zone = top 40 subsurface cells with a 4-cell lateral
+margin, deep = below 40 cells; final loss, zone, whole-model and sigma
+values are means over seeds, deep values seed 0):
+
+| method | final loss | zone eps RMSE (start 0.683) | deep eps RMSE (start 0.506) | eps RMSE (start 0.575) | log10 sigma RMSE (start 0.061) | sigma cells at a mapping bound | iteration | peak |
+|---|---|---|---|---|---|---|---|---|
+| dense (lr 0.1) | 1.1e-4 | 0.498 | 0.711 | 0.651 | 0.062 | 0 % | 9.18 s | 16.1 GiB |
+| direct Tucker r16 | 1.5e-3 | 0.561 | 0.631 | 0.622 | 0.227 | 17 % | 9.18 s | 16.1 GiB |
+| SIREN 4 x 128 | 1.2e-3 | **0.486** | 0.654 | **0.614** | 0.122 | 0 % | 9.31 s | 21.1 GiB |
+| Tucker-SIREN r8 | 7.6e-3 | 0.610 | 0.931 | 0.828 | 0.226 | 6 % | 9.18 s | 16.1 GiB |
+| Tucker-SIREN r12 | 9.4e-3 | 0.581 | 0.718 | 0.671 | 0.214 | 6 % | 9.17 s | 16.1 GiB |
+| Tucker-SIREN r16 | 3.6e-3 | 0.587 | 0.957 | 0.817 | 0.293 | 17 % | 9.16 s | 16.1 GiB |
+| Tucker-SIREN r24 | 1.1e-3 | 0.523 | 0.826 | 0.747 | 0.319 | 80 % | 9.18 s | 16.1 GiB |
+
+("sigma cells at a mapping bound": subsurface cells within 5 % of the
+log-sigma range of the mapping bounds, seed 0.)
+
+* With 16 shots the data now change the model: in the zone every method
+  improves (0.683 -> 0.49-0.62). SIREN (0.486) and dense (0.498) are best,
+  Tucker-SIREN r24 0.523, the other Tucker models 0.56-0.62; dense resolves the
+  folded layers most sharply (Fig. 7).
+* Below 40 cells, i.e. beyond what the 18 ns record reaches, every method
+  moves away from the start (0.506 -> 0.63-0.96), so the whole-model RMSE
+  rises. Dense: Adam turns the tiny deep gradients into full-size steps
+  (vertical streaks); Tucker models: the global factors carry shallow updates
+  into depth (r16: a column of blobs below the centre). In this 3D case the
+  zone RMSE, not the whole-model RMSE, measures accuracy.
+* Sigma does not change during the eps-only phase, except for the SIREN, whose
+  shared network moves sigma with eps (0.061 -> 0.044 after 5 iterations).
+  Once sigma is updated (iteration 50) it becomes worse for every
+  parameterized method: Tucker-SIREN 0.21-0.32 with horizontal bands pushed to
+  the mapping bounds, direct Tucker 0.23, SIREN 0.12; dense leaves it unchanged.
+  Cause: sigma uses the learning rate chosen by the 15-iteration search, which
+  lies entirely in the eps-only phase, so the sigma step size is never tested;
+  with a weak sigma gradient and Adam's per-parameter normalisation the shared
+  low-rank sigma factors take large coherent steps. Round 2 has the same
+  flaw (with 4 shots the effect was small).
+* Cost results are unchanged: SIREN +1.5 % time and +5 GiB peak, all
+  Tucker models as dense.
+
+Accuracy verdict after three rounds: the SIREN is the most accurate
+parameterization (2D eps and sigma, 3D zone eps); the Tucker models, with
+or without SIREN factors, are not more accurate than dense or SIREN, and
+produce stripe artefacts in the directions the data constrain least. Open
+protocol issues: a sigma learning rate (or step limit) that is selected
+in the joint phase, a learning-rate criterion that does not reward the
+fastest data fit (dense lr 0.1 hurts in 2D and in the deep 3D part), and
+3D evaluation restricted to the illuminated zone.
+
 ## 6. Answers
 
 | question | answer (measured) |
@@ -429,7 +533,9 @@ python bench_fwi.py search --case 2d && python bench_fwi.py run --case 2d   # C 
 python bench_fwi.py search --case 3d && python bench_fwi.py run --case 3d   # C 3D
 python report.py && python plots.py     # results/full/report_tables.md, figures/
 # round 2 (Section 5.4): same commands with --protocol v2 -> results/full_v2/
-# (server drivers: run_fwi_server.sh, run_v2_server.sh, rerun_v2_3d.sh)
+# round 3 (Section 5.5): --protocol v3 -> results/full_v3/
+# (server drivers: run_fwi_server.sh, run_v2_server.sh, rerun_v2_3d.sh, run_v3_server.sh)
+python stripe_check.py --protocol v2     # 2D stripe direction, results/full_v2/stripe_check.json
 python -m unittest discover -s ../../../tests -p "test_tucker_siren*.py"
 ```
 
@@ -441,4 +547,4 @@ skipped on re-runs, FWI runs checkpoint every 10 iterations and resume. Code:
 Figures: `results/full/figures/fig1_architecture.png` ...
 `fig7_reconstructions_{2d,3d}.png`; round 2: `results/full_v2/figures/fig4_*`,
 `fig6_*`, `fig7_*` (Fig. 7: 3D = x slice with depth downwards, 2D in the
-orientation of the FWI notebooks).
+orientation of the FWI notebooks); round 3: the same in `results/full_v3/figures/`.
