@@ -1,8 +1,10 @@
 """Round 4 (protocol v4) on a shared host: run the bench_fwi tasks on GPUs that are idle.
 
 Each task (stage-A search, stage-B search, one FWI run) is started on a GPU
-from ``--gpus`` that holds no process (>= 23000 MiB free at two checks 30 s
-apart) once its dependencies are done; a GPU runs one task at a time. Every
+from ``--gpus`` with enough free memory for it (``need_mib``: 2D 13000, 3D
+19000, 3D SIREN 23000; at two checks 30 s apart) once its dependencies are
+done; a GPU runs one of our tasks at a time and may be shared with other
+processes (v4 is about accuracy; timings come from rounds 1-3). Every
 task is run a second time after it exits (bench_fwi skips finished
 configurations and retries failed ones, e.g. after an OOM caused by another
 user). Usage::
@@ -22,6 +24,12 @@ HERE = Path(__file__).resolve().parent
 LOGS = HERE / "results" / "full_v4" / "logs"
 LABELS = ["dense", "siren_4x128", "tsiren_2x32_r8", "tsiren_2x32_r12", "tsiren_2x32_r16", "tsiren_2x32_r24", "direct_tucker_r16"]
 DETERMINISTIC = ("dense", "direct_tucker_r16")
+
+
+def need_mib(task) -> int:
+    if task["name"].startswith("2d"):
+        return 13000
+    return 23000 if "siren_4x128" in task["name"] else 19000
 
 
 def token(label: str) -> str:
@@ -79,10 +87,9 @@ def main() -> None:
             if gpu in running:
                 idle_since.pop(gpu, None)
                 continue
-            ready = [t for t in pending if all(d in done for d in t["deps"])]
+            free = free_mib(gpu)
+            ready = [t for t in pending if all(d in done for d in t["deps"]) and need_mib(t) <= free]
             if not ready:
-                continue
-            if free_mib(gpu) < 23000:
                 idle_since.pop(gpu, None)
                 continue
             if time.time() - idle_since.setdefault(gpu, time.time()) < 30:
