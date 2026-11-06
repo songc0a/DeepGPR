@@ -272,6 +272,7 @@ def figure7(fwi: Dict, results: Path, out: Path, quick: bool) -> None:
         if not finals:
             continue
         truth = bt.build_case(quick, "cpu") if case == "3d" else bt.build_case_2d("cpu", quick)
+        initial = torch.load(run_dir / "initial.pt") if (run_dir / "initial.pt").exists() else {"eps": truth["eps_init"], "sigma": truth["sigma_init"]}
         panels = [("true", truth["eps"], truth["sigma"])]
         order = ["dense", "siren_4x128", "tsiren_2x32_r8", "tsiren_2x32_r12", "tsiren_2x32_r16", "tsiren_2x32_r24", "direct_tucker_r16"]
         for label in order:
@@ -279,17 +280,20 @@ def figure7(fwi: Dict, results: Path, out: Path, quick: bool) -> None:
             if path.exists():
                 data = torch.load(path)
                 panels.append((label, data["eps"], data["sigma"]))
-        panels.append(("initial", truth["eps_init"], truth["sigma_init"]))
-        fig, axes = plt.subplots(2, len(panels), figsize=(2.1 * len(panels), 4.6))
+        panels.append(("initial", initial["eps"], initial["sigma"]))
+        tall = eps_ratio = panels[0][1].dim() == 2
+        fig, axes = plt.subplots(2, len(panels), figsize=(1.7 * len(panels), 6.4 if tall else 4.6))
         eps_range = (float(truth["eps"].min()), float(truth["eps"].max()))
         sig = torch.log10(truth["sigma"].clamp_min(1e-6))
         sig_range = (float(sig.min()), float(sig.max()))
         for column, (label, eps, sigma) in enumerate(panels):
-            # Depth on the vertical axis: 3D slices are (y = depth, z); 2D models are (x, y = depth).
+            # Display conventions of the example notebooks: 3D slice eps[x_mid] =
+            # (y = depth, z), 3.3DFWI.ipynb; 2D imshow(eps) = (x vertical, y
+            # horizontal), 2.2DFWI.ipynb (x is depth, boreholes at y = 0 and ny-1).
             if eps.dim() == 3:
                 eps_slice, sigma_slice = eps[eps.shape[0] // 2], sigma[sigma.shape[0] // 2]
             else:
-                eps_slice, sigma_slice = eps.T, sigma.T
+                eps_slice, sigma_slice = eps, sigma
             axes[0, column].imshow(eps_slice.numpy(), cmap="viridis", vmin=eps_range[0], vmax=eps_range[1], aspect="auto")
             axes[1, column].imshow(torch.log10(sigma_slice.clamp_min(1e-6)).numpy(), cmap="magma", vmin=sig_range[0], vmax=sig_range[1], aspect="auto")
             axes[0, column].set_title(label, fontsize=7)
@@ -305,14 +309,17 @@ def figure7(fwi: Dict, results: Path, out: Path, quick: bool) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--quick", action="store_true")
+    parser.add_argument("--protocol", default="v1", choices=["v1", "v2"])
     args = parser.parse_args()
-    results = HERE / "results" / ("quick" if args.quick else "full")
+    base = "quick" if args.quick else "full"
+    results = HERE / "results" / (base if args.protocol == "v1" else f"{base}_{args.protocol}")
+    shared = HERE / "results" / base  # generation / representation results are protocol-independent
     out = results / "figures"
     figure1(out)
-    figure2_3(load(results / "generation.json"), out)
+    figure2_3(load(shared / "generation.json"), out)
     fwi = load(results / "fwi.json")
     figure4(fwi, out)
-    figure5(load(results / "representation.json"), out)
+    figure5(load(shared / "representation.json"), out)
     figure6(fwi, out)
     figure7(fwi, results, out, args.quick)
     print("figures in", out)

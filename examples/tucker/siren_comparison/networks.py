@@ -291,6 +291,41 @@ class DenseField(MaterialField):
         return {"voxels": self.trainable_parameters(), "total": self.trainable_parameters()}
 
 
+class FixedTopField(MaterialField):
+    """A field over the subsurface plus a fixed (known) air layer on top (axis 1)."""
+
+    def __init__(self, field: MaterialField, eps_top: torch.Tensor, sigma_top: torch.Tensor):
+        super().__init__()
+        self.field = field
+        self.mapping = field.mapping
+        self.register_buffer("eps_top", eps_top.clone())
+        self.register_buffer("sigma_top", sigma_top.clone())
+
+    def forward(self):  # type: ignore[override]
+        eps, sigma = self.field()
+        return torch.cat([self.eps_top, eps], dim=1), torch.cat([self.sigma_top, sigma], dim=1)
+
+    def parameter_breakdown(self):
+        return self.field.parameter_breakdown()
+
+
+def gaussian_smooth(x: torch.Tensor, sigma: float) -> torch.Tensor:
+    """Separable Gaussian filter, edge-replicating (as skimage.filters.gaussian, mode 'nearest')."""
+    radius = int(4.0 * sigma + 0.5)
+    t = torch.arange(-radius, radius + 1, dtype=torch.float64, device=x.device)
+    kernel = torch.exp(-0.5 * (t / sigma) ** 2)
+    kernel = (kernel / kernel.sum()).to(x.dtype)
+    y = x
+    for axis in range(x.dim()):
+        moved = torch.movedim(y, axis, -1)
+        shape = moved.shape
+        flat = moved.reshape(-1, 1, shape[-1])
+        flat = torch.nn.functional.pad(flat, (radius, radius), mode="replicate")
+        flat = torch.nn.functional.conv1d(flat, kernel.view(1, 1, -1))
+        y = torch.movedim(flat.reshape(shape), -1, axis)
+    return y
+
+
 # ---------------------------------------------------------------------------
 # Initialisation helpers
 # ---------------------------------------------------------------------------
@@ -357,7 +392,9 @@ def prefit_field(field: MaterialField, t_eps: torch.Tensor, t_sigma: torch.Tenso
 __all__ = [
     "DenseField",
     "DirectTuckerField",
+    "FixedTopField",
     "MaterialField",
+    "gaussian_smooth",
     "PropertyMapping",
     "SineLayer",
     "Siren",
