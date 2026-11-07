@@ -1,0 +1,252 @@
+2026-11-06 19:20:49 start, 34 tasks, GPUs ['3', '5', '7']
+2026-11-06 19:21:19 3d_A_dense gpu3 pass1 start
+2026-11-06 19:21:19 3d_A_siren_4x128 gpu5 pass1 start
+2026-11-06 19:29:07 3d_A_dense gpu3 pass1 exit 0
+2026-11-06 19:29:37 3d_A_dense gpu3 pass2 start
+2026-11-06 19:29:47 3d_A_dense gpu3 pass2 exit 0
+2026-11-06 19:30:18 3d_A_tsiren_2x32_r8 gpu3 pass1 start
+2026-11-06 19:38:46 3d_A_tsiren_2x32_r8 gpu3 pass1 exit 0
+2026-11-06 19:39:17 3d_A_tsiren_2x32_r8 gpu3 pass2 start
+2026-11-06 19:39:27 3d_A_tsiren_2x32_r8 gpu3 pass2 exit 0
+2026-11-06 19:39:57 3d_A_tsiren_2x32_r12 gpu3 pass1 start
+2026-11-06 19:40:27 3d_A_siren_4x128 gpu5 pass1 exit 0
+2026-11-06 19:40:58 3d_A_siren_4x128 gpu5 pass2 start
+2026-11-06 19:41:08 3d_A_siren_4x128 gpu5 pass2 exit 0
+2026-11-06 19:41:38 3d_A_tsiren_2x32_r16 gpu5 pass1 start
+2026-11-06 19:48:24 3d_A_tsiren_2x32_r12 gpu3 pass1 exit 0
+2026-11-06 19:49:46 3d_A_tsiren_2x32_r12 gpu3 pass2 start
+2026-11-06 19:49:56 3d_A_tsiren_2x32_r12 gpu3 pass2 exit 0
+2026-11-06 19:50:06 3d_A_tsiren_2x32_r16 gpu5 pass1 exit 0
+2026-11-06 19:50:26 3d_A_tsiren_2x32_r16 gpu3 pass2 start
+2026-11-06 19:50:36 3d_A_tsiren_2x32_r16 gpu3 pass2 exit 0
+2026-11-06 19:51:17 3d_A_tsiren_2x32_r24 gpu5 pass1 start
+2026-11-06 19:51:37 3d_A_direct_tucker_r16 gpu3 pass1 start
+2026-11-06 19:56:11 3d_A_tsiren_2x32_r24 gpu5 pass1 exit 0
+2026-11-06 19:59:35 3d_A_direct_tucker_r16 gpu3 pass1 exit 0
+2026-11-06 20:37:03 3d_A_direct_tucker_r16 gpu5 pass2 start
+2026-11-06 20:37:13 3d_A_direct_tucker_r16 gpu5 pass2 exit 0
+2026-11-06 20:37:44 3d_A_tsiren_2x32_r24 gpu5 pass2 start
+2026-11-06 20:41:59 3d_A_tsiren_2x32_r24 gpu5 pass2 exit 0
+2026-11-06 21:05:34 2d_A gpu5 pass1 start
+2026-11-06 21:12:40 3d_B_dense gpu3 pass1 start
+2026-11-06 21:13:51 2d_A gpu5 pass1 exit 0
+2026-11-06 21:22:19 3d_B_dense gpu3 pass1 exit 0
+2026-11-06 21:51:24 3d_B_dense gpu3 pass2 start
+2026-11-06 21:51:34 3d_B_dense gpu3 pass2 exit 0
+2026-11-06 22:11:31 scheduler restarted (memory-aware dispatch)
+2026-11-06 22:11:31 start, 34 tasks, GPUs ['3', '5', '7']
+2026-11-06 22:12:02 2d_A gpu7 pass1 start
+2026-11-06 22:12:12 2d_A gpu7 pass1 exit 0
+2026-11-06 22:12:42 2d_A gpu7 pass2 start
+2026-11-06 22:12:52 2d_A gpu7 pass2 exit 0
+2026-11-06 22:13:23 2d_B gpu7 pass1 start
+2026-11-06 22:20:39 2d_B gpu7 pass1 exit 0
+2026-11-06 22:21:09 2d_B gpu7 pass2 start
+2026-11-06 22:21:19 2d_B gpu7 pass2 exit 0
+2026-11-06 23:54:52 2d_runs gpu7 pass1 start
+2026-11-07 00:18:29 2d_runs gpu7 pass1 exit 0
+2026-11-07 00:18:59 2d_runs gpu7 pass2 start
+2026-11-07 00:19:09 2d_runs gpu7 pass2 exit 0
+2026-11-07 00:32:34 3d_A_dense gpu3 pass1 start
+2026-11-07 00:32:44 3d_A_dense gpu3 pass1 exit 0
+2026-11-07 00:33:15 3d_A_dense gpu3 pass2 start
+2026-11-07 00:33:25 3d_A_dense gpu3 pass2 exit 0
+2026-11-07 00:33:55 3d_A_siren_4x128 gpu3 pass1 start
+2026-11-07 00:34:05 3d_A_siren_4x128 gpu3 pass1 exit 0
+2026-11-07 00:34:37 3d_A_siren_4x128 gpu3 pass2 start
+2026-11-07 00:34:47 3d_A_siren_4x128 gpu3 pass2 exit 0
+2026-11-07 00:35:17 3d_A_tsiren_2x32_r8 gpu3 pass1 start
+2026-11-07 00:35:27 3d_A_tsiren_2x32_r8 gpu3 pass1 exit 0
+2026-11-07 00:35:58 3d_A_tsiren_2x32_r8 gpu3 pass2 start
+2026-11-07 00:36:08 3d_A_tsiren_2x32_r8 gpu3 pass2 exit 0
+2026-11-07 00:36:38 3d_A_tsiren_2x32_r12 gpu3 pass1 start
+2026-11-07 00:36:49 3d_A_tsiren_2x32_r12 gpu3 pass1 exit 0
+2026-11-07 00:38:00 3d_A_tsiren_2x32_r12 gpu3 pass2 start
+2026-11-07 00:38:11 3d_A_tsiren_2x32_r12 gpu3 pass2 exit 0
+2026-11-07 00:38:41 3d_A_tsiren_2x32_r16 gpu3 pass1 start
+2026-11-07 00:38:51 3d_A_tsiren_2x32_r16 gpu3 pass1 exit 0
+2026-11-07 00:40:23 3d_A_tsiren_2x32_r16 gpu3 pass2 start
+2026-11-07 00:40:34 3d_A_tsiren_2x32_r16 gpu3 pass2 exit 0
+2026-11-07 00:41:04 3d_A_tsiren_2x32_r24 gpu3 pass1 start
+2026-11-07 00:41:14 3d_A_tsiren_2x32_r24 gpu3 pass1 exit 0
+2026-11-07 00:41:45 3d_A_tsiren_2x32_r24 gpu3 pass2 start
+2026-11-07 00:41:55 3d_A_tsiren_2x32_r24 gpu3 pass2 exit 0
+2026-11-07 00:46:09 3d_A_direct_tucker_r16 gpu5 pass1 start
+2026-11-07 00:46:19 3d_A_direct_tucker_r16 gpu5 pass1 exit 0
+2026-11-07 00:46:51 3d_A_direct_tucker_r16 gpu5 pass2 start
+2026-11-07 00:47:01 3d_A_direct_tucker_r16 gpu5 pass2 exit 0
+2026-11-07 00:47:31 3d_B_dense gpu5 pass1 start
+2026-11-07 00:47:41 3d_B_dense gpu5 pass1 exit 0
+2026-11-07 00:48:12 3d_B_dense gpu5 pass2 start
+2026-11-07 00:48:22 3d_B_dense gpu5 pass2 exit 0
+2026-11-07 00:48:52 3d_B_siren_4x128 gpu5 pass1 start
+2026-11-07 01:12:40 3d_B_siren_4x128 gpu5 pass1 exit 0
+2026-11-07 01:13:10 3d_B_siren_4x128 gpu5 pass2 start
+2026-11-07 01:13:20 3d_B_siren_4x128 gpu5 pass2 exit 0
+2026-11-07 01:15:02 3d_B_tsiren_2x32_r8 gpu5 pass1 start
+2026-11-07 01:23:58 3d_B_tsiren_2x32_r8 gpu5 pass1 exit 0
+2026-11-07 02:24:50 3d_B_tsiren_2x32_r8 gpu5 pass2 start
+2026-11-07 02:25:00 extras: 2d_oracle_B gpu7 pass1 start
+2026-11-07 02:27:01 3d_B_tsiren_2x32_r8 gpu5 pass2 exit 0
+2026-11-07 02:27:32 3d_B_tsiren_2x32_r12 gpu5 pass1 start
+2026-11-07 02:30:09 extras: 2d_oracle_B gpu7 pass1 exit 0
+2026-11-07 02:38:08 3d_B_tsiren_2x32_r12 gpu5 pass1 exit 0
+2026-11-07 02:47:43 extras: 2d_oracle_B gpu7 pass2 start
+2026-11-07 02:53:51 extras: 2d_oracle_B gpu7 pass2 exit 0
+2026-11-07 02:54:22 extras: 2d_oracle_runs gpu7 pass1 start
+2026-11-07 03:17:08 extras: 2d_oracle_runs gpu7 pass1 exit 0
+2026-11-07 03:17:39 extras: 2d_oracle_runs gpu7 pass2 start
+2026-11-07 03:17:40 extras: 2d_oracle_runs gpu7 pass2 exit 0
+2026-11-07 03:18:10 extras: stripe_check_v3 gpu7 pass1 start
+2026-11-07 03:18:15 extras: stripe_check_v3 gpu7 pass1 exit 0
+2026-11-07 03:18:45 extras: stripe_check_v3 gpu7 pass2 start
+2026-11-07 03:18:50 extras: stripe_check_v3 gpu7 pass2 exit 0
+2026-11-07 03:18:50 extras: DONE
+2026-11-07 03:32:51 scheduler restarted: exact checkpointing (FWI_CHECKPOINT_STEPS=60), dense/SIREN 3D runs reused from v3 (identical configuration)
+2026-11-07 03:32:51 start, 34 tasks, GPUs ['3', '5', '7']
+2026-11-07 03:33:21 3d_A_dense gpu5 pass1 start
+2026-11-07 03:33:21 3d_A_tsiren_2x32_r8 gpu7 pass1 start
+2026-11-07 03:33:31 3d_A_dense gpu5 pass1 exit 0
+2026-11-07 03:33:31 3d_A_tsiren_2x32_r8 gpu7 pass1 exit 0
+2026-11-07 03:34:02 3d_A_tsiren_2x32_r8 gpu5 pass2 start
+2026-11-07 03:34:03 3d_A_dense gpu7 pass2 start
+2026-11-07 03:34:13 3d_A_tsiren_2x32_r8 gpu5 pass2 exit 0
+2026-11-07 03:34:13 3d_A_dense gpu7 pass2 exit 0
+2026-11-07 03:34:43 3d_A_siren_4x128 gpu5 pass1 start
+2026-11-07 03:34:43 3d_A_tsiren_2x32_r12 gpu7 pass1 start
+2026-11-07 03:34:53 3d_A_siren_4x128 gpu5 pass1 exit 0
+2026-11-07 03:34:53 3d_A_tsiren_2x32_r12 gpu7 pass1 exit 0
+2026-11-07 03:35:24 3d_A_tsiren_2x32_r12 gpu5 pass2 start
+2026-11-07 03:35:34 3d_A_tsiren_2x32_r12 gpu5 pass2 exit 0
+2026-11-07 03:36:04 3d_A_siren_4x128 gpu5 pass2 start
+2026-11-07 03:36:14 3d_A_siren_4x128 gpu5 pass2 exit 0
+2026-11-07 03:36:45 3d_A_tsiren_2x32_r16 gpu5 pass1 start
+2026-11-07 03:36:55 3d_A_tsiren_2x32_r16 gpu5 pass1 exit 0
+2026-11-07 03:37:26 3d_A_tsiren_2x32_r16 gpu5 pass2 start
+2026-11-07 03:37:36 3d_A_tsiren_2x32_r16 gpu5 pass2 exit 0
+2026-11-07 03:45:04 3d_A_tsiren_2x32_r24 gpu3 pass1 start
+2026-11-07 03:45:14 3d_A_tsiren_2x32_r24 gpu3 pass1 exit 0
+2026-11-07 03:45:14 3d_A_tsiren_2x32_r24 gpu5 pass2 start
+2026-11-07 03:45:24 3d_A_tsiren_2x32_r24 gpu5 pass2 exit 0
+2026-11-07 03:45:35 3d_A_direct_tucker_r16 gpu7 pass1 start
+2026-11-07 03:45:45 3d_A_direct_tucker_r16 gpu7 pass1 exit 0
+2026-11-07 03:45:45 3d_A_direct_tucker_r16 gpu3 pass2 start
+2026-11-07 03:45:55 3d_A_direct_tucker_r16 gpu3 pass2 exit 0
+2026-11-07 03:45:55 3d_B_dense gpu5 pass1 start
+2026-11-07 03:46:05 3d_B_dense gpu5 pass1 exit 0
+2026-11-07 03:46:15 3d_B_dense gpu7 pass2 start
+2026-11-07 03:46:25 3d_B_dense gpu7 pass2 exit 0
+2026-11-07 03:46:25 3d_B_tsiren_2x32_r8 gpu3 pass1 start
+2026-11-07 03:46:36 3d_B_tsiren_2x32_r8 gpu3 pass1 exit 0
+2026-11-07 03:46:36 3d_B_tsiren_2x32_r8 gpu5 pass2 start
+2026-11-07 03:46:46 3d_B_tsiren_2x32_r8 gpu5 pass2 exit 0
+2026-11-07 03:46:57 2d_A gpu7 pass1 start
+2026-11-07 03:47:07 2d_A gpu7 pass1 exit 0
+2026-11-07 03:47:37 3d_B_tsiren_2x32_r12 gpu7 pass1 start
+2026-11-07 03:47:47 3d_B_tsiren_2x32_r12 gpu7 pass1 exit 0
+2026-11-07 03:48:18 3d_B_tsiren_2x32_r12 gpu7 pass2 start
+2026-11-07 03:48:28 3d_B_tsiren_2x32_r12 gpu7 pass2 exit 0
+2026-11-07 03:48:58 3d_B_tsiren_2x32_r16 gpu7 pass1 start
+2026-11-07 03:50:29 3d_B_tsiren_2x32_r24 gpu3 pass1 start
+2026-11-07 03:57:13 3d_B_direct_tucker_r16 gpu5 pass1 start
+2026-11-07 03:58:53 3d_B_tsiren_2x32_r16 gpu7 pass1 exit 0
+2026-11-07 04:04:45 3d_B_tsiren_2x32_r16 gpu7 pass2 start
+2026-11-07 04:18:26 3d_B_tsiren_2x32_r24 gpu3 pass1 exit 0
+2026-11-07 04:18:56 3d_B_tsiren_2x32_r24 gpu3 pass2 start
+2026-11-07 04:19:06 3d_B_tsiren_2x32_r24 gpu3 pass2 exit 0
+2026-11-07 04:19:37 3d_B_siren_4x128 gpu3 pass1 start
+2026-11-07 04:19:47 3d_B_siren_4x128 gpu3 pass1 exit 0
+2026-11-07 04:20:17 3d_B_siren_4x128 gpu3 pass2 start
+2026-11-07 04:20:27 3d_B_siren_4x128 gpu3 pass2 exit 0
+2026-11-07 04:20:57 3d_run_dense_s0 gpu3 pass1 start
+2026-11-07 04:21:07 3d_run_dense_s0 gpu3 pass1 exit 0
+2026-11-07 04:21:28 3d_B_tsiren_2x32_r16 gpu7 pass2 exit 0
+2026-11-07 04:21:38 3d_run_dense_s0 gpu3 pass2 start
+2026-11-07 04:21:48 3d_run_dense_s0 gpu3 pass2 exit 0
+2026-11-07 04:21:58 3d_run_tsiren_2x32_r8_s0 gpu7 pass1 start
+2026-11-07 04:22:19 3d_run_siren_4x128_s0 gpu3 pass1 start
+2026-11-07 04:22:29 3d_run_siren_4x128_s0 gpu3 pass1 exit 0
+2026-11-07 04:22:59 3d_run_siren_4x128_s0 gpu3 pass2 start
+2026-11-07 04:23:09 3d_run_siren_4x128_s0 gpu3 pass2 exit 0
+2026-11-07 04:23:39 3d_run_tsiren_2x32_r12_s0 gpu3 pass1 start
+2026-11-07 04:38:30 3d_B_direct_tucker_r16 gpu5 pass1 exit 0
+2026-11-07 04:39:00 3d_B_direct_tucker_r16 gpu5 pass2 start
+2026-11-07 04:39:10 3d_B_direct_tucker_r16 gpu5 pass2 exit 0
+2026-11-07 04:39:41 3d_run_tsiren_2x32_r16_s0 gpu5 pass1 start
+2026-11-07 05:49:34 3d_run_tsiren_2x32_r8_s0 gpu7 pass1 exit 0
+2026-11-07 05:50:05 3d_run_tsiren_2x32_r8_s0 gpu7 pass2 start
+2026-11-07 05:50:15 3d_run_tsiren_2x32_r8_s0 gpu7 pass2 exit 0
+2026-11-07 05:50:45 3d_run_tsiren_2x32_r24_s0 gpu7 pass1 start
+2026-11-07 06:09:56 3d_run_tsiren_2x32_r12_s0 gpu3 pass1 exit 0
+2026-11-07 06:10:26 3d_run_tsiren_2x32_r12_s0 gpu3 pass2 start
+2026-11-07 06:10:36 3d_run_tsiren_2x32_r12_s0 gpu3 pass2 exit 0
+2026-11-07 06:11:06 3d_run_direct_tucker_r16_s0 gpu3 pass1 start
+2026-11-07 06:25:17 3d_run_tsiren_2x32_r16_s0 gpu5 pass1 exit 0
+2026-11-07 06:25:47 3d_run_tsiren_2x32_r16_s0 gpu5 pass2 start
+2026-11-07 06:25:57 3d_run_tsiren_2x32_r16_s0 gpu5 pass2 exit 0
+2026-11-07 06:26:28 3d_run_siren_4x128_s1 gpu5 pass1 start
+2026-11-07 06:26:38 3d_run_siren_4x128_s1 gpu5 pass1 exit 0
+2026-11-07 06:27:08 3d_run_siren_4x128_s1 gpu5 pass2 start
+2026-11-07 06:27:18 3d_run_siren_4x128_s1 gpu5 pass2 exit 0
+2026-11-07 06:27:48 3d_run_tsiren_2x32_r8_s1 gpu5 pass1 start
+2026-11-07 06:43:19 3d_run_tsiren_2x32_r24_s0 gpu7 pass1 exit 0
+2026-11-07 07:05:18 3d_run_tsiren_2x32_r24_s0 gpu7 pass2 start
+2026-11-07 07:05:28 3d_run_tsiren_2x32_r24_s0 gpu7 pass2 exit 0
+2026-11-07 07:05:59 3d_run_tsiren_2x32_r12_s1 gpu7 pass1 start
+2026-11-07 07:56:51 3d_run_direct_tucker_r16_s0 gpu3 pass1 exit 0
+2026-11-07 07:57:22 3d_run_direct_tucker_r16_s0 gpu3 pass2 start
+2026-11-07 07:57:32 3d_run_direct_tucker_r16_s0 gpu3 pass2 exit 0
+2026-11-07 07:58:02 3d_run_tsiren_2x32_r16_s1 gpu3 pass1 start
+2026-11-07 07:58:52 3d_run_tsiren_2x32_r12_s1 gpu7 pass1 exit 0
+2026-11-07 07:59:22 3d_run_tsiren_2x32_r12_s1 gpu7 pass2 start
+2026-11-07 07:59:32 3d_run_tsiren_2x32_r12_s1 gpu7 pass2 exit 0
+2026-11-07 08:00:02 3d_run_tsiren_2x32_r24_s1 gpu7 pass1 start
+2026-11-07 08:13:53 3d_run_tsiren_2x32_r8_s1 gpu5 pass1 exit 0
+2026-11-07 08:14:23 3d_run_tsiren_2x32_r8_s1 gpu5 pass2 start
+2026-11-07 08:14:33 3d_run_tsiren_2x32_r8_s1 gpu5 pass2 exit 0
+2026-11-07 08:15:04 3d_run_siren_4x128_s2 gpu5 pass1 start
+2026-11-07 08:15:14 3d_run_siren_4x128_s2 gpu5 pass1 exit 0
+2026-11-07 08:15:44 3d_run_siren_4x128_s2 gpu5 pass2 start
+2026-11-07 08:15:54 3d_run_siren_4x128_s2 gpu5 pass2 exit 0
+2026-11-07 08:16:24 3d_run_tsiren_2x32_r8_s2 gpu5 pass1 start
+2026-11-07 08:52:27 3d_run_tsiren_2x32_r24_s1 gpu7 pass1 exit 0
+2026-11-07 08:52:57 3d_run_tsiren_2x32_r24_s1 gpu7 pass2 start
+2026-11-07 08:53:07 3d_run_tsiren_2x32_r24_s1 gpu7 pass2 exit 0
+2026-11-07 08:53:37 3d_run_tsiren_2x32_r12_s2 gpu7 pass1 start
+2026-11-07 09:38:29 3d_run_tsiren_2x32_r16_s1 gpu3 pass1 exit 0
+2026-11-07 09:39:00 3d_run_tsiren_2x32_r16_s1 gpu3 pass2 start
+2026-11-07 09:39:10 3d_run_tsiren_2x32_r16_s1 gpu3 pass2 exit 0
+2026-11-07 09:39:40 3d_run_tsiren_2x32_r16_s2 gpu3 pass1 start
+2026-11-07 09:46:10 3d_run_tsiren_2x32_r12_s2 gpu7 pass1 exit 0
+2026-11-07 09:46:41 3d_run_tsiren_2x32_r12_s2 gpu7 pass2 start
+2026-11-07 09:46:51 3d_run_tsiren_2x32_r12_s2 gpu7 pass2 exit 0
+2026-11-07 09:47:21 3d_run_tsiren_2x32_r24_s2 gpu7 pass1 start
+2026-11-07 10:03:12 3d_run_tsiren_2x32_r8_s2 gpu5 pass1 exit 0
+2026-11-07 10:03:42 3d_run_tsiren_2x32_r8_s2 gpu5 pass2 start
+2026-11-07 10:03:52 3d_run_tsiren_2x32_r8_s2 gpu5 pass2 exit 0
+2026-11-07 10:05:13 2d_A gpu5 pass2 start
+2026-11-07 10:05:23 2d_A gpu5 pass2 exit 0
+2026-11-07 10:05:53 2d_B gpu5 pass1 start
+2026-11-07 10:06:03 2d_B gpu5 pass1 exit 0
+2026-11-07 10:06:33 2d_B gpu5 pass2 start
+2026-11-07 10:06:43 2d_B gpu5 pass2 exit 0
+2026-11-07 10:07:14 2d_runs gpu5 pass1 start
+2026-11-07 10:07:24 2d_runs gpu5 pass1 exit 0
+2026-11-07 10:07:54 2d_runs gpu5 pass2 start
+2026-11-07 10:08:04 2d_runs gpu5 pass2 exit 0
+2026-11-07 10:40:05 reference3d: siren_4x128 gpu5 start (timeout 11995s)
+2026-11-07 11:05:11 reference3d: tsiren_2x32_r24 gpu7 start (timeout 10489s)
+2026-11-07 11:05:12 reference3d: tsiren_2x32_r16 gpu7 start (timeout 10488s)
+2026-11-07 11:05:33 reference3d: tsiren_2x32_r16 gpu7 exit 0
+2026-11-07 11:23:42 3d_run_tsiren_2x32_r24_s2 gpu7 pass1 exit 0
+2026-11-07 11:24:13 3d_run_tsiren_2x32_r24_s2 gpu7 pass2 start
+2026-11-07 11:24:23 3d_run_tsiren_2x32_r24_s2 gpu7 pass2 exit 0
+2026-11-07 11:26:04 3d_run_tsiren_2x32_r16_s2 gpu3 pass1 exit 0
+2026-11-07 11:26:35 3d_run_tsiren_2x32_r16_s2 gpu3 pass2 start
+2026-11-07 11:26:45 3d_run_tsiren_2x32_r16_s2 gpu3 pass2 exit 0
+2026-11-07 11:26:55 ALL DONE
+2026-11-07 11:28:15 reference3d: tsiren_2x32_r16 restart gpu3 after OOM (both references had picked gpu7; timeout 9105s)
+2026-11-07 11:51:04 reference3d: tsiren_2x32_r24 gpu7 exit 0
+2026-11-07 12:31:47 reference3d: siren_4x128 gpu5 exit 0
+2026-11-07 12:31:47 reference3d: DONE
+2026-11-07 13:14:57 reference3d: tsiren_2x32_r16 gpu3 exit 0

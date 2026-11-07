@@ -1,0 +1,62 @@
+A) rms of vertical-stripe part S_v / horizontal-stripe part S_h of (final - initial)
+  truth                        eps S_v 0.080 S_h 0.151 (v/h  0.53)   log10 sigma S_v 0.012 S_h 0.023 (v/h  0.51)
+  dense|seed0                  eps S_v 0.174 S_h 0.233 (v/h  0.75)   log10 sigma S_v 0.030 S_h 0.040 (v/h  0.73)
+  direct_tucker_r16|seed0      eps S_v 0.101 S_h 0.170 (v/h  0.59)   log10 sigma S_v 0.020 S_h 0.026 (v/h  0.76)
+  siren_4x128|seed0            eps S_v 0.077 S_h 0.082 (v/h  0.94)   log10 sigma S_v 0.010 S_h 0.009 (v/h  1.05)
+  siren_4x128|seed1            eps S_v 0.068 S_h 0.086 (v/h  0.80)   log10 sigma S_v 0.011 S_h 0.009 (v/h  1.31)
+  siren_4x128|seed2            eps S_v 0.072 S_h 0.082 (v/h  0.88)   log10 sigma S_v 0.012 S_h 0.010 (v/h  1.30)
+  tsiren_2x32_r12|seed0        eps S_v 0.075 S_h 0.080 (v/h  0.94)   log10 sigma S_v 0.018 S_h 0.026 (v/h  0.67)
+  tsiren_2x32_r12|seed1        eps S_v 0.060 S_h 0.094 (v/h  0.63)   log10 sigma S_v 0.022 S_h 0.027 (v/h  0.80)
+  tsiren_2x32_r12|seed2        eps S_v 0.072 S_h 0.094 (v/h  0.76)   log10 sigma S_v 0.027 S_h 0.031 (v/h  0.88)
+  tsiren_2x32_r16|seed0        eps S_v 0.092 S_h 0.086 (v/h  1.08)   log10 sigma S_v 0.013 S_h 0.020 (v/h  0.63)
+  tsiren_2x32_r16|seed1        eps S_v 0.073 S_h 0.095 (v/h  0.77)   log10 sigma S_v 0.029 S_h 0.028 (v/h  1.06)
+  tsiren_2x32_r16|seed2        eps S_v 0.059 S_h 0.101 (v/h  0.58)   log10 sigma S_v 0.025 S_h 0.036 (v/h  0.68)
+  tsiren_2x32_r24|seed0        eps S_v 0.073 S_h 0.126 (v/h  0.58)   log10 sigma S_v 0.017 S_h 0.025 (v/h  0.66)
+  tsiren_2x32_r24|seed1        eps S_v 0.076 S_h 0.100 (v/h  0.76)   log10 sigma S_v 0.019 S_h 0.030 (v/h  0.64)
+  tsiren_2x32_r24|seed2        eps S_v 0.119 S_h 0.098 (v/h  1.22)   log10 sigma S_v 0.018 S_h 0.017 (v/h  1.03)
+  tsiren_2x32_r8|seed0         eps S_v 0.055 S_h 0.055 (v/h  1.00)   log10 sigma S_v 0.015 S_h 0.021 (v/h  0.71)
+  tsiren_2x32_r8|seed1         eps S_v 0.051 S_h 0.055 (v/h  0.93)   log10 sigma S_v 0.028 S_h 0.019 (v/h  1.49)
+  tsiren_2x32_r8|seed2         eps S_v 0.047 S_h 0.052 (v/h  0.91)   log10 sigma S_v 0.015 S_h 0.022 (v/h  0.70)
+B) loss of truth + 0.3 cos(2 pi y / L) (vertical stripes) vs + 0.3 cos(2 pi x / L) (horizontal)
+  period   4 cells: vertical 1.22e-03  horizontal 1.27e-02  ratio h/v    10.4
+  period   6 cells: vertical 2.73e-03  horizontal 1.78e-02  ratio h/v     6.5
+  period   8 cells: vertical 1.80e-03  horizontal 2.98e-02  ratio h/v    16.6
+  period  12 cells: vertical 8.84e-04  horizontal 6.44e-02  ratio h/v    72.8
+  period  20 cells: vertical 1.91e-03  horizontal 1.64e-01  ratio h/v    85.8
+C) Tucker-SIREN finals: loss with stripe parts removed from eps
+  tsiren_2x32_r8       loss 0.0329 | without S_v (rms 0.055) 0.0333 | without S_h (rms 0.055) 0.0403
+  tsiren_2x32_r16      loss 0.0088 | without S_v (rms 0.092) 0.0120 | without S_h (rms 0.086) 0.0186
+  tsiren_2x32_r24      loss 0.0163 | without S_v (rms 0.073) 0.0178 | without S_h (rms 0.126) 0.0268
+  direct_tucker_r16    loss 0.0085 | without S_v (rms 0.101) 0.0131 | without S_h (rms 0.170) 0.0216
+D) first dense eps gradient: rms 2.635e-04, S_v 3.926e-05, S_h 3.352e-05 (v/h 1.17)
+A) rms of vertical-stripe part S_v / horizontal-stripe part S_h of (final - initial)
+  truth                        eps S_v 0.080 S_h 0.151 (v/h  0.53)   log10 sigma S_v 0.012 S_h 0.023 (v/h  0.51)
+  dense|seed0                  eps S_v 0.174 S_h 0.233 (v/h  0.75)   log10 sigma S_v 0.030 S_h 0.040 (v/h  0.73)
+  direct_tucker_r16|seed0      eps S_v 0.101 S_h 0.170 (v/h  0.59)   log10 sigma S_v 0.020 S_h 0.026 (v/h  0.76)
+  siren_4x128|seed0            eps S_v 0.077 S_h 0.082 (v/h  0.94)   log10 sigma S_v 0.010 S_h 0.009 (v/h  1.05)
+  siren_4x128|seed1            eps S_v 0.068 S_h 0.086 (v/h  0.80)   log10 sigma S_v 0.011 S_h 0.009 (v/h  1.31)
+  siren_4x128|seed2            eps S_v 0.072 S_h 0.082 (v/h  0.88)   log10 sigma S_v 0.012 S_h 0.010 (v/h  1.30)
+  tsiren_2x32_r12|seed0        eps S_v 0.075 S_h 0.080 (v/h  0.94)   log10 sigma S_v 0.018 S_h 0.026 (v/h  0.67)
+  tsiren_2x32_r12|seed1        eps S_v 0.060 S_h 0.094 (v/h  0.63)   log10 sigma S_v 0.022 S_h 0.027 (v/h  0.80)
+  tsiren_2x32_r12|seed2        eps S_v 0.072 S_h 0.094 (v/h  0.76)   log10 sigma S_v 0.027 S_h 0.031 (v/h  0.88)
+  tsiren_2x32_r16|seed0        eps S_v 0.092 S_h 0.086 (v/h  1.08)   log10 sigma S_v 0.013 S_h 0.020 (v/h  0.63)
+  tsiren_2x32_r16|seed1        eps S_v 0.073 S_h 0.095 (v/h  0.77)   log10 sigma S_v 0.029 S_h 0.028 (v/h  1.06)
+  tsiren_2x32_r16|seed2        eps S_v 0.059 S_h 0.101 (v/h  0.58)   log10 sigma S_v 0.025 S_h 0.036 (v/h  0.68)
+  tsiren_2x32_r24|seed0        eps S_v 0.073 S_h 0.126 (v/h  0.58)   log10 sigma S_v 0.017 S_h 0.025 (v/h  0.66)
+  tsiren_2x32_r24|seed1        eps S_v 0.076 S_h 0.100 (v/h  0.76)   log10 sigma S_v 0.019 S_h 0.030 (v/h  0.64)
+  tsiren_2x32_r24|seed2        eps S_v 0.119 S_h 0.098 (v/h  1.22)   log10 sigma S_v 0.018 S_h 0.017 (v/h  1.03)
+  tsiren_2x32_r8|seed0         eps S_v 0.055 S_h 0.055 (v/h  1.00)   log10 sigma S_v 0.015 S_h 0.021 (v/h  0.71)
+  tsiren_2x32_r8|seed1         eps S_v 0.051 S_h 0.055 (v/h  0.93)   log10 sigma S_v 0.028 S_h 0.019 (v/h  1.49)
+  tsiren_2x32_r8|seed2         eps S_v 0.047 S_h 0.052 (v/h  0.91)   log10 sigma S_v 0.015 S_h 0.022 (v/h  0.70)
+B) loss of truth + 0.3 cos(2 pi y / L) (vertical stripes) vs + 0.3 cos(2 pi x / L) (horizontal)
+  period   4 cells: vertical 1.22e-03  horizontal 1.27e-02  ratio h/v    10.4
+  period   6 cells: vertical 2.73e-03  horizontal 1.78e-02  ratio h/v     6.5
+  period   8 cells: vertical 1.80e-03  horizontal 2.98e-02  ratio h/v    16.6
+  period  12 cells: vertical 8.84e-04  horizontal 6.44e-02  ratio h/v    72.8
+  period  20 cells: vertical 1.91e-03  horizontal 1.64e-01  ratio h/v    85.8
+C) Tucker-SIREN finals: loss with stripe parts removed from eps
+  tsiren_2x32_r8       loss 0.0329 | without S_v (rms 0.055) 0.0333 | without S_h (rms 0.055) 0.0403
+  tsiren_2x32_r16      loss 0.0088 | without S_v (rms 0.092) 0.0120 | without S_h (rms 0.086) 0.0186
+  tsiren_2x32_r24      loss 0.0163 | without S_v (rms 0.073) 0.0178 | without S_h (rms 0.126) 0.0268
+  direct_tucker_r16    loss 0.0085 | without S_v (rms 0.101) 0.0131 | without S_h (rms 0.170) 0.0216
+D) first dense eps gradient: rms 2.635e-04, S_v 3.926e-05, S_h 3.352e-05 (v/h 1.17)

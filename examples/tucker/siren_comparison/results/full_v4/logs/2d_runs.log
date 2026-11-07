@@ -1,0 +1,68 @@
+[fwi] 2d|dense|seed0 ...
+[fwi] 2d|siren_4x128|seed0 ...
+[fwi] 2d|siren_4x128|seed1 ...
+[fwi] 2d|siren_4x128|seed2 ...
+[fwi] 2d|tsiren_2x32_r8|seed0 ...
+[fwi] 2d|tsiren_2x32_r8|seed1 ...
+[fwi] 2d|tsiren_2x32_r8|seed2 ...
+[fwi] 2d|tsiren_2x32_r12|seed0 ...
+[fwi] 2d|tsiren_2x32_r12|seed1 ...
+[fwi] 2d|tsiren_2x32_r12|seed2 ...
+[fwi] 2d|tsiren_2x32_r16|seed0 ...
+[fwi] 2d|tsiren_2x32_r16|seed1 ...
+[fwi] 2d|tsiren_2x32_r16|seed2 ...
+[fwi] 2d|tsiren_2x32_r24|seed0 ...
+[fwi] 2d|tsiren_2x32_r24|seed1 ...
+[fwi] 2d|tsiren_2x32_r24|seed2 ...
+[fwi] 2d|direct_tucker_r16|seed0 ...
+[fwi] 2d|dense|seed0: done, skipped
+[fwi] 2d|siren_4x128|seed0: done, skipped
+[fwi] 2d|siren_4x128|seed1: done, skipped
+[fwi] 2d|siren_4x128|seed2: done, skipped
+[fwi] 2d|tsiren_2x32_r8|seed0: done, skipped
+[fwi] 2d|tsiren_2x32_r8|seed1: done, skipped
+[fwi] 2d|tsiren_2x32_r8|seed2: done, skipped
+[fwi] 2d|tsiren_2x32_r12|seed0: done, skipped
+[fwi] 2d|tsiren_2x32_r12|seed1: done, skipped
+[fwi] 2d|tsiren_2x32_r12|seed2: done, skipped
+[fwi] 2d|tsiren_2x32_r16|seed0: done, skipped
+[fwi] 2d|tsiren_2x32_r16|seed1: done, skipped
+[fwi] 2d|tsiren_2x32_r16|seed2: done, skipped
+[fwi] 2d|tsiren_2x32_r24|seed0: done, skipped
+[fwi] 2d|tsiren_2x32_r24|seed1: done, skipped
+[fwi] 2d|tsiren_2x32_r24|seed2: done, skipped
+[fwi] 2d|direct_tucker_r16|seed0: done, skipped
+[fwi] 2d|dense|seed0: done, skipped
+[fwi] 2d|siren_4x128|seed0: done, skipped
+[fwi] 2d|siren_4x128|seed1: done, skipped
+[fwi] 2d|siren_4x128|seed2: done, skipped
+[fwi] 2d|tsiren_2x32_r8|seed0: done, skipped
+[fwi] 2d|tsiren_2x32_r8|seed1: done, skipped
+[fwi] 2d|tsiren_2x32_r8|seed2: done, skipped
+[fwi] 2d|tsiren_2x32_r12|seed0: done, skipped
+[fwi] 2d|tsiren_2x32_r12|seed1: done, skipped
+[fwi] 2d|tsiren_2x32_r12|seed2: done, skipped
+[fwi] 2d|tsiren_2x32_r16|seed0: done, skipped
+[fwi] 2d|tsiren_2x32_r16|seed1: done, skipped
+[fwi] 2d|tsiren_2x32_r16|seed2: done, skipped
+[fwi] 2d|tsiren_2x32_r24|seed0: done, skipped
+[fwi] 2d|tsiren_2x32_r24|seed1: done, skipped
+[fwi] 2d|tsiren_2x32_r24|seed2: done, skipped
+[fwi] 2d|direct_tucker_r16|seed0: done, skipped
+[fwi] 2d|dense|seed0: done, skipped
+[fwi] 2d|siren_4x128|seed0: done, skipped
+[fwi] 2d|siren_4x128|seed1: done, skipped
+[fwi] 2d|siren_4x128|seed2: done, skipped
+[fwi] 2d|tsiren_2x32_r8|seed0: done, skipped
+[fwi] 2d|tsiren_2x32_r8|seed1: done, skipped
+[fwi] 2d|tsiren_2x32_r8|seed2: done, skipped
+[fwi] 2d|tsiren_2x32_r12|seed0: done, skipped
+[fwi] 2d|tsiren_2x32_r12|seed1: done, skipped
+[fwi] 2d|tsiren_2x32_r12|seed2: done, skipped
+[fwi] 2d|tsiren_2x32_r16|seed0: done, skipped
+[fwi] 2d|tsiren_2x32_r16|seed1: done, skipped
+[fwi] 2d|tsiren_2x32_r16|seed2: done, skipped
+[fwi] 2d|tsiren_2x32_r24|seed0: done, skipped
+[fwi] 2d|tsiren_2x32_r24|seed1: done, skipped
+[fwi] 2d|tsiren_2x32_r24|seed2: done, skipped
+[fwi] 2d|direct_tucker_r16|seed0: done, skipped

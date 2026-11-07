@@ -478,6 +478,121 @@ in the joint phase, a learning-rate criterion that does not reward the
 fastest data fit (dense lr 0.1 hurts in 2D and in the deep 3D part), and
 3D evaluation restricted to the illuminated zone.
 
+### 5.6 Round 4 (protocol v4: hyper-parameters from held-out shots, sigma step searched)
+
+Round 3 left three protocol issues: the learning rate was chosen by the
+training misfit, the sigma step was never tested (the search lies in the
+eps-only phase), and the 3D whole-model error mixes illuminated and
+unilluminated cells. Changes from v3 (`--protocol v4`, `results/full_v4/`,
+`schedule_v4.py`), physics, start model, TV, iterations and seeds unchanged:
+
+* held-out validation shots: 3D 4 of 16 (one per row and column of the
+  grid), 2D 10 of 50 (every fifth); the searches use the other shots only and
+  choose by the validation misfit (no truth);
+* stage A: learning rate (4 candidates, 15 eps-only iterations); stage B:
+  from the chosen stage-A state, 15 joint iterations for each sigma step scale
+  0, 0.03, 0.1, 0.3, 1 (sigma learning rate = scale x lr; for the SIREN, one
+  network for both properties, the sigma gradient x scale);
+* the FWI runs use all shots; 3D errors are also reported for sigma in the
+  zone and for eps below it ("deep").
+
+Execution: the GPUs were shared with other jobs during this round. To fit
+next to them, the 3D runs with new settings used exact temporal checkpointing
+(`FWI_CHECKPOINT_STEPS=60`, `benchmark_tucker.checkpointed_shot`: gradient
+cosine 1 - 1e-14 against the stored history, peak 2.7 GiB instead of
+16 GiB); their iteration times (14-42 s) are not comparable with rounds 1-3.
+Runs whose v4 settings equal the v3 settings perform the same computation:
+all 2D runs, whose v3 and v4 histories are bitwise identical (every loss of
+every run), and the 3D dense and SIREN runs, which were therefore taken from
+v3 (`reuse_v3_runs.py`, marked `reused_from`; the new zone/deep errors are
+computed from their final models). OOM failures caused by other jobs were
+retried automatically; no run is missing.
+
+Selection (tables "v4 hyper-parameter selection" and "v4 selection check" in
+`results/full_v4/report_tables.md`; the check uses the truth for reference):
+
+* Stage A picks the same learning rates as the v3 rule in 2D. In 3D it picks
+  smaller rates for Tucker-SIREN r8, r16, r24 (1e-4 instead of 3e-4), which
+  are also the candidates with the lowest zone eps error after the search,
+  but larger ones for r12 (3e-4) and direct Tucker (3e-3), which are not.
+  Dense keeps 0.1 in both cases, although 0.03 (2D) and 0.01 (3D) give lower
+  model errors.
+* Stage B: the validation misfit falls monotonically with the sigma step for
+  every method in 2D and 3D, so scale 1 is chosen everywhere, by tiny margins
+  in 3D (r8: 0.03201 at scale 0, 0.03182 at scale 1). The truth disagrees for
+  the Tucker models: their zone sigma error grows with the step (2D: scale 0
+  is best for every Tucker-SIREN rank; 3D: direct Tucker 0.089 at 0.03,
+  0.180 at 1). The held-out shots lie between the training shots and see the
+  same paths, so a sigma change that fits one set fits the other: selection
+  from the data alone cannot decide whether sigma should be updated.
+
+2D: identical to v3 (Section 5.5). 3D (mean over seeds; zone = top 40
+subsurface cells, deep = below; v3 values in brackets, computed the same way):
+
+| method | lr v3 -> v4 | zone eps RMSE (start 0.683) | zone log10 sigma RMSE (start 0.090) | deep eps RMSE (start 0.506) |
+|---|---|---|---|---|
+| dense (reused) | 0.1 | 0.498 | 0.092 | 0.711 |
+| SIREN 4 x 128 (reused) | 1e-4 | **0.486** | 0.158 | 0.671 |
+| Tucker-SIREN r8 | 3e-4 -> 1e-4 | 0.615 (0.610) | 0.185 (0.277) | 0.754 (0.929) |
+| Tucker-SIREN r12 | 1e-4 -> 3e-4 | 0.578 (0.581) | 0.294 (0.252) | 0.883 (0.718) |
+| Tucker-SIREN r16 | 3e-4 -> 1e-4 | 0.574 (0.587) | 0.295 (0.337) | 0.721 (0.921) |
+| Tucker-SIREN r24 | 3e-4 -> 1e-4 | 0.541 (0.523) | 0.327 (0.378) | 0.666 (0.844) |
+| direct Tucker r16 | 1e-3 -> 3e-3 | 0.560 (0.561) | 0.373 (0.339) | 0.647 (0.631) |
+
+The learning rate mainly changes what happens outside the illuminated zone:
+1e-4 instead of 3e-4 reduces the deep drift of r8, r16 and r24 by 0.18-0.20
+and their sigma error by 0.04-0.09, while the zone eps error stays within
+0.02. Zone eps ranking and sigma degradation are as in round 3.
+
+Reference with hyper-parameters chosen by the true model ("oracle", `--select
+oracle`: per method the search candidates with the lowest zone eps error,
+then the lowest zone sigma error; an upper bound for each parameterization,
+not a usable rule; the error is judged after the 15 search iterations, which
+is not always best after the full run). 2D, all methods, 3 seeds:
+
+| method | data: lr, sigma scale | eps RMSE / log10 sigma RMSE | oracle: lr, sigma scale | eps RMSE / log10 sigma RMSE |
+|---|---|---|---|---|
+| dense | 0.1, 1 | 0.939 / 0.187 | 0.03, 0.3 | 0.863 / 0.099 |
+| direct Tucker r16 | 0.01, 1 | 0.844 / 0.136 | 3e-4, 0 | 0.786 / 0.105 |
+| SIREN 4 x 128 | 1e-4, 1 | **0.543 / 0.081** | same | same |
+| Tucker-SIREN r8 | 3e-4, 1 | 0.718 / 0.162 | 3e-4, 0 | 0.713 / 0.105 |
+| Tucker-SIREN r12 | 3e-4, 1 | 0.710 / 0.151 | 3e-4, 0 | 0.734 / 0.105 |
+| Tucker-SIREN r16 | 3e-4, 1 | 0.700 / 0.157 | 3e-4, 0 | 0.712 / 0.105 |
+| Tucker-SIREN r24 | 3e-4, 1 | 0.707 / 0.120 | 1e-4, 0 | 0.822 / 0.106 |
+
+(start 0.748 / 0.105). With truth-chosen hyper-parameters no other method
+comes close to the SIREN in 2D; for every other method the best sigma is the
+unchanged start. The ranking does not depend on the selection rule.
+
+3D, seed 0, for the methods whose oracle learning rate equals the data choice
+(so only the sigma step differs; stage-B entries copied, `run_v4_reference3d.sh`):
+
+| method | sigma scale data -> oracle | zone eps RMSE | zone log10 sigma RMSE (start 0.090) | final loss |
+|---|---|---|---|---|
+| SIREN 4 x 128 | 1 -> 0 | 0.479 -> 0.481 | 0.188 -> **0.053** | 2.02e-3 -> 2.07e-3 |
+| Tucker-SIREN r16 | 1 -> 0.1 | 0.576 -> 0.588 | 0.303 -> 0.106 | 7.6e-3 -> 8.9e-3 |
+| Tucker-SIREN r24 | 1 -> 0.3 | 0.529 -> 0.534 | 0.330 -> 0.225 | 2.0e-3 -> 2.5e-3 |
+
+A smaller sigma step limits the sigma damage of the Tucker models but does
+not make sigma better than the start. The SIREN without any sigma data
+gradient (scale 0) improves sigma well below the start: its sigma output
+changes only through the network shared with eps. **Caveat for all sigma
+results of this study:** the synthetic models have sigma proportional to eps
+(3D: sigma = 5e-4 eps; 2D: sigma = 0.002 eps with a mirrored deep part), so
+a parameterization that couples eps and sigma (one network with two outputs)
+profits from a relation that real ground does not guarantee. The SIREN's
+sigma advantage over the separate-field methods is therefore at least partly
+a property of these test models; a model with independent sigma is needed to
+separate the two effects.
+
+Round-4 conclusions: (1) held-out shots of the same acquisition improve the
+3D learning-rate choice for some Tucker-SIREN ranks but cannot decide the
+sigma step; (2) the learning rate mainly controls the damage outside the
+illuminated zone; (3) the ranking of rounds 2-3 (SIREN best, Tucker models
+not better than dense or SIREN, Tucker sigma bands) holds under data-chosen
+and truth-chosen hyper-parameters; (4) the sigma comparison is confounded by
+the eps-proportional sigma of the test models.
+
 ## 6. Answers
 
 | question | answer (measured) |
@@ -486,8 +601,8 @@ fastest data fit (dense lr 0.1 hurts in 2D and in the deep 3D part), and
 | Does it reduce the autograd backward computation? | Yes in the network stage: backward 43.7 -> 0.97 ms (analytic 2.9e11 -> 2.2e8 FLOPs); the backward of the reconstruction and mapping takes 0.51 / 0.65 / 1.30 ms (50^3 / 120 x 120 x 100 / 200^3, decomposed measurement) - comparable to the network backward (0.52 / 0.62 / 0.36 ms) and growing with the grid. Not in the FWI: the discrete adjoint (1.45 s) is unchanged. |
 | Does it reduce GPU memory? | Model generation: 7.08 GiB -> 63 MiB peak (120 x 120 x 100); 19.6 GiB -> 180 MiB at 160^3; 200^3 runs where the unchunked SIREN does not fit. Complete 3D FWI: 21.57 -> 16.06 GiB (-26 %), the remainder being the FDTD history. 2D FWI: no measurable difference (10.38 vs 10.30 GiB). |
 | Does it reduce the total FWI time? | Barely: 2.346 -> 2.294 s per 3D iteration (`S_FWI = 1.02`, `S_network = 17`); 2D unchanged (0.320 vs 0.319 s; there the Tucker-SIREN network stage is even slower than the SIREN's, 3.7 vs 2.2 ms, launch-bound at 20 000 points). Including the pre-fit, a 100-iteration 3D run takes 240 s vs 420 s. |
-| Fewer trainable parameters at equal accuracy? | For the data misfit in 3D FWI: yes (18 080 parameters reach a 5x lower loss than the 50 306-parameter SIREN). For representing the true model: no - SIREN 4 x 128 reaches 1.0 % error, Tucker-SIREN stops at the rank floor (4.1 % at r 16, 2.2 % at r 32 with 103 744 parameters); Tucker-SIREN reaches 5 % with 3x fewer parameters and 5x sooner. |
-| Does the low-rank constraint reduce resolution? | Yes (both rounds; Section 5.4: in 2D from the poorer start Tucker-SIREN eps RMSE 0.75-0.86 vs SIREN 0.61). The representation error is set by the rank (direct Tucker at the same rank is within 1.16x); sharp structures (the air/ground step in log10 sigma, thin layers) are approximated by separable sums, which produces axis-aligned stripes in sigma in 2D and 3D FWI and lower eps SSIM than dense in 3D. |
+| Fewer trainable parameters at equal accuracy? | Round 1 only (start close to the truth): 18 080 parameters reach a 5x lower 3D data misfit than the 50 306-parameter SIREN. From the poorer start of rounds 2-4 the SIREN reaches the lower data misfit and the lower model error in 2D and in the 3D zone (Sections 5.4-5.6). For representing the true model: no - SIREN 4 x 128 reaches 1.0 % error, Tucker-SIREN stops at the rank floor (4.1 % at r 16, 2.2 % at r 32 with 103 744 parameters); Tucker-SIREN reaches 5 % with 3x fewer parameters and 5x sooner. |
+| Does the low-rank constraint reduce resolution? | Yes, in every round (2D eps RMSE: round 2 Tucker-SIREN 0.75-0.86 vs SIREN 0.61, round 3 with TV 0.70-0.72 vs 0.54; 3D zone eps round 3-4: 0.52-0.62 vs 0.49; also with truth-chosen hyper-parameters, Section 5.6). The representation error is set by the rank (direct Tucker at the same rank is within 1.16x); sharp structures (the air/ground step in log10 sigma, thin layers) are approximated by separable sums, which produces axis-aligned stripes in sigma in 2D and 3D FWI and lower eps SSIM than dense in 3D. |
 
 Summary: in this set-up Tucker-SIREN makes the *network* cheap (3x at 50^3,
 28x at the FWI grid and up to 220x at 200^3 in the generation stage; about
@@ -495,6 +610,10 @@ Summary: in this set-up Tucker-SIREN makes the *network* cheap (3x at 50^3,
 removes the SIREN's 5.5 GiB activation overhead from the 3D FWI peak, but the
 FWI time is set by the FDTD solver and is unchanged. Accuracy is limited by
 the Tucker rank and conductivity suffers from separable-structure artefacts.
+Rounds 2-4 (poorer start, TV, 16 3D shots, held-out-shot selection, truth-chosen
+reference) confirm the accuracy ranking: SIREN first, the Tucker models not
+better than dense or SIREN; the SIREN's sigma advantage is partly due to the
+eps-proportional sigma of the test models (Section 5.6).
 
 ## 7. Problems and directions
 
@@ -514,12 +633,18 @@ the Tucker rank and conductivity suffers from separable-structure artefacts.
   study.
 * **Chunked SIREN in FWI.** Would remove most of the SIREN's memory penalty
   at ~40 % more network time; not run.
-* **Limits of this study.** One synthetic model per dimension, inverse crime,
-  four 3D shots (too few to separate the methods by 3D accuracy), 100-150
-  iterations, no regularisation (the notebooks' TV term and gradient
-  normalisation were not used), learning rates chosen by data loss, three seeds, PyTorch 1.11 (local) and 2.0.1
-  (server) on RTX 4090s; the 2D runs shared their GPU with an idle process of
-  another user. Five seeds were not run.
+* **Limits of this study.** One synthetic model per dimension with sigma
+  proportional to eps (favours parameterizations that couple the two, Section
+  5.6), inverse crime, noise-free data; 3D: four shots in rounds 1-2 (too few
+  to separate the methods), 16 in rounds 3-4, an 18 ns record that does not
+  reach below ~40 cells; 100-200 iterations; no regularisation in rounds 1-2
+  (the notebooks' TV term from round 3); hyper-parameters chosen from the data
+  (training misfit in rounds 1-3, held-out shots of the same acquisition in
+  round 4, which cannot test the sigma step); three seeds (five were not run);
+  PyTorch 1.11 (local) and 2.0.1 (server) on RTX 4090s. Timings come from
+  rounds 1-3 (exclusive GPUs; the round-1 2D runs shared their GPU with an
+  idle process of another user); round-4 3D runs used exact checkpointing on
+  shared GPUs and their times are not comparable.
 
 ## 8. Reproduction
 
@@ -534,6 +659,8 @@ python bench_fwi.py search --case 3d && python bench_fwi.py run --case 3d   # C 
 python report.py && python plots.py     # results/full/report_tables.md, figures/
 # round 2 (Section 5.4): same commands with --protocol v2 -> results/full_v2/
 # round 3 (Section 5.5): --protocol v3 -> results/full_v3/
+# round 4 (Section 5.6): python schedule_v4.py (searches + runs, --protocol v4), reuse_v3_runs.py,
+#   run_v4_extras.sh / run_v4_reference3d.sh (--select oracle reference), report.py/plots.py --protocol v4
 # (server drivers: run_fwi_server.sh, run_v2_server.sh, rerun_v2_3d.sh, run_v3_server.sh)
 python stripe_check.py --protocol v2     # 2D stripe direction, results/full_v2/stripe_check.json
 python -m unittest discover -s ../../../tests -p "test_tucker_siren*.py"

@@ -1,0 +1,140 @@
+[fwi-search-sigma] 2d|search_sigma|dense|s0 ...
+[fwi-search-sigma] 2d|search_sigma|dense|s0.03 ...
+[fwi-search-sigma] 2d|search_sigma|dense|s0.1 ...
+[fwi-search-sigma] 2d|search_sigma|dense|s0.3 ...
+[fwi-search-sigma] 2d|search_sigma|dense|s1 ...
+[fwi-search-sigma] 2d|search_sigma|siren_4x128|s0 ...
+[fwi-search-sigma] 2d|search_sigma|siren_4x128|s0.03 ...
+[fwi-search-sigma] 2d|search_sigma|siren_4x128|s0.1 ...
+[fwi-search-sigma] 2d|search_sigma|siren_4x128|s0.3 ...
+[fwi-search-sigma] 2d|search_sigma|siren_4x128|s1 ...
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r8|s0 ...
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r8|s0.03 ...
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r8|s0.1 ...
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r8|s0.3 ...
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r8|s1 ...
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r12|s0 ...
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r12|s0.03 ...
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r12|s0.1 ...
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r12|s0.3 ...
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r12|s1 ...
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r16|s0 ...
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r16|s0.03 ...
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r16|s0.1 ...
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r16|s0.3 ...
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r16|s1 ...
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r24|s0 ...
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r24|s0.03 ...
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r24|s0.1 ...
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r24|s0.3 ...
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r24|s1 ...
+[fwi-search-sigma] 2d|search_sigma|direct_tucker_r16|s0 ...
+[fwi-search-sigma] 2d|search_sigma|direct_tucker_r16|s0.03 ...
+[fwi-search-sigma] 2d|search_sigma|direct_tucker_r16|s0.1 ...
+[fwi-search-sigma] 2d|search_sigma|direct_tucker_r16|s0.3 ...
+[fwi-search-sigma] 2d|search_sigma|direct_tucker_r16|s1 ...
+[fwi-search-sigma] 2d|search_sigma|dense|s0: done, skipped
+[fwi-search-sigma] 2d|search_sigma|dense|s0.03: done, skipped
+[fwi-search-sigma] 2d|search_sigma|dense|s0.1: done, skipped
+[fwi-search-sigma] 2d|search_sigma|dense|s0.3: done, skipped
+[fwi-search-sigma] 2d|search_sigma|dense|s1: done, skipped
+[fwi-search-sigma] 2d|search_sigma|siren_4x128|s0: done, skipped
+[fwi-search-sigma] 2d|search_sigma|siren_4x128|s0.03: done, skipped
+[fwi-search-sigma] 2d|search_sigma|siren_4x128|s0.1: done, skipped
+[fwi-search-sigma] 2d|search_sigma|siren_4x128|s0.3: done, skipped
+[fwi-search-sigma] 2d|search_sigma|siren_4x128|s1: done, skipped
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r8|s0: done, skipped
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r8|s0.03: done, skipped
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r8|s0.1: done, skipped
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r8|s0.3: done, skipped
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r8|s1: done, skipped
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r12|s0: done, skipped
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r12|s0.03: done, skipped
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r12|s0.1: done, skipped
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r12|s0.3: done, skipped
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r12|s1: done, skipped
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r16|s0: done, skipped
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r16|s0.03: done, skipped
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r16|s0.1: done, skipped
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r16|s0.3: done, skipped
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r16|s1: done, skipped
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r24|s0: done, skipped
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r24|s0.03: done, skipped
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r24|s0.1: done, skipped
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r24|s0.3: done, skipped
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r24|s1: done, skipped
+[fwi-search-sigma] 2d|search_sigma|direct_tucker_r16|s0: done, skipped
+[fwi-search-sigma] 2d|search_sigma|direct_tucker_r16|s0.03: done, skipped
+[fwi-search-sigma] 2d|search_sigma|direct_tucker_r16|s0.1: done, skipped
+[fwi-search-sigma] 2d|search_sigma|direct_tucker_r16|s0.3: done, skipped
+[fwi-search-sigma] 2d|search_sigma|direct_tucker_r16|s1: done, skipped
+[fwi-search-sigma] 2d|search_sigma|dense|s0: done, skipped
+[fwi-search-sigma] 2d|search_sigma|dense|s0.03: done, skipped
+[fwi-search-sigma] 2d|search_sigma|dense|s0.1: done, skipped
+[fwi-search-sigma] 2d|search_sigma|dense|s0.3: done, skipped
+[fwi-search-sigma] 2d|search_sigma|dense|s1: done, skipped
+[fwi-search-sigma] 2d|search_sigma|siren_4x128|s0: done, skipped
+[fwi-search-sigma] 2d|search_sigma|siren_4x128|s0.03: done, skipped
+[fwi-search-sigma] 2d|search_sigma|siren_4x128|s0.1: done, skipped
+[fwi-search-sigma] 2d|search_sigma|siren_4x128|s0.3: done, skipped
+[fwi-search-sigma] 2d|search_sigma|siren_4x128|s1: done, skipped
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r8|s0: done, skipped
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r8|s0.03: done, skipped
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r8|s0.1: done, skipped
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r8|s0.3: done, skipped
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r8|s1: done, skipped
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r12|s0: done, skipped
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r12|s0.03: done, skipped
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r12|s0.1: done, skipped
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r12|s0.3: done, skipped
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r12|s1: done, skipped
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r16|s0: done, skipped
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r16|s0.03: done, skipped
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r16|s0.1: done, skipped
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r16|s0.3: done, skipped
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r16|s1: done, skipped
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r24|s0: done, skipped
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r24|s0.03: done, skipped
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r24|s0.1: done, skipped
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r24|s0.3: done, skipped
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r24|s1: done, skipped
+[fwi-search-sigma] 2d|search_sigma|direct_tucker_r16|s0: done, skipped
+[fwi-search-sigma] 2d|search_sigma|direct_tucker_r16|s0.03: done, skipped
+[fwi-search-sigma] 2d|search_sigma|direct_tucker_r16|s0.1: done, skipped
+[fwi-search-sigma] 2d|search_sigma|direct_tucker_r16|s0.3: done, skipped
+[fwi-search-sigma] 2d|search_sigma|direct_tucker_r16|s1: done, skipped
+[fwi-search-sigma] 2d|search_sigma|dense|s0: done, skipped
+[fwi-search-sigma] 2d|search_sigma|dense|s0.03: done, skipped
+[fwi-search-sigma] 2d|search_sigma|dense|s0.1: done, skipped
+[fwi-search-sigma] 2d|search_sigma|dense|s0.3: done, skipped
+[fwi-search-sigma] 2d|search_sigma|dense|s1: done, skipped
+[fwi-search-sigma] 2d|search_sigma|siren_4x128|s0: done, skipped
+[fwi-search-sigma] 2d|search_sigma|siren_4x128|s0.03: done, skipped
+[fwi-search-sigma] 2d|search_sigma|siren_4x128|s0.1: done, skipped
+[fwi-search-sigma] 2d|search_sigma|siren_4x128|s0.3: done, skipped
+[fwi-search-sigma] 2d|search_sigma|siren_4x128|s1: done, skipped
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r8|s0: done, skipped
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r8|s0.03: done, skipped
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r8|s0.1: done, skipped
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r8|s0.3: done, skipped
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r8|s1: done, skipped
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r12|s0: done, skipped
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r12|s0.03: done, skipped
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r12|s0.1: done, skipped
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r12|s0.3: done, skipped
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r12|s1: done, skipped
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r16|s0: done, skipped
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r16|s0.03: done, skipped
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r16|s0.1: done, skipped
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r16|s0.3: done, skipped
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r16|s1: done, skipped
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r24|s0: done, skipped
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r24|s0.03: done, skipped
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r24|s0.1: done, skipped
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r24|s0.3: done, skipped
+[fwi-search-sigma] 2d|search_sigma|tsiren_2x32_r24|s1: done, skipped
+[fwi-search-sigma] 2d|search_sigma|direct_tucker_r16|s0: done, skipped
+[fwi-search-sigma] 2d|search_sigma|direct_tucker_r16|s0.03: done, skipped
+[fwi-search-sigma] 2d|search_sigma|direct_tucker_r16|s0.1: done, skipped
+[fwi-search-sigma] 2d|search_sigma|direct_tucker_r16|s0.3: done, skipped
+[fwi-search-sigma] 2d|search_sigma|direct_tucker_r16|s1: done, skipped

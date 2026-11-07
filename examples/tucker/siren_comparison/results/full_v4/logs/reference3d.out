@@ -1,0 +1,1 @@
+oracle scales {'siren_4x128': 0.0, 'tsiren_2x32_r16': 0.1, 'tsiren_2x32_r24': 0.3}
