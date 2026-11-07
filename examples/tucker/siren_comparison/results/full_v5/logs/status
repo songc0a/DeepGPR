@@ -1,0 +1,12 @@
+2026-11-07 15:13:29 start (waiting for GPU 4)
+2026-11-07 15:37:03 driver restarted: GPU 5 allowed (GPU 4 taken by another user)
+2026-11-07 15:37:03 start (GPU 5, else 4)
+2026-11-07 15:38:03 search gpu5 pass1 start
+2026-11-07 16:16:22 search gpu5 pass1 exit 0
+2026-11-07 16:17:22 search gpu5 pass2 start
+2026-11-07 16:17:23 search gpu5 pass2 exit 0
+2026-11-07 16:18:23 run gpu5 pass1 start
+2026-11-07 17:54:05 run gpu5 pass1 exit 0
+2026-11-07 17:55:05 run gpu5 pass2 start
+2026-11-07 17:55:06 run gpu5 pass2 exit 0
+2026-11-07 17:55:06 ALL DONE

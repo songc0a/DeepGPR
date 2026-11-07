@@ -607,6 +607,57 @@ not better than dense or SIREN, Tucker sigma bands) holds under data-chosen
 and truth-chosen hyper-parameters; (4) the sigma comparison is confounded by
 the eps-proportional sigma of the test models.
 
+### 5.7 Round 5 (protocol v5: 4 m x 4 m x 2 m model, 36 shots, record to 2 m)
+
+A larger and deeper model with acquisition covering 2 m (`bench_fwi.build_case_large`,
+`--protocol v5`, `results/full_v5/`, `run_v5.sh`, layout
+`results/full_v5/figures/model3d_layout.png`):
+
+* 4 m (x) x 4 m (z) surface, 2 m subsurface plus 0.2 m air; the OverThrust
+  recipe of the earlier 3D model (section in the (depth, z) plane, smooth
+  lateral dip along x, sigma = 5e-4 eps), 100 x 55 x 100 cells (5 air) plus a
+  10-cell CPML outside;
+* 250 MHz Ricker, dx 4 cm, dt 60 ps: the same cells per wavelength and Courant
+  number as 500 MHz / 2 cm. At 500 MHz the model would need 200 x 110 x 200
+  cells and ~1400 steps (~130 GB of stored history per shot);
+* record 47.5 ns (791 steps): the two-way vertical time to 2 m is at most
+  34.1 ns (slowest column), plus 25 % for oblique paths and the wavelet delay;
+* 36 sources on a 6 x 6 grid (0.4 ... 3.6 m, 0.64 m apart), 400 receivers on
+  a 0.2 m grid over the whole surface (Ez), all on the ground surface;
+* v4 protocol: start = Gaussian-smoothed truth (5 cells = 0.2 m, the same
+  fraction of the depth as before), air fixed, TV, eps only for 50 of 150
+  iterations; learning rate from the held-out-shot search (6 held-out shots,
+  one per row and column); sigma step 1 (stage B skipped; it chose 1 in every
+  round-4 case); four methods, seed 0; zone = upper 1 m, deep = 1-2 m;
+* GPU 5 exclusive: 9.3 s per iteration (36 shots), peak 9.7 GiB (dense,
+  Tucker-SIREN) / 11.6 GiB (SIREN); search 39 min, runs 24 min each.
+
+| method | lr | final loss (start 0.033) | upper 1 m eps RMSE (start 0.621) | upper 1 m log10 sigma RMSE (start 0.079) | lower 1 m eps RMSE (start 0.451) | eps RMSE (start 0.546) |
+|---|---|---|---|---|---|---|
+| dense | 0.1 | 9.5e-5 | 0.590 | 0.073 | 0.673 | 0.638 |
+| SIREN 4 x 128 | 3e-5 | 2.0e-4 | **0.519** | **0.047** | 0.671 | **0.603** |
+| Tucker-SIREN r16 | 1e-4 | 2.4e-4 | 0.552 | 0.060 | 1.106 | 0.877 |
+| Tucker-SIREN r24 | 1e-4 | 2.7e-4 | 0.591 | 0.061 | 1.116 | 0.896 |
+
+* Upper 1 m: every method improves eps and, unlike rounds 3-4, also sigma
+  (36 shots and 400 receivers constrain it there); the SIREN is best in both,
+  Tucker-SIREN r16 second. The thin folded layers are below the resolution of
+  250 MHz (wavelength ~0.5 m) and are not recovered by any method (Fig. 7).
+* Lower 1 m: although the record covers it, every method moves away from the
+  start, mostly during the eps-only phase while the data loss falls 30x (deep
+  RMSE from iteration 5 to 50: Tucker-SIREN 0.53 -> 1.05-1.07, dense 0.53 ->
+  0.69, SIREN 0.48 -> 0.62). Both Tucker-SIREN models lose the high-eps
+  basement (eps 8 below ~1.75 m); dense shows vertical streaks. The data are
+  fitted (loss 1e-4-3e-4) by deep models that differ from the truth: covering
+  the travel time is not enough to constrain the deep part, whose reflections
+  are weak after 3D spreading and attenuation and carry little weight in the
+  L2 misfit. (Interpretation; not tested here. Candidates: a time gain on the
+  residuals, depth preconditioning of the gradient, a longer eps-only phase
+  with a smaller step.)
+* The search choices again match the lowest model error after the search for
+  SIREN and both Tucker-SIREN ranks, not for dense (0.1 chosen, 0.03 better).
+* Single seed; sigma proportional to eps as before (Section 5.6 caveat).
+
 ## 6. Answers
 
 | question | answer (measured) |
@@ -675,6 +726,8 @@ python report.py && python plots.py     # results/full/report_tables.md, figures
 # round 3 (Section 5.5): --protocol v3 -> results/full_v3/
 # round 4 (Section 5.6): python schedule_v4.py (searches + runs, --protocol v4), reuse_v3_runs.py,
 #   run_v4_extras.sh / run_v4_reference3d.sh (--select oracle reference), report.py/plots.py --protocol v4
+# round 5 (Section 5.7): run_v5.sh (search + run --sigma-scale 1, --protocol v5), report.py/plots.py --protocol v5,
+#   plot_layout.py --protocol v5
 # (server drivers: run_fwi_server.sh, run_v2_server.sh, rerun_v2_3d.sh, run_v3_server.sh)
 python stripe_check.py --protocol v2     # 2D stripe direction, results/full_v2/stripe_check.json
 python -m unittest discover -s ../../../tests -p "test_tucker_siren*.py"
