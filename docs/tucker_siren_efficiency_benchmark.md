@@ -195,10 +195,22 @@ reached.
 ### 5.1 Set-up
 
 * **2D:** the 2D FWI notebook at its own size (`examples/2DFWImodel.npy`,
-  200 x 100, dx 5 cm, dt 50 ps, 200 MHz Ricker, nt 2000, 50 shots in one batch,
-  receivers on the last row, 10-cell CPML, mode 2).
-* **3D:** the 120 x 120 x 100 model of the Tucker FWI benchmark (dx 2 cm, dt 30 ps,
-  500 MHz, nt 600, 4 shots, 100 surface receivers, mode 3).
+  200 x 100, dx 5 cm, dt 50 ps, 200 MHz Ricker, nt 2000, 10-cell CPML, mode 2).
+  Crosshole geometry: 50 sources every 4 cells on the first column (y = 0),
+  200 receivers on the last column (y = 99), one batch.
+* **3D:** the 120 x 120 x 100 model of the Tucker FWI benchmark, axes
+  (x, y, z) with y the depth: 120 x 120 x 100 cells = 2.4 x 2.4 x 2.0 m at
+  dx 2 cm, the top 10 y-cells air, then 110 cells of an OverThrust section in
+  the (y, z) plane extruded along x with a smooth lateral dip (vertical shift
+  up to +-8 % of the depth); sigma = 5e-4 eps (0 in air); 10-cell CPML added
+  outside the model. dt 30 ps, nt 600 (18 ns), 500 MHz Ricker, z-polarised
+  source (Ez), receivers record Ez (mode 3). Antennas on the ground surface
+  (y = 10): 100 receivers on a 10 x 10 grid (x = 4 ... 112 every 12 cells,
+  z = 4 ... 94 every 10 cells), the same for every shot; sources: rounds 1-2
+  4 on a diagonal (x, z) = (36, 30), (52, 43), (68, 57), (84, 70); rounds 3-4 16
+  on a 4 x 4 grid (x = 24, 48, 72, 96; z = 20, 40, 60, 80). Fig. 7 shows the
+  slice x = 60 (between source lines); layout: `plot_layout.py`,
+  `results/full/figures/model3d_layout.png`.
 * Observed data from the true model with the same solver (inverse crime,
   identical for all methods); loss `0.5 sum ||d - d_obs||^2 / sum ||d_obs||^2`;
   uncompressed default history (no wavefield sketch, no checkpointing) for every
@@ -450,7 +462,9 @@ log-sigma range of the mapping bounds, seed 0.)
   improves (0.683 -> 0.49-0.62). SIREN (0.486) and dense (0.498) are best,
   Tucker-SIREN r24 0.523, the other Tucker models 0.56-0.62; dense resolves the
   folded layers most sharply (Fig. 7).
-* Below 40 cells, i.e. beyond what the 18 ns record reaches, every method
+* Below 40 cells, where the 18 ns record constrains the model only weakly
+  (two-way vertical reach 49-56 cells at zero offset, less at the offsets of
+  most source-receiver pairs), every method
   moves away from the start (0.506 -> 0.63-0.96), so the whole-model RMSE
   rises. Dense: Adam turns the tiny deep gradients into full-size steps
   (vertical streaks); Tucker models: the global factors carry shallow updates
@@ -636,8 +650,8 @@ eps-proportional sigma of the test models (Section 5.6).
 * **Limits of this study.** One synthetic model per dimension with sigma
   proportional to eps (favours parameterizations that couple the two, Section
   5.6), inverse crime, noise-free data; 3D: four shots in rounds 1-2 (too few
-  to separate the methods), 16 in rounds 3-4, an 18 ns record that does not
-  reach below ~40 cells; 100-200 iterations; no regularisation in rounds 1-2
+  to separate the methods), 16 in rounds 3-4, an 18 ns record (two-way vertical
+  reach about 50 cells at zero offset; zone = top 40 cells); 100-200 iterations; no regularisation in rounds 1-2
   (the notebooks' TV term from round 3); hyper-parameters chosen from the data
   (training misfit in rounds 1-3, held-out shots of the same acquisition in
   round 4, which cannot test the sigma step); three seeds (five were not run);
