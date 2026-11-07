@@ -286,7 +286,7 @@ def oracle_tables(fwi: Dict, oracle: Dict) -> List[str]:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--quick", action="store_true")
-    parser.add_argument("--protocol", default="v1", choices=["v1", "v2", "v3", "v4"])
+    parser.add_argument("--protocol", default="v1", choices=["v1", "v2", "v3", "v4", "v5"])
     args = parser.parse_args()
     base = "quick" if args.quick else "full"
     results = HERE / "results" / (base if args.protocol == "v1" else f"{base}_{args.protocol}")
@@ -296,7 +296,7 @@ def main() -> None:
     lines += generation_tables(load(shared / "generation.json"))
     lines += representation_tables(load(shared / "representation.json"))
     lines += fwi_tables(load(results / "fwi.json"), load(results / "fwi_search.json"))
-    if args.protocol == "v4":
+    if args.protocol in ("v4", "v5"):
         lines += v4_tables(load(results / "fwi.json"), load(results / "fwi_search.json"), load(results / "fwi_search_sigma.json"))
         lines += oracle_tables(load(results / "fwi.json"), load(results / "fwi_oracle.json"))
     (results / "report_tables.md").write_text("\n".join(lines) + "\n")

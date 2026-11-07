@@ -261,7 +261,7 @@ def figure6(fwi: Dict, out: Path) -> None:
 
 # -- Figure 7 -------------------------------------------------------------------
 
-def figure7(fwi: Dict, results: Path, out: Path, quick: bool) -> None:
+def figure7(fwi: Dict, results: Path, out: Path, quick: bool, protocol: str = "v1") -> None:
     sys.path.insert(0, str(HERE.parents[2] / "src"))
     sys.path.insert(0, str(HERE.parent))
     import benchmark_tucker as bt
@@ -271,7 +271,12 @@ def figure7(fwi: Dict, results: Path, out: Path, quick: bool) -> None:
         finals = sorted(run_dir.glob("*seed0_final.pt")) if run_dir.exists() else []
         if not finals:
             continue
-        truth = bt.build_case(quick, "cpu") if case == "3d" else bt.build_case_2d("cpu", quick)
+        if case == "3d" and protocol == "v5":
+            import bench_fwi
+
+            truth = bench_fwi.build_case_large(quick, torch.device("cpu"))
+        else:
+            truth = bt.build_case(quick, "cpu") if case == "3d" else bt.build_case_2d("cpu", quick)
         initial = torch.load(run_dir / "initial.pt") if (run_dir / "initial.pt").exists() else {"eps": truth["eps_init"], "sigma": truth["sigma_init"]}
         panels = [("true", truth["eps"], truth["sigma"])]
         order = ["dense", "siren_4x128", "tsiren_2x32_r8", "tsiren_2x32_r12", "tsiren_2x32_r16", "tsiren_2x32_r24", "direct_tucker_r16"]
@@ -309,7 +314,7 @@ def figure7(fwi: Dict, results: Path, out: Path, quick: bool) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--quick", action="store_true")
-    parser.add_argument("--protocol", default="v1", choices=["v1", "v2", "v3", "v4"])
+    parser.add_argument("--protocol", default="v1", choices=["v1", "v2", "v3", "v4", "v5"])
     args = parser.parse_args()
     base = "quick" if args.quick else "full"
     results = HERE / "results" / (base if args.protocol == "v1" else f"{base}_{args.protocol}")
@@ -322,7 +327,7 @@ def main() -> None:
         figure5(load(shared / "representation.json"), out)
     figure4(fwi, out)
     figure6(fwi, out)
-    figure7(fwi, results, out, args.quick)
+    figure7(fwi, results, out, args.quick, args.protocol)
     print("figures in", out)
 
 
