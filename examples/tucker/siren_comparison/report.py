@@ -176,7 +176,7 @@ def fwi_tables(fwi: Dict, search: Dict) -> List[str]:
     return lines
 
 
-def v4_tables(fwi: Dict, search: Dict, search_sigma: Dict) -> List[str]:
+def v4_tables(fwi: Dict, search: Dict, search_sigma: Dict, protocol: str = "v4") -> List[str]:
     """Protocol v4: held-out validation misfit of every search candidate, and zone metrics."""
     lines = []
     for case in ("3d", "2d"):
@@ -235,7 +235,8 @@ def v4_tables(fwi: Dict, search: Dict, search_sigma: Dict) -> List[str]:
                 groups.setdefault(name.split("|")[1], []).append(r)
         if not groups:
             continue
-        lines += [f"### C. v4 model errors ({case.upper()}, mean over seeds; zone = {'top 40 subsurface cells' if case == '3d' else 'whole model'})", ""]
+        zone_text = "whole model" if case == "2d" else ("top 1 m (25 cells), deep = 1-2 m" if protocol == "v5" else "top 40 subsurface cells")
+        lines += [f"### C. v4 model errors ({case.upper()}, mean over seeds; zone = {zone_text})", ""]
         lines.append("| method | zone eps RMSE start -> end | zone log10 sigma RMSE start -> end | deep eps RMSE start -> end | eps RMSE start -> end | log10 sigma RMSE start -> end |")
         lines.append("|---|---|---|---|---|---|")
 
@@ -297,7 +298,7 @@ def main() -> None:
     lines += representation_tables(load(shared / "representation.json"))
     lines += fwi_tables(load(results / "fwi.json"), load(results / "fwi_search.json"))
     if args.protocol in ("v4", "v5"):
-        lines += v4_tables(load(results / "fwi.json"), load(results / "fwi_search.json"), load(results / "fwi_search_sigma.json"))
+        lines += v4_tables(load(results / "fwi.json"), load(results / "fwi_search.json"), load(results / "fwi_search_sigma.json"), args.protocol)
         lines += oracle_tables(load(results / "fwi.json"), load(results / "fwi_oracle.json"))
     (results / "report_tables.md").write_text("\n".join(lines) + "\n")
     print("\n".join(lines[:5]))
