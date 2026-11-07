@@ -271,7 +271,7 @@ def figure7(fwi: Dict, results: Path, out: Path, quick: bool, protocol: str = "v
         finals = sorted(run_dir.glob("*seed0_final.pt")) if run_dir.exists() else []
         if not finals:
             continue
-        if case == "3d" and protocol == "v5":
+        if case == "3d" and protocol in ("v5", "v6"):
             import bench_fwi
 
             truth = bench_fwi.build_case_large(quick, torch.device("cpu"))
@@ -314,7 +314,7 @@ def figure7(fwi: Dict, results: Path, out: Path, quick: bool, protocol: str = "v
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--quick", action="store_true")
-    parser.add_argument("--protocol", default="v1", choices=["v1", "v2", "v3", "v4", "v5"])
+    parser.add_argument("--protocol", default="v1", choices=["v1", "v2", "v3", "v4", "v5", "v6"])
     args = parser.parse_args()
     base = "quick" if args.quick else "full"
     results = HERE / "results" / (base if args.protocol == "v1" else f"{base}_{args.protocol}")

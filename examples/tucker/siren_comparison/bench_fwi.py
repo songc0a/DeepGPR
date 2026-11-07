@@ -90,9 +90,15 @@ SEARCH_ITERATIONS = 15
 # shots. 3D metrics add the zone sigma error and the eps error below the zone.
 # v5 = v4 on the larger 3D model (``build_case_large``; 36 shots on a 6 x 6
 # grid, 400 receivers); stage B may be skipped with ``run --sigma-scale``.
-PROTOCOLS = ("v1", "v2", "v3", "v4", "v5")
-V4_LIKE = ("v4", "v5")
-ITERATIONS = {"v1": {"3d": 100, "2d": 150}, "v2": {"3d": 150, "2d": 200}, "v3": {"3d": 150, "2d": 200}, "v4": {"3d": 150, "2d": 200}, "v5": {"3d": 150, "2d": 200}}
+# v6 = v5 with the dense tuning of round 5: MS-SSIM misfit (``~/MSSIM``), 500
+# iterations, cosine learning-rate decay (lr ... lr/10), sigma updated from
+# iteration 250; learning rates re-searched per method on held-out shots with
+# the MS-SSIM misfit (15 eps-only iterations, constant rate).
+PROTOCOLS = ("v1", "v2", "v3", "v4", "v5", "v6")
+V4_LIKE = ("v4", "v5", "v6")
+LARGE_MODEL = ("v5", "v6")
+SIGMA_START = {"v6": 250}
+ITERATIONS = {"v1": {"3d": 100, "2d": 150}, "v2": {"3d": 150, "2d": 200}, "v3": {"3d": 150, "2d": 200}, "v4": {"3d": 150, "2d": 200}, "v5": {"3d": 150, "2d": 200}, "v6": {"3d": 500, "2d": 500}}
 TV_RATIO = {"2d": (0.1, 0.1), "3d": (0.1, 0.08)}  # (eps, sigma), as in the notebooks
 SHOT_GRID_3D = 4
 SIGMA_SCALES = (0.0, 0.03, 0.1, 0.3, 1.0)
@@ -221,7 +227,7 @@ def grid_shots_3d(case: Dict[str, Any], quick: bool, device) -> List[torch.Tenso
 
 def split_shots(case_name: str, shots, observed, quick: bool, protocol: str = "v4"):
     """v4 search: (training shots, training data, validation (shot, data) pairs)."""
-    key = f"{case_name}_v5" if (protocol == "v5" and case_name == "3d") else case_name
+    key = f"{case_name}_v5" if (protocol in LARGE_MODEL and case_name == "3d") else case_name
     held = set((VALIDATION_SHOTS_QUICK if quick else VALIDATION_SHOTS)[key])
     if case_name == "3d":
         train = [i for i in range(len(shots)) if i not in held]
@@ -240,7 +246,7 @@ def split_shots(case_name: str, shots, observed, quick: bool, protocol: str = "v
 def load_case(case_name: str, quick: bool, device, protocol: str = "v1"):
     import benchmark_tucker as bt
 
-    if case_name == "3d" and protocol == "v5":
+    if case_name == "3d" and protocol in LARGE_MODEL:
         case = build_case_large(quick, device)
         cache = RESULTS / ("quick" if quick else "full") / "cache" / f"observed3d4m_{case['shots']}_{case['nt']}_{case['config']['dx']:.3f}.pt"
         if cache.exists():
@@ -439,7 +445,7 @@ def fwi(spec: Dict[str, Any]) -> Dict[str, Any]:
     if protocol != "v1" and spec.get("lr_search"):
         eps_only_iterations = ITERATIONS[protocol][spec["case"]] // 3
     eps_only_iterations = spec.get("eps_only_iterations", eps_only_iterations)
-    tv = DeepGPR.TVRegularization(weight_ep=1.0, weight_sigma=1.0).to(device) if protocol in ("v3", "v4", "v5") else None
+    tv = DeepGPR.TVRegularization(weight_ep=1.0, weight_sigma=1.0).to(device) if protocol in ("v3", "v4", "v5", "v6") else None
     tv_ratio = TV_RATIO[spec["case"]]
 
     def add_tv(leaf, ratio, conductivity):
@@ -478,14 +484,15 @@ def fwi(spec: Dict[str, Any]) -> Dict[str, Any]:
         return errors
 
     def misfit(pairs) -> float:
-        total = energy = 0.0
+        # The training objective's data term on these shots (L2: normalised by their energy).
+        obj = DataObjective(spec, [d for _, d in pairs], [o for o, _ in pairs], sum(float(d.square().sum()) for _, d in pairs), device)
+        total = 0.0
         with torch.no_grad():
             eps, sigma = field()
             for options, data_obs in pairs:
                 data = DeepGPR.compute(eps_r=eps, sigma=sigma, save_wavefield_history=False, **options)[-1]
-                total += float((data - data_obs).square().sum())
-                energy += float(data_obs.square().sum())
-        return 0.5 * total / energy
+                total += float(obj(data, data_obs, options))
+        return total
 
     if start_iteration == 0:
         info["initial_errors"] = evaluate()
@@ -610,6 +617,8 @@ def search_specs(case: str, quick: bool, protocol: str = "v1") -> List[Dict[str,
             spec = dict(m, name=f"{case}|search|{m['label']}|lr{lr:g}", case=case, lr=lr, iterations=SEARCH_ITERATIONS if not quick else 4, lr_search=True, quick=quick, seed=0, protocol=protocol)
             if protocol in V4_LIKE:
                 spec.update(train_only=True, save_state=str(search_state(case, quick, protocol, m["label"], lr)))
+            if protocol == "v6":
+                spec["loss"] = "mssim"
             specs.append(spec)
     return specs
 
@@ -686,6 +695,8 @@ def run_specs_for(case: str, quick: bool, seeds=(0, 1, 2), protocol: str = "v1",
             spec = dict(m, name=f"{case}|{m['label']}|seed{seed}{suffix}", case=case, lr=lrs[m["label"]], iterations=iterations, seed=seed, quick=quick, protocol=protocol)
             if protocol in V4_LIKE:
                 spec["sigma_scale"] = scales[m["label"]]
+            if protocol == "v6":
+                spec.update(loss="mssim", schedule="cosine", eps_only_iterations=SIGMA_START["v6"] if not quick else iterations // 2)
             specs.append(spec)
     return specs
 
@@ -709,6 +720,7 @@ def main() -> None:
     parser.add_argument("--time-gain", type=float, default=0.0)
     parser.add_argument("--schedule", default="constant", choices=["constant", "cosine"])
     parser.add_argument("--tag", default="tune")
+    parser.add_argument("--sigma-start", type=int, default=None, help="tune: first iteration that updates sigma (default iterations // 3)")
     args = parser.parse_args()
     if args.command == "_worker":
         worker_main(fwi)
@@ -720,7 +732,8 @@ def main() -> None:
         picked = [m for m in methods(args.case) if args.only and any(t.strip("|") == m["label"] for t in args.only)]
         specs = [dict(m, name=f"{args.case}|{m['label']}|seed0|{args.tag}", case=args.case, lr=args.lr, iterations=args.iterations, seed=0,
                       quick=args.quick, protocol=args.protocol, sigma_scale=1.0 if args.sigma_scale is None else args.sigma_scale,
-                      loss=args.loss, time_gain=args.time_gain, schedule=args.schedule) for m in picked]
+                      loss=args.loss, time_gain=args.time_gain, schedule=args.schedule,
+                      **({} if args.sigma_start is None else {"eps_only_iterations": args.sigma_start})) for m in picked]
         out, kind = out_dir / "fwi_tune.json", "fwi-tune"
         run_specs(Path(__file__), kind, specs, out, force=args.force)
         return
