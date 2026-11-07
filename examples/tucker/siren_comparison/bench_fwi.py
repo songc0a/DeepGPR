@@ -340,6 +340,55 @@ def _build_field(spec, case, mapping, device):
 # ---------------------------------------------------------------------------
 
 
+class DataObjective:
+    """Data term of the FWI loss (default: the normalised L2 of rounds 1-5).
+
+    ``spec["time_gain"] = p``: residuals weighted by ``(t / t_end)^p`` (both
+    data multiplied by the gain). ``spec["loss"] = "mssim"``: the MS-SSIM misfit
+    of ``~/MSSIM`` (``Misfit_M_SSIM``, 2D mode: each trace is scaled to its
+    maximum over time, Gaussian windows over (time, receiver)); 3D shots with
+    a receiver grid are compared line by line (sections along z, one batch entry
+    per receiver line along x); the value is averaged over shots (0 = perfect).
+    """
+
+    def __init__(self, spec, observed, shots, scale, device):
+        import os
+
+        self.kind = spec.get("loss", "l2")
+        self.gain_power = float(spec.get("time_gain", 0.0))
+        self.scale, self.shots = scale, len(observed)
+        self.gain = None
+        if self.gain_power:
+            nt = observed[0].shape[1]
+            t = torch.arange(1, nt + 1, device=device, dtype=observed[0].dtype)
+            self.gain = ((t / nt) ** self.gain_power).reshape(1, nt, 1)
+            self.scale = sum(float((d * self.gain).square().sum()) for d in observed)
+        if self.kind == "mssim":
+            for path in (os.environ.get("MSSIM_PARENT"), os.path.expanduser("~"), os.path.expanduser("~/Desktop")):
+                if path and os.path.isdir(os.path.join(path, "MSSIM")):
+                    sys.path.insert(0, path)
+                    break
+            from MSSIM import Misfit_M_SSIM
+
+            self.mssim = Misfit_M_SSIM()
+
+    def _lines(self, data, options):
+        """(1, T, Rx*Rz) on a receiver grid (z fastest) -> (Rx, T, Rz); 2D batches unchanged."""
+        rec = options["receiver_location"][0]
+        nx_r, nz_r = int(torch.unique(rec[:, 0]).numel()), int(torch.unique(rec[:, 2]).numel())
+        if data.shape[0] != 1 or nx_r * nz_r != data.shape[2] or nx_r == 1 or nz_r == 1:
+            return data
+        assert int(rec[1, 2]) > int(rec[0, 2]) and int(rec[1, 0]) == int(rec[0, 0]), "receivers must be z-fastest"
+        return data[0].reshape(data.shape[1], nx_r, nz_r).permute(1, 0, 2)
+
+    def __call__(self, data, data_obs, options):
+        if self.gain is not None:
+            data, data_obs = data * self.gain, data_obs * self.gain
+        if self.kind == "mssim":
+            return self.mssim.forward(self._lines(data_obs, options), self._lines(data, options)) / self.shots
+        return 0.5 * (data - data_obs).square().sum() / self.scale
+
+
 def fwi(spec: Dict[str, Any]) -> Dict[str, Any]:
     import os
 
@@ -361,6 +410,7 @@ def fwi(spec: Dict[str, Any]) -> Dict[str, Any]:
     if spec.get("train_only"):
         shots, observed, validation = split_shots(spec["case"], shots, observed, quick, protocol)
     scale = sum(float(d.square().sum()) for d in observed)
+    objective = DataObjective(spec, observed, shots, scale, device)
     field, info = build_field(spec, case, mapping, device)
     sigma_scale = float(spec.get("sigma_scale", 1.0))
     eps_params, sigma_params, shared_params = split_parameters(field)
@@ -372,6 +422,7 @@ def fwi(spec: Dict[str, Any]) -> Dict[str, Any]:
     else:
         optimizer = torch.optim.Adam(field.parameters(), lr=spec["lr"])
     sigma_grad_scale = sigma_scale if (protocol in V4_LIKE and shared_params) else 1.0
+    base_rates = [group["lr"] for group in optimizer.param_groups]
     if spec.get("init_state"):
         # v4 stage B: continue the chosen stage-A state; keep this spec's rates.
         state = torch.load(spec["init_state"], map_location=device)
@@ -452,7 +503,7 @@ def fwi(spec: Dict[str, Any]) -> Dict[str, Any]:
         eps_leaf = eps.detach().requires_grad_(True)
         sig_leaf = sigma.detach().requires_grad_(True)
         fdtd_forward = adjoint = 0.0
-        loss_total = 0.0
+        loss_total = l2_total = 0.0
         for options, data_obs in zip(shots, observed):
             a = torch.cuda.Event(enable_timing=True)
             b = torch.cuda.Event(enable_timing=True)
@@ -462,7 +513,8 @@ def fwi(spec: Dict[str, Any]) -> Dict[str, Any]:
                 data = bt.checkpointed_shot(eps_leaf, sig_leaf, options, checkpoint_steps, None)
             else:
                 data = DeepGPR.compute(eps_r=eps_leaf, sigma=sig_leaf, **options)[-1]
-            loss = 0.5 * (data - data_obs).square().sum() / scale
+            loss = objective(data, data_obs, options)
+            l2_total += float(0.5 * (data.detach() - data_obs).square().sum() / scale)
             b.record()
             loss.backward()
             c.record()
@@ -484,6 +536,10 @@ def fwi(spec: Dict[str, Any]) -> Dict[str, Any]:
         else:
             torch.autograd.backward([eps, sigma], [eps_leaf.grad, sig_leaf.grad * sigma_grad_scale])
         timer.mark("network_backward")
+        if spec.get("schedule") == "cosine":  # lr * (0.1 ... 1), keeping the sigma / eps ratio
+            factor = 0.1 + 0.9 * 0.5 * (1 + math.cos(math.pi * iteration / max(1, iterations - 1)))
+            for group, base in zip(optimizer.param_groups, base_rates):
+                group["lr"] = base * factor
         optimizer.step()
         timer.mark("optimizer")
         phases = timer.durations()
@@ -498,6 +554,8 @@ def fwi(spec: Dict[str, Any]) -> Dict[str, Any]:
             iteration_s=phases["total"],
             wall_s=time.perf_counter() - wall0,
         )
+        if objective.kind != "l2" or objective.gain_power:
+            record["l2_misfit"] = l2_total
         if tv is not None:
             record["regularization_s"] = phases["regularization"]
             record["tv_weights"] = tv_weights
@@ -634,7 +692,7 @@ def run_specs_for(case: str, quick: bool, seeds=(0, 1, 2), protocol: str = "v1",
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=["search", "search_sigma", "run", "list", "_worker"])
+    parser.add_argument("command", choices=["search", "search_sigma", "run", "tune", "list", "_worker"])
     parser.add_argument("spec", nargs="?")
     parser.add_argument("--case", default="3d", choices=["2d", "3d"])
     parser.add_argument("--only", nargs="*")
@@ -644,6 +702,13 @@ def main() -> None:
     parser.add_argument("--protocol", default="v1", choices=PROTOCOLS)
     parser.add_argument("--select", default="data", choices=["data", "oracle"], help="v4: hyper-parameter selection (oracle: reference only)")
     parser.add_argument("--sigma-scale", type=float, default=None, help="v4/v5 run: fixed sigma step scale instead of stage B")
+    # tune: one run of one method with explicit settings (results in fwi_tune.json)
+    parser.add_argument("--lr", type=float)
+    parser.add_argument("--iterations", type=int)
+    parser.add_argument("--loss", default="l2", choices=["l2", "mssim"])
+    parser.add_argument("--time-gain", type=float, default=0.0)
+    parser.add_argument("--schedule", default="constant", choices=["constant", "cosine"])
+    parser.add_argument("--tag", default="tune")
     args = parser.parse_args()
     if args.command == "_worker":
         worker_main(fwi)
@@ -651,6 +716,14 @@ def main() -> None:
     out_dir = result_dir(args.quick, args.protocol)
     if args.command == "search":
         specs, out, kind = search_specs(args.case, args.quick, args.protocol), out_dir / "fwi_search.json", "fwi-search"
+    elif args.command == "tune":
+        picked = [m for m in methods(args.case) if args.only and any(t.strip("|") == m["label"] for t in args.only)]
+        specs = [dict(m, name=f"{args.case}|{m['label']}|seed0|{args.tag}", case=args.case, lr=args.lr, iterations=args.iterations, seed=0,
+                      quick=args.quick, protocol=args.protocol, sigma_scale=1.0 if args.sigma_scale is None else args.sigma_scale,
+                      loss=args.loss, time_gain=args.time_gain, schedule=args.schedule) for m in picked]
+        out, kind = out_dir / "fwi_tune.json", "fwi-tune"
+        run_specs(Path(__file__), kind, specs, out, force=args.force)
+        return
     elif args.command == "search_sigma":
         stage = "search_sigma" if args.select == "data" else "search_sigma_oracle"
         specs, out, kind = search_sigma_specs(args.case, args.quick, args.protocol, args.select), out_dir / f"fwi_{stage}.json", "fwi-search-sigma"
