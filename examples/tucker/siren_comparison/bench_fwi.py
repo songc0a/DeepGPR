@@ -727,6 +727,7 @@ def main() -> None:
     parser.add_argument("--tag", default="tune")
     parser.add_argument("--sigma-start", type=int, default=None, help="tune: first iteration that updates sigma (default iterations // 3)")
     parser.add_argument("--sketch-rank", type=int, default=0, help="tune: module-B wavefield compression with this spatial rank (rhs from_e)")
+    parser.add_argument("--sketch-segment", type=int, default=32, help="tune: steps per native call of the compressed history")
     args = parser.parse_args()
     if args.command == "_worker":
         worker_main(fwi)
@@ -740,7 +741,7 @@ def main() -> None:
                       quick=args.quick, protocol=args.protocol, sigma_scale=1.0 if args.sigma_scale is None else args.sigma_scale,
                       loss=args.loss, time_gain=args.time_gain, schedule=args.schedule,
                       **({} if args.sigma_start is None else {"eps_only_iterations": args.sigma_start}),
-                      **({} if not args.sketch_rank else {"wavefield_sketch": dict(ranks=args.sketch_rank, oversampling=8, segment_steps=8, rhs="from_e")}))
+                      **({} if not args.sketch_rank else {"wavefield_sketch": dict(ranks=args.sketch_rank, oversampling=8, segment_steps=args.sketch_segment, rhs="from_e", recovery_device="host")}))
                  for m in picked]
         out, kind = out_dir / "fwi_tune.json", "fwi-tune"
         run_specs(Path(__file__), kind, specs, out, force=args.force)
