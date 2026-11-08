@@ -734,6 +734,28 @@ under the same schedule (`run_v6_dense_ref.sh`).
   SIREN >> Tucker-SIREN in eps and in sigma RMSE; the neural parameterizations
   do not help here, and the separable Tucker structure is clearly harmful.
 
+Smaller learning rates for Tucker-SIREN (Lei's request; `run_v6_tsiren_lr.sh`,
+r16 on GPU 2, r24 on GPU 5, two rates side by side per GPU, ~21 s per
+iteration; `results/full_v6/fwi_tune.json`, figure `tsiren_smaller_lr.png`):
+
+| run | final MS-SSIM | upper 1 m eps RMSE | lower 1 m eps RMSE | eps SSIM | upper 1 m log10 sigma RMSE | log10 sigma SSIM |
+|---|---|---|---|---|---|---|
+| r16 lr 3e-4 (searched) | 11.8 | 0.380 | 1.220 | 0.605 | 0.303 | 0.034 |
+| r16 lr 1e-4 | 17.8 | 0.410 | 1.098 | 0.567 | 0.247 | 0.077 |
+| r16 lr 3e-5 | 40.7 | 0.464 | 0.936 | 0.473 | 0.220 | 0.213 |
+| r24 lr 3e-4 (searched) | 4.2 | 0.331 | 0.970 | 0.688 | 0.258 | 0.043 |
+| r24 lr 1e-4 | 5.5 | 0.334 | 1.008 | 0.652 | 0.225 | 0.047 |
+| r24 lr 3e-5 | 13.2 | 0.383 | 0.975 | 0.592 | 0.165 | 0.085 |
+
+All runs start from the same pre-fitted model (0.621 / 0.451 / 0.079). A
+smaller rate slows the damage but does not prevent it: the lower-metre error
+still rises in the first iterations (after 15 iterations 0.58 at 3e-5, 0.75-0.77
+at 1e-4, 0.94-1.04 at 3e-4) and ends at 0.94-1.10, while the upper metre
+converges more slowly; sigma still breaks into blocks once it is updated
+(0.17-0.25, start 0.079). The failure is structural: the factor matrices are
+shared by the whole volume, so the updates driven by the strong shallow data
+also change the weakly constrained deep part.
+
 ## 6. Answers
 
 | question | answer (measured) |
@@ -807,6 +829,7 @@ python report.py && python plots.py     # results/full/report_tables.md, figures
 # dense tuning (Section 5.8): bench_fwi.py tune --protocol v5 --only dense --loss mssim --lr 0.01 --schedule cosine --iterations 1000
 # round 6 (Section 5.9): python schedule_v6.py --gpus 5,4; run_v6_dense_ref.sh; report.py/plots.py --protocol v6;
 #   plot_slices.py OUT.png "label=results/full_v6/fwi_runs/3d/<run>_final.pt" ...
+# smaller-lr Tucker-SIREN (Section 5.9): run_v6_tsiren_lr.sh
 # (server drivers: run_fwi_server.sh, run_v2_server.sh, rerun_v2_3d.sh, run_v3_server.sh)
 python stripe_check.py --protocol v2     # 2D stripe direction, results/full_v2/stripe_check.json
 python -m unittest discover -s ../../../tests -p "test_tucker_siren*.py"

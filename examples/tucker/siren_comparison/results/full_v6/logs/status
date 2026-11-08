@@ -37,3 +37,20 @@
 2026-11-08 05:09:31 reference: dense lr0.01 gpu5 pass2 start
 2026-11-08 05:09:32 reference: dense lr0.01 gpu5 pass2 exit 0
 2026-11-08 05:09:32 reference: DONE
+2026-11-08 13:21:03 tsiren-lr: tsiren_2x32_r16 lr1e-4 gpu2 pass1 start
+2026-11-08 13:23:03 tsiren-lr: tsiren_2x32_r16 lr3e-5 gpu2 pass1 start
+2026-11-08 13:23:03 tsiren-lr: tsiren_2x32_r24 lr1e-4 gpu5 pass1 start
+2026-11-08 13:25:03 tsiren-lr: tsiren_2x32_r24 lr3e-5 gpu5 pass1 start
+2026-11-08 16:12:53 tsiren-lr: tsiren_2x32_r24 lr1e-4 gpu5 pass1 exit 0
+2026-11-08 16:12:53 tsiren-lr: tsiren_2x32_r24 lr1e-4 gpu5 pass2 start
+2026-11-08 16:12:54 tsiren-lr: tsiren_2x32_r24 lr1e-4 gpu5 pass2 exit 0
+2026-11-08 16:15:07 tsiren-lr: tsiren_2x32_r24 lr3e-5 gpu5 pass1 exit 0
+2026-11-08 16:15:07 tsiren-lr: tsiren_2x32_r24 lr3e-5 gpu5 pass2 start
+2026-11-08 16:15:08 tsiren-lr: tsiren_2x32_r24 lr3e-5 gpu5 pass2 exit 0
+2026-11-08 16:21:03 tsiren-lr: tsiren_2x32_r16 lr1e-4 gpu2 pass1 exit 0
+2026-11-08 16:21:03 tsiren-lr: tsiren_2x32_r16 lr1e-4 gpu2 pass2 start
+2026-11-08 16:21:05 tsiren-lr: tsiren_2x32_r16 lr1e-4 gpu2 pass2 exit 0
+2026-11-08 16:23:26 tsiren-lr: tsiren_2x32_r16 lr3e-5 gpu2 pass1 exit 0
+2026-11-08 16:23:26 tsiren-lr: tsiren_2x32_r16 lr3e-5 gpu2 pass2 start
+2026-11-08 16:23:27 tsiren-lr: tsiren_2x32_r16 lr3e-5 gpu2 pass2 exit 0
+2026-11-08 16:23:27 tsiren-lr: DONE
