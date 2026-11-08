@@ -756,6 +756,26 @@ converges more slowly; sigma still breaks into blocks once it is updated
 shared by the whole volume, so the updates driven by the strong shallow data
 also change the weakly constrained deep part.
 
+Higher Tucker ranks (Lei's request; exact wavefield history; v6 protocol with
+the learning rate re-searched: 3e-4 for both; `run_v6_tsiren_rank.sh`, r32 on
+GPU 2, r48 on GPU 5; figure `tsiren_higher_rank.png`):
+
+| run | parameters | final MS-SSIM | upper 1 m eps RMSE | lower 1 m eps RMSE | eps SSIM | upper 1 m log10 sigma RMSE | log10 sigma SSIM |
+|---|---|---|---|---|---|---|---|
+| Tucker-SIREN r16 | 18 080 | 11.8 | 0.380 | 1.220 | 0.605 | 0.303 | 0.034 |
+| Tucker-SIREN r24 | 39 120 | 4.2 | 0.331 | 0.970 | 0.688 | 0.258 | 0.043 |
+| Tucker-SIREN r32 | 78 592 | 1.5 | 0.257 | 0.558 | 0.767 | 0.195 | 0.045 |
+| Tucker-SIREN r48 | 237 408 | 1.1 | **0.255** | **0.409** | 0.758 | 0.214 | 0.032 |
+| SIREN 4 x 128 | 50 306 | 3.5 | 0.255 | 0.547 | **0.811** | 0.084 | **0.788** |
+| dense | 1 000 000 | 0.04 | 0.145 | 0.213 | 0.939 | 0.059 | 0.383 |
+
+The rank is the limiting factor for eps: from r32 on Tucker-SIREN matches the
+SIREN in the upper metre and r48 keeps the basement (lower metre 0.409, better
+than the start 0.451 and than the SIREN), while fitting the data better than
+the SIREN (MS-SSIM 1.1 vs 3.5). r48 needs 4.7x the SIREN's parameters. Sigma
+remains broken into horizontal blocks at every rank once it is updated (0.19-0.30,
+start 0.079); dense is still clearly best.
+
 ## 6. Answers
 
 | question | answer (measured) |
@@ -830,6 +850,7 @@ python report.py && python plots.py     # results/full/report_tables.md, figures
 # round 6 (Section 5.9): python schedule_v6.py --gpus 5,4; run_v6_dense_ref.sh; report.py/plots.py --protocol v6;
 #   plot_slices.py OUT.png "label=results/full_v6/fwi_runs/3d/<run>_final.pt" ...
 # smaller-lr Tucker-SIREN (Section 5.9): run_v6_tsiren_lr.sh
+# higher-rank Tucker-SIREN (Section 5.9): run_v6_tsiren_rank.sh; module-B dense: run_v6_dense_sketch.sh, probe_wavefield_sketch.py
 # (server drivers: run_fwi_server.sh, run_v2_server.sh, rerun_v2_3d.sh, run_v3_server.sh)
 python stripe_check.py --protocol v2     # 2D stripe direction, results/full_v2/stripe_check.json
 python -m unittest discover -s ../../../tests -p "test_tucker_siren*.py"

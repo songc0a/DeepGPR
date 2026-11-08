@@ -54,3 +54,21 @@
 2026-11-08 16:23:26 tsiren-lr: tsiren_2x32_r16 lr3e-5 gpu2 pass2 start
 2026-11-08 16:23:27 tsiren-lr: tsiren_2x32_r16 lr3e-5 gpu2 pass2 exit 0
 2026-11-08 16:23:27 tsiren-lr: DONE
+2026-11-08 16:45:03 tsiren-rank: tsiren_2x32_r32 search gpu2 pass1 start
+2026-11-08 16:45:03 tsiren-rank: tsiren_2x32_r48 search gpu5 pass1 start
+2026-11-08 16:54:20 tsiren-rank: tsiren_2x32_r48 search gpu5 pass1 exit 0
+2026-11-08 16:54:20 tsiren-rank: tsiren_2x32_r48 search gpu5 pass2 start
+2026-11-08 16:54:21 tsiren-rank: tsiren_2x32_r48 search gpu5 pass2 exit 0
+2026-11-08 16:54:21 tsiren-rank: tsiren_2x32_r48 run gpu5 pass1 start
+2026-11-08 16:54:39 tsiren-rank: tsiren_2x32_r32 search gpu2 pass1 exit 0
+2026-11-08 16:54:39 tsiren-rank: tsiren_2x32_r32 search gpu2 pass2 start
+2026-11-08 16:54:39 sketch: dense sketch r32 gpu7 pass1 start
+2026-11-08 16:54:40 tsiren-rank: tsiren_2x32_r32 search gpu2 pass2 exit 0
+2026-11-08 16:54:41 tsiren-rank: tsiren_2x32_r32 run gpu2 pass1 start
+2026-11-08 18:15:04 tsiren-rank: tsiren_2x32_r48 run gpu5 pass1 exit 0
+2026-11-08 18:15:04 tsiren-rank: tsiren_2x32_r48 run gpu5 pass2 start
+2026-11-08 18:15:05 tsiren-rank: tsiren_2x32_r48 run gpu5 pass2 exit 0
+2026-11-08 18:19:49 tsiren-rank: tsiren_2x32_r32 run gpu2 pass1 exit 0
+2026-11-08 18:19:49 tsiren-rank: tsiren_2x32_r32 run gpu2 pass2 start
+2026-11-08 18:19:50 tsiren-rank: tsiren_2x32_r32 run gpu2 pass2 exit 0
+2026-11-08 18:19:50 tsiren-rank: DONE
