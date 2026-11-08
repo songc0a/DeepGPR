@@ -1,0 +1,39 @@
+2026-11-07 21:36:05 start, 8 tasks, GPUs ['5', '4']
+2026-11-07 21:36:35 3d_A_siren_4x128 gpu5 pass1 start
+2026-11-07 21:49:24 3d_A_siren_4x128 gpu5 pass1 exit 0
+2026-11-07 21:49:55 3d_A_siren_4x128 gpu5 pass2 start
+2026-11-07 21:50:05 3d_A_siren_4x128 gpu5 pass2 exit 0
+2026-11-07 21:50:35 3d_A_tsiren_2x32_r16 gpu5 pass1 start
+2026-11-07 21:59:40 3d_A_tsiren_2x32_r16 gpu5 pass1 exit 0
+2026-11-07 22:00:10 3d_A_tsiren_2x32_r16 gpu5 pass2 start
+2026-11-07 22:00:21 3d_A_tsiren_2x32_r16 gpu5 pass2 exit 0
+2026-11-07 22:00:51 3d_A_tsiren_2x32_r24 gpu5 pass1 start
+2026-11-07 22:09:57 3d_A_tsiren_2x32_r24 gpu5 pass1 exit 0
+2026-11-07 22:10:27 3d_A_tsiren_2x32_r24 gpu5 pass2 start
+2026-11-07 22:10:37 3d_A_tsiren_2x32_r24 gpu5 pass2 exit 0
+2026-11-07 22:11:07 3d_A_dense gpu5 pass1 start
+2026-11-07 22:19:32 3d_A_dense gpu5 pass1 exit 0
+2026-11-07 22:20:02 3d_A_dense gpu5 pass2 start
+2026-11-07 22:20:12 3d_A_dense gpu5 pass2 exit 0
+2026-11-07 22:20:42 3d_run_siren_4x128 gpu5 pass1 start
+2026-11-07 23:42:13 3d_run_siren_4x128 gpu5 pass1 exit 0
+2026-11-07 23:42:44 3d_run_siren_4x128 gpu5 pass2 start
+2026-11-07 23:42:54 3d_run_siren_4x128 gpu5 pass2 exit 0
+2026-11-07 23:43:24 3d_run_tsiren_2x32_r16 gpu5 pass1 start
+2026-11-08 01:03:53 3d_run_tsiren_2x32_r16 gpu5 pass1 exit 0
+2026-11-08 01:04:23 3d_run_tsiren_2x32_r16 gpu5 pass2 start
+2026-11-08 01:04:33 3d_run_tsiren_2x32_r16 gpu5 pass2 exit 0
+2026-11-08 01:05:04 3d_run_tsiren_2x32_r24 gpu5 pass1 start
+2026-11-08 02:25:17 3d_run_tsiren_2x32_r24 gpu5 pass1 exit 0
+2026-11-08 02:25:48 3d_run_tsiren_2x32_r24 gpu5 pass2 start
+2026-11-08 02:25:58 3d_run_tsiren_2x32_r24 gpu5 pass2 exit 0
+2026-11-08 02:26:28 3d_run_dense gpu5 pass1 start
+2026-11-08 03:46:24 3d_run_dense gpu5 pass1 exit 0
+2026-11-08 03:46:55 3d_run_dense gpu5 pass2 start
+2026-11-08 03:47:05 3d_run_dense gpu5 pass2 exit 0
+2026-11-08 03:47:15 ALL DONE
+2026-11-08 03:48:46 reference: dense lr0.01 gpu5 pass1 start
+2026-11-08 05:08:30 reference: dense lr0.01 gpu5 pass1 exit 0
+2026-11-08 05:09:31 reference: dense lr0.01 gpu5 pass2 start
+2026-11-08 05:09:32 reference: dense lr0.01 gpu5 pass2 exit 0
+2026-11-08 05:09:32 reference: DONE

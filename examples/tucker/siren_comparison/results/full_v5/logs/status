@@ -10,3 +10,9 @@
 2026-11-07 17:55:05 run gpu5 pass2 start
 2026-11-07 17:55:06 run gpu5 pass2 exit 0
 2026-11-07 17:55:06 ALL DONE
+2026-11-07 18:10:30 tune: mssim_lr0.01 gpu5 pass1 start
+2026-11-07 20:49:47 tune: mssim_lr0.01 gpu5 pass1 exit 0
+2026-11-07 20:49:47 tune: mssim_lr0.01 gpu5 pass2 start
+2026-11-07 20:49:48 tune: mssim_lr0.01 gpu5 pass2 exit 0
+2026-11-07 20:50:39 tune: mssim_gain2.5_lr0.01 gpu5 pass1 start
+2026-11-07 21:33:33 tune: mssim_gain2.5_lr0.01 stopped by hand at ~260 epochs (GPU 5 needed for round 6; partial history in its checkpoint)

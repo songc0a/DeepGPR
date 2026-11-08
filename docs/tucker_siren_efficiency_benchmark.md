@@ -658,6 +658,82 @@ A larger and deeper model with acquisition covering 2 m (`bench_fwi.build_case_l
   SIREN and both Tucker-SIREN ranks, not for dense (0.1 chosen, 0.03 better).
 * Single seed; sigma proportional to eps as before (Section 5.6 caveat).
 
+### 5.8 Dense tuning on the 4 x 4 x 2 m model (MS-SSIM misfit)
+
+Round 5 left dense (and the other methods) barely better than the start. Two
+diagnostics (`results/full_v5`):
+
+* 99.9 % of the observed data energy lies in the first 10 ns (direct waves near
+  the sources); the 1-2 m reflections (21-37 ns) carry about 1e-4 of it, so
+  the L2 misfit hardly sees them. An amplitude gain t^2 still leaves 86 % of
+  the misfit in the first 10 ns, t^2.5 about 55 %.
+* Gaussian-smoothing the truth by 8-12 cm gives an upper-1-m RMSE of
+  0.47-0.53. This is not a bound for FWI; the runs below go far below it.
+
+Dense with the MS-SSIM misfit of `~/MSSIM` (`Misfit_M_SSIM`, unmodified, 2D
+mode: each trace scaled to its maximum over time, then local structure
+compared in Gaussian windows of 5 widths; the 20 x 20 receiver grid is fed as
+20 line sections along z; `DataObjective` in `bench_fwi.py`), Adam lr 0.01
+cosine-decayed to 0.001 (chosen with knowledge of the truth: lr 0.1 damaged
+the model in the round-5 search), 1000 iterations, sigma from iteration 334,
+same start, TV and shots (`bench_fwi.py tune`, `results/full_v5/fwi_tune.json`,
+`results/full_v5/figures/dense_tuning_mssim.png`):
+
+| | upper 1 m eps RMSE | lower 1 m eps RMSE | eps RMSE / SSIM | upper 1 m log10 sigma RMSE | log10 sigma RMSE / SSIM |
+|---|---|---|---|---|---|
+| start | 0.621 | 0.451 | 0.546 / 0.322 | 0.079 | 0.061 / 0.345 |
+| round 5 (L2, lr 0.1, 150 it) | 0.590 | 0.673 | 0.638 / 0.334 | 0.073 | 0.060 / 0.326 |
+| MS-SSIM, 500 it | 0.150 | 0.211 | 0.196 / - | 0.061 | - |
+| MS-SSIM, 1000 it | **0.134** | **0.200** | **0.182 / 0.951** | 0.055 | 0.050 / 0.385 |
+
+The folds, the dipping layer and the basement step are recovered, including
+the lower metre; the per-trace normalisation and the local variance
+normalisation of MS-SSIM give the weak late reflections a weight comparable
+with the direct waves. Sigma improves only a little (speckle near the surface,
+horizontal streaks near 1.7 m). A variant with a t^2.5 gain on the traces
+before MS-SSIM converged more slowly (upper eps 0.271 vs 0.233 at 200
+iterations) and was stopped at ~260 iterations. Noise-free data and the same
+solver for data and inversion (inverse crime) make this recovery optimistic.
+
+### 5.9 Round 6 (protocol v6: MS-SSIM, 500 iterations, all methods)
+
+Lei's rules for the 3D experiments from here on: MS-SSIM, cosine learning-rate
+decay (lr ... lr/10), 500 iterations, sigma updated from iteration 250, learning
+rates re-searched per method (`--protocol v6`, `schedule_v6.py`,
+`results/full_v6/`). Search: 4 candidates, 15 eps-only iterations on 30 shots,
+choice by the MS-SSIM misfit of the 6 held-out shots (no truth); sigma step 1;
+seed 0; GPU 5 (9.5 s per iteration, peaks 9.8 / 11.7 GiB). The search picked
+the candidate with the lowest upper-1-m model error for every method except
+Tucker-SIREN r16 (3e-4 instead of 1e-4). Reference: dense at the round-5 lr 0.01
+under the same schedule (`run_v6_dense_ref.sh`).
+
+| method (lr) | final MS-SSIM | upper 1 m eps RMSE (start 0.621) | lower 1 m eps RMSE (0.451) | eps RMSE / SSIM (0.546 / 0.322) | upper 1 m log10 sigma RMSE (0.079) | log10 sigma RMSE / SSIM (0.061 / 0.345) |
+|---|---|---|---|---|---|---|
+| dense (0.03, searched) | 0.04 | **0.145** | **0.213** | **0.197 / 0.939** | **0.059** | **0.052** / 0.383 |
+| dense (0.01, reference) | 0.11 | 0.198 | 0.237 | 0.228 / 0.917 | 0.066 | 0.058 / 0.247 |
+| SIREN 4 x 128 (1e-4) | 3.5 | 0.255 | 0.547 | 0.435 / 0.811 | 0.084 | 0.090 / **0.788** |
+| Tucker-SIREN r16 (3e-4) | 11.8 | 0.380 | 1.220 | 0.909 / 0.605 | 0.303 | 0.264 / 0.034 |
+| Tucker-SIREN r24 (3e-4) | 4.2 | 0.331 | 0.970 | 0.731 / 0.688 | 0.258 | 0.249 / 0.043 |
+
+(`results/full_v6/figures/comparison_slices.png`, `plot_slices.py`.)
+
+* Dense with the searched rate reaches in 500 iterations almost the 1000-
+  iteration tuned result (0.145 / 0.213 vs 0.134 / 0.200); lr 0.01 is too slow
+  for 500 iterations. The data-only search works for dense with MS-SSIM.
+* The SIREN recovers the folds and the basement shape but smoothed, and
+  underestimates the basement (eps ~7 instead of 8), hence the lower-metre
+  error above the start; it fits the data much less well (MS-SSIM 3.5 vs
+  0.04). Its sigma has the right structure (SSIM 0.79) but a too-low level
+  (RMSE 0.090); sigma improved while only eps was updated (shared network;
+  upper 0.041 at iteration 250) and got worse once sigma was updated. Sigma is
+  proportional to eps in this model (Section 5.6 caveat).
+* Both Tucker-SIREN models recover the shallow folds partly but lose the
+  basement (lower-metre error 0.97-1.22) and their sigma breaks down into
+  blocks at the mapping bounds once it is updated (SSIM 0.03-0.04).
+* With a misfit that constrains the whole depth, the ranking is dense >
+  SIREN >> Tucker-SIREN in eps and in sigma RMSE; the neural parameterizations
+  do not help here, and the separable Tucker structure is clearly harmful.
+
 ## 6. Answers
 
 | question | answer (measured) |
@@ -728,6 +804,9 @@ python report.py && python plots.py     # results/full/report_tables.md, figures
 #   run_v4_extras.sh / run_v4_reference3d.sh (--select oracle reference), report.py/plots.py --protocol v4
 # round 5 (Section 5.7): run_v5.sh (search + run --sigma-scale 1, --protocol v5), report.py/plots.py --protocol v5,
 #   plot_layout.py --protocol v5
+# dense tuning (Section 5.8): bench_fwi.py tune --protocol v5 --only dense --loss mssim --lr 0.01 --schedule cosine --iterations 1000
+# round 6 (Section 5.9): python schedule_v6.py --gpus 5,4; run_v6_dense_ref.sh; report.py/plots.py --protocol v6;
+#   plot_slices.py OUT.png "label=results/full_v6/fwi_runs/3d/<run>_final.pt" ...
 # (server drivers: run_fwi_server.sh, run_v2_server.sh, rerun_v2_3d.sh, run_v3_server.sh)
 python stripe_check.py --protocol v2     # 2D stripe direction, results/full_v2/stripe_check.json
 python -m unittest discover -s ../../../tests -p "test_tucker_siren*.py"
