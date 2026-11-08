@@ -428,6 +428,8 @@ def fwi(spec: Dict[str, Any]) -> Dict[str, Any]:
     else:
         optimizer = torch.optim.Adam(field.parameters(), lr=spec["lr"])
     sigma_grad_scale = sigma_scale if (protocol in V4_LIKE and shared_params) else 1.0
+    # Optional module-B wavefield compression (``spec["wavefield_sketch"]``: TuckerSketchConfig options).
+    sketch = bt.sketch_config({"sketch": spec["wavefield_sketch"]}) if spec.get("wavefield_sketch") else None
     base_rates = [group["lr"] for group in optimizer.param_groups]
     if spec.get("init_state"):
         # v4 stage B: continue the chosen stage-A state; keep this spec's rates.
@@ -518,6 +520,8 @@ def fwi(spec: Dict[str, Any]) -> Dict[str, Any]:
             a.record()
             if checkpoint_steps:
                 data = bt.checkpointed_shot(eps_leaf, sig_leaf, options, checkpoint_steps, None)
+            elif sketch is not None:  # module B: streaming Tucker compression of the stored history
+                data = DeepGPR.compute(eps_r=eps_leaf, sigma=sig_leaf, wavefield_sketch=sketch, **options)[-1]
             else:
                 data = DeepGPR.compute(eps_r=eps_leaf, sigma=sig_leaf, **options)[-1]
             loss = objective(data, data_obs, options)
@@ -582,6 +586,7 @@ def fwi(spec: Dict[str, Any]) -> Dict[str, Any]:
         history=history,
         resumed_from=start_iteration,
         checkpoint_steps=checkpoint_steps,
+        wavefield_sketch=spec.get("wavefield_sketch"),
     )
     if validation:
         result["validation_loss"] = misfit(validation)
@@ -604,7 +609,7 @@ def fwi(spec: Dict[str, Any]) -> Dict[str, Any]:
 
 def methods(case: str) -> List[Dict[str, Any]]:
     out = [dict(label="dense", method="dense"), dict(label="siren_4x128", method="siren", hidden=128, layers=4)]
-    for rank in (8, 12, 16, 24):
+    for rank in (8, 12, 16, 24, 32, 48):
         out.append(dict(label=f"tsiren_2x32_r{rank}", method="tucker_siren", hidden=32, layers=2, rank=rank))
     out.append(dict(label="direct_tucker_r16", method="direct_tucker", rank=16))
     return out
@@ -721,6 +726,7 @@ def main() -> None:
     parser.add_argument("--schedule", default="constant", choices=["constant", "cosine"])
     parser.add_argument("--tag", default="tune")
     parser.add_argument("--sigma-start", type=int, default=None, help="tune: first iteration that updates sigma (default iterations // 3)")
+    parser.add_argument("--sketch-rank", type=int, default=0, help="tune: module-B wavefield compression with this spatial rank (rhs from_e)")
     args = parser.parse_args()
     if args.command == "_worker":
         worker_main(fwi)
@@ -733,7 +739,9 @@ def main() -> None:
         specs = [dict(m, name=f"{args.case}|{m['label']}|seed0|{args.tag}", case=args.case, lr=args.lr, iterations=args.iterations, seed=0,
                       quick=args.quick, protocol=args.protocol, sigma_scale=1.0 if args.sigma_scale is None else args.sigma_scale,
                       loss=args.loss, time_gain=args.time_gain, schedule=args.schedule,
-                      **({} if args.sigma_start is None else {"eps_only_iterations": args.sigma_start})) for m in picked]
+                      **({} if args.sigma_start is None else {"eps_only_iterations": args.sigma_start}),
+                      **({} if not args.sketch_rank else {"wavefield_sketch": dict(ranks=args.sketch_rank, oversampling=8, segment_steps=8, rhs="from_e")}))
+                 for m in picked]
         out, kind = out_dir / "fwi_tune.json", "fwi-tune"
         run_specs(Path(__file__), kind, specs, out, force=args.force)
         return
