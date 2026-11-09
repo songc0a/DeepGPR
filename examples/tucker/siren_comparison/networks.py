@@ -202,6 +202,24 @@ class SirenField(MaterialField):
         return {"siren": self.trainable_parameters(), "total": self.trainable_parameters()}
 
 
+class TwoSirenField(MaterialField):
+    """Two independent SIRENs (one output each) for eps and sigma; ``hidden`` 90
+    keeps the parameter count of the shared 4 x 128 SIREN (about 50 k)."""
+
+    def __init__(self, shape, mapping, hidden=90, layers=4, omega_0=30.0, device=None):
+        super().__init__()
+        self.shape, self.mapping = tuple(shape), mapping
+        self.eps_net = Siren(len(shape), 1, hidden, layers, omega_0, omega_0)
+        self.sigma_net = Siren(len(shape), 1, hidden, layers, omega_0, omega_0)
+        self.register_buffer("coords", coordinate_grid(shape, device), persistent=False)
+
+    def unconstrained(self):
+        return self.eps_net(self.coords)[:, 0].reshape(self.shape), self.sigma_net(self.coords)[:, 0].reshape(self.shape)
+
+    def parameter_breakdown(self):
+        return {"siren": self.trainable_parameters(), "total": self.trainable_parameters()}
+
+
 class TuckerFactorNet(nn.Module):
     """1D SIREN ``x -> U[x, :]`` producing an ``(n, rank)`` factor matrix."""
 
@@ -318,6 +336,8 @@ def split_parameters(field: MaterialField):
         return list(inner.eps_tucker.parameters()), list(inner.sigma_tucker.parameters()), []
     if isinstance(inner, TuckerSirenField):
         return list(inner.eps_field.parameters()), list(inner.sigma_field.parameters()), []
+    if isinstance(inner, TwoSirenField):
+        return list(inner.eps_net.parameters()), list(inner.sigma_net.parameters()), []
     return [], [], list(inner.parameters())  # one network for both properties
 
 
@@ -402,6 +422,7 @@ def prefit_field(field: MaterialField, t_eps: torch.Tensor, t_sigma: torch.Tenso
 
 
 __all__ = [
+    "TwoSirenField",
     "DenseField",
     "DirectTuckerField",
     "FixedTopField",

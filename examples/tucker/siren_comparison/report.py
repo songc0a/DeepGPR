@@ -235,7 +235,7 @@ def v4_tables(fwi: Dict, search: Dict, search_sigma: Dict, protocol: str = "v4")
                 groups.setdefault(name.split("|")[1], []).append(r)
         if not groups:
             continue
-        zone_text = "whole model" if case == "2d" else ("top 1 m (25 cells), deep = 1-2 m" if protocol in ("v5", "v6") else "top 40 subsurface cells")
+        zone_text = "whole model" if case == "2d" else ("top 1 m (25 cells), deep = 1-2 m" if protocol in ("v5", "v6", "v7") else "top 40 subsurface cells")
         lines += [f"### C. v4 model errors ({case.upper()}, mean over seeds; zone = {zone_text})", ""]
         lines.append("| method | zone eps RMSE start -> end | zone log10 sigma RMSE start -> end | deep eps RMSE start -> end | eps RMSE start -> end | log10 sigma RMSE start -> end |")
         lines.append("|---|---|---|---|---|---|")
@@ -287,7 +287,7 @@ def oracle_tables(fwi: Dict, oracle: Dict) -> List[str]:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--quick", action="store_true")
-    parser.add_argument("--protocol", default="v1", choices=["v1", "v2", "v3", "v4", "v5", "v6"])
+    parser.add_argument("--protocol", default="v1", choices=["v1", "v2", "v3", "v4", "v5", "v6", "v7"])
     args = parser.parse_args()
     base = "quick" if args.quick else "full"
     results = HERE / "results" / (base if args.protocol == "v1" else f"{base}_{args.protocol}")
@@ -297,7 +297,7 @@ def main() -> None:
     lines += generation_tables(load(shared / "generation.json"))
     lines += representation_tables(load(shared / "representation.json"))
     lines += fwi_tables(load(results / "fwi.json"), load(results / "fwi_search.json"))
-    if args.protocol in ("v4", "v5", "v6"):
+    if args.protocol in ("v4", "v5", "v6", "v7"):
         lines += v4_tables(load(results / "fwi.json"), load(results / "fwi_search.json"), load(results / "fwi_search_sigma.json"), args.protocol)
         lines += oracle_tables(load(results / "fwi.json"), load(results / "fwi_oracle.json"))
     (results / "report_tables.md").write_text("\n".join(lines) + "\n")

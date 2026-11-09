@@ -51,6 +51,7 @@ from networks import (  # noqa: E402
     gaussian_smooth,
     SirenField,
     TuckerSirenField,
+    TwoSirenField,
     prefit_field,
     prefit_tucker_siren,
     split_parameters,
@@ -62,7 +63,10 @@ LR_CANDIDATES = {
     "siren": (3e-6, 1e-5, 3e-5, 1e-4),
     "tucker_siren": (3e-5, 1e-4, 3e-4, 1e-3),
     "direct_tucker": (3e-4, 1e-3, 3e-3, 1e-2),
+    "siren_pair": (1e-5, 3e-5, 1e-4, 3e-4),
 }
+# v7: the v6 SIREN search chose its largest candidate, so v7 extends it upwards.
+LR_CANDIDATES_V7 = {"siren": (1e-5, 3e-5, 1e-4, 3e-4)}
 SEARCH_ITERATIONS = 15
 
 # Protocols. v1: the first round (box-filtered start, constant 3D sigma start,
@@ -94,11 +98,16 @@ SEARCH_ITERATIONS = 15
 # iterations, cosine learning-rate decay (lr ... lr/10), sigma updated from
 # iteration 250; learning rates re-searched per method on held-out shots with
 # the MS-SSIM misfit (15 eps-only iterations, constant rate).
-PROTOCOLS = ("v1", "v2", "v3", "v4", "v5", "v6")
-V4_LIKE = ("v4", "v5", "v6")
-LARGE_MODEL = ("v5", "v6")
-SIGMA_START = {"v6": 250}
-ITERATIONS = {"v1": {"3d": 100, "2d": 150}, "v2": {"3d": 150, "2d": 200}, "v3": {"3d": 150, "2d": 200}, "v4": {"3d": 150, "2d": 200}, "v5": {"3d": 150, "2d": 200}, "v6": {"3d": 500, "2d": 500}}
+# v7 = v6 on the same 4 x 4 x 2 m eps model with a conductivity that is
+# independent of eps (``build_case_large(sigma_mode="independent")``: depth
+# trend, a conductive layer and two anomalies that eps does not have); the
+# sigma start is the laterally averaged, depth-smoothed true sigma (no anomaly).
+PROTOCOLS = ("v1", "v2", "v3", "v4", "v5", "v6", "v7")
+V4_LIKE = ("v4", "v5", "v6", "v7")
+LARGE_MODEL = ("v5", "v6", "v7")
+MSSIM_PROTOCOLS = ("v6", "v7")
+SIGMA_START = {"v6": 250, "v7": 250}
+ITERATIONS = {"v1": {"3d": 100, "2d": 150}, "v2": {"3d": 150, "2d": 200}, "v3": {"3d": 150, "2d": 200}, "v4": {"3d": 150, "2d": 200}, "v5": {"3d": 150, "2d": 200}, "v6": {"3d": 500, "2d": 500}, "v7": {"3d": 500, "2d": 500}}
 TV_RATIO = {"2d": (0.1, 0.1), "3d": (0.1, 0.08)}  # (eps, sigma), as in the notebooks
 SHOT_GRID_3D = 4
 SIGMA_SCALES = (0.0, 0.03, 0.1, 0.3, 1.0)
@@ -123,6 +132,11 @@ def initial_models(case_name: str, case: Dict[str, Any], protocol: str):
     eps0 = gaussian_smooth(case["eps"], width)
     sigma0 = gaussian_smooth(case["sigma"], width)
     air = case.get("air", 0)
+    if case.get("sigma_mode") == "independent":
+        profile = case["sigma"][:, air:].mean(dim=(0, 2))
+        profile = gaussian_smooth(profile[None, :, None].expand(1, -1, 1).contiguous(), width)[0, :, 0] if profile.numel() > 1 else profile
+        sigma0 = case["sigma"].clone()
+        sigma0[:, air:] = profile[None, :, None]
     if case_name == "3d" and air:
         eps0[:, :air] = case["eps"][:, :air]
         sigma0[:, :air] = case["sigma"][:, :air]
@@ -150,8 +164,15 @@ def make_mapping(case: Dict[str, Any], region, protocol: str) -> PropertyMapping
 LARGE_3D = dict(surface_m=4.0, depth_m=2.0, air_m=0.2, dx=0.04, dt=6.0e-11, freq=2.5e8, shot_grid=6, receiver_step=5)
 
 
-def build_case_large(quick: bool, device) -> Dict[str, Any]:
-    """The round-5 3D case (see ``LARGE_3D``); ``quick``: dx 8 cm, 125 MHz, 3 x 3 shots."""
+def build_case_large(quick: bool, device, sigma_mode: str = "eps") -> Dict[str, Any]:
+    """The round-5 3D case (see ``LARGE_3D``); ``quick``: dx 8 cm, 125 MHz, 3 x 3 shots.
+
+    ``sigma_mode``: ``"eps"`` (sigma = 5e-4 eps, rounds 5-6) or
+    ``"independent"`` (round 7): log10 sigma = -2.8 + 0.15 depth/m, plus a
+    conductive layer at 0.6-0.9 m (+0.25), a conductive sphere (8 mS/m, radius
+    0.4 m, centre x 1.2 m, depth 1.0 m, z 2.8 m) and a resistive box (1 mS/m,
+    x 2.4-3.4 m, depth 1.3-1.7 m, z 0.8-1.6 m).
+    """
     import numpy as np
     import torch.nn.functional as F
 
@@ -176,6 +197,16 @@ def build_case_large(quick: bool, device) -> Dict[str, Any]:
         eps[ix] = section[low] * (1 - weight) + section[high] * weight
     eps = torch.cat([torch.ones(nx, air, nz), eps], dim=1)
     sigma = 5e-4 * eps
+    if sigma_mode == "independent":
+        xs = (torch.arange(nx) + 0.5) * dx
+        ds = (torch.arange(depth) + 0.5) * dx
+        zs = (torch.arange(nz) + 0.5) * dx
+        X, D, Z = torch.meshgrid(xs, ds, zs, indexing="ij")
+        log_sigma = -2.8 + 0.15 * D + 0.25 * ((D >= 0.6) & (D < 0.9)).float()
+        log_sigma = torch.where((X - 1.2) ** 2 + (D - 1.0) ** 2 + (Z - 2.8) ** 2 <= 0.4**2, torch.full_like(log_sigma, math.log10(8e-3)), log_sigma)
+        box = (X >= 2.4) & (X <= 3.4) & (D >= 1.3) & (D <= 1.7) & (Z >= 0.8) & (Z <= 1.6)
+        log_sigma = torch.where(box, torch.full_like(log_sigma, -3.0), log_sigma)
+        sigma[:, air:] = 10.0 ** log_sigma
     sigma[:, :air] = 0.0
     # Record: two-way vertical time to the bottom (slowest column), plus the
     # wavelet delay, plus 25 % for oblique paths to the receivers.
@@ -199,7 +230,7 @@ def build_case_large(quick: bool, device) -> Dict[str, Any]:
     return dict(
         eps=eps.to(device), sigma=sigma.to(device), eps_init=None, sigma_init=None, air=air, nt=nt, shots=n * n,
         source_location=source.to(device), receiver_location=receivers.to(device), kwargs=kwargs, name="3d4m",
-        smooth_width=5.0, zone_depth=depth // 2, two_way_ns=two_way, config=cfg,
+        smooth_width=5.0, zone_depth=depth // 2, two_way_ns=two_way, config=cfg, sigma_mode=sigma_mode,
     )
 
 
@@ -247,8 +278,9 @@ def load_case(case_name: str, quick: bool, device, protocol: str = "v1"):
     import benchmark_tucker as bt
 
     if case_name == "3d" and protocol in LARGE_MODEL:
-        case = build_case_large(quick, device)
-        cache = RESULTS / ("quick" if quick else "full") / "cache" / f"observed3d4m_{case['shots']}_{case['nt']}_{case['config']['dx']:.3f}.pt"
+        case = build_case_large(quick, device, "independent" if protocol == "v7" else "eps")
+        tag = "_sigind" if protocol == "v7" else ""
+        cache = RESULTS / ("quick" if quick else "full") / "cache" / f"observed3d4m{tag}_{case['shots']}_{case['nt']}_{case['config']['dx']:.3f}.pt"
         if cache.exists():
             observed = [t.to(device) for t in torch.load(cache)]
         else:
@@ -324,6 +356,9 @@ def _build_field(spec, case, mapping, device):
         field = DirectTuckerField(t_eps0, t_sig0, mapping, spec["rank"])
     elif method == "siren":
         field = SirenField(shape, mapping, spec.get("hidden", 128), spec.get("layers", 4), device=device).to(device)
+        info["prefit_history"] = prefit_field(field, t_eps0, t_sig0, steps=spec.get("prefit_steps", 3000), lr=1e-3)
+    elif method == "siren_pair":
+        field = TwoSirenField(shape, mapping, spec.get("hidden", 90), spec.get("layers", 4), device=device).to(device)
         info["prefit_history"] = prefit_field(field, t_eps0, t_sig0, steps=spec.get("prefit_steps", 3000), lr=1e-3)
     else:
         field = TuckerSirenField(shape, mapping, spec["rank"], spec.get("hidden", 32), spec.get("layers", 2), device=device).to(device)
@@ -417,6 +452,11 @@ def fwi(spec: Dict[str, Any]) -> Dict[str, Any]:
         shots, observed, validation = split_shots(spec["case"], shots, observed, quick, protocol)
     scale = sum(float(d.square().sum()) for d in observed)
     objective = DataObjective(spec, observed, shots, scale, device)
+    # Optional separate data term for sigma (``spec["sigma_loss"]``, e.g. an
+    # amplitude-preserving gained L2): in the sigma phase eps takes its gradient
+    # from ``objective`` and sigma from this term (two forward/adjoint passes; the
+    # native adjoint cannot be replayed).
+    sigma_objective = DataObjective(dict(spec["sigma_loss"]), observed, shots, scale, device) if spec.get("sigma_loss") else None
     field, info = build_field(spec, case, mapping, device)
     sigma_scale = float(spec.get("sigma_scale", 1.0))
     eps_params, sigma_params, shared_params = split_parameters(field)
@@ -447,7 +487,7 @@ def fwi(spec: Dict[str, Any]) -> Dict[str, Any]:
     if protocol != "v1" and spec.get("lr_search"):
         eps_only_iterations = ITERATIONS[protocol][spec["case"]] // 3
     eps_only_iterations = spec.get("eps_only_iterations", eps_only_iterations)
-    tv = DeepGPR.TVRegularization(weight_ep=1.0, weight_sigma=1.0).to(device) if protocol in ("v3", "v4", "v5", "v6") else None
+    tv = DeepGPR.TVRegularization(weight_ep=1.0, weight_sigma=1.0).to(device) if protocol in ("v3", "v4", "v5", "v6", "v7") else None
     tv_ratio = TV_RATIO[spec["case"]]
 
     def add_tv(leaf, ratio, conductivity):
@@ -527,7 +567,14 @@ def fwi(spec: Dict[str, Any]) -> Dict[str, Any]:
             loss = objective(data, data_obs, options)
             l2_total += float(0.5 * (data.detach() - data_obs).square().sum() / scale)
             b.record()
-            loss.backward()
+            if sigma_objective is not None and iteration >= eps_only_iterations:
+                (g_eps,) = torch.autograd.grad(loss, [eps_leaf])
+                data_s = DeepGPR.compute(eps_r=eps_leaf, sigma=sig_leaf, **options)[-1]
+                (g_sig,) = torch.autograd.grad(sigma_objective(data_s, data_obs, options), [sig_leaf])
+                eps_leaf.grad = g_eps if eps_leaf.grad is None else eps_leaf.grad + g_eps
+                sig_leaf.grad = g_sig if sig_leaf.grad is None else sig_leaf.grad + g_sig
+            else:
+                loss.backward()
             c.record()
             torch.cuda.synchronize()
             fdtd_forward += a.elapsed_time(b) / 1e3
@@ -587,6 +634,7 @@ def fwi(spec: Dict[str, Any]) -> Dict[str, Any]:
         resumed_from=start_iteration,
         checkpoint_steps=checkpoint_steps,
         wavefield_sketch=spec.get("wavefield_sketch"),
+        sigma_loss=spec.get("sigma_loss"),
     )
     if validation:
         result["validation_loss"] = misfit(validation)
@@ -612,17 +660,19 @@ def methods(case: str) -> List[Dict[str, Any]]:
     for rank in (8, 12, 16, 24, 32, 48):
         out.append(dict(label=f"tsiren_2x32_r{rank}", method="tucker_siren", hidden=32, layers=2, rank=rank))
     out.append(dict(label="direct_tucker_r16", method="direct_tucker", rank=16))
+    out.append(dict(label="siren2_4x90", method="siren_pair", hidden=90, layers=4))
     return out
 
 
 def search_specs(case: str, quick: bool, protocol: str = "v1") -> List[Dict[str, Any]]:
     specs = []
     for m in methods(case):
-        for lr in LR_CANDIDATES[m["method"]]:
+        candidates = LR_CANDIDATES_V7.get(m["method"], LR_CANDIDATES[m["method"]]) if protocol == "v7" else LR_CANDIDATES[m["method"]]
+        for lr in candidates:
             spec = dict(m, name=f"{case}|search|{m['label']}|lr{lr:g}", case=case, lr=lr, iterations=SEARCH_ITERATIONS if not quick else 4, lr_search=True, quick=quick, seed=0, protocol=protocol)
             if protocol in V4_LIKE:
                 spec.update(train_only=True, save_state=str(search_state(case, quick, protocol, m["label"], lr)))
-            if protocol == "v6":
+            if protocol in MSSIM_PROTOCOLS:
                 spec["loss"] = "mssim"
             specs.append(spec)
     return specs
@@ -700,8 +750,8 @@ def run_specs_for(case: str, quick: bool, seeds=(0, 1, 2), protocol: str = "v1",
             spec = dict(m, name=f"{case}|{m['label']}|seed{seed}{suffix}", case=case, lr=lrs[m["label"]], iterations=iterations, seed=seed, quick=quick, protocol=protocol)
             if protocol in V4_LIKE:
                 spec["sigma_scale"] = scales[m["label"]]
-            if protocol == "v6":
-                spec.update(loss="mssim", schedule="cosine", eps_only_iterations=SIGMA_START["v6"] if not quick else iterations // 2)
+            if protocol in MSSIM_PROTOCOLS:
+                spec.update(loss="mssim", schedule="cosine", eps_only_iterations=SIGMA_START[protocol] if not quick else iterations // 2)
             specs.append(spec)
     return specs
 
@@ -719,7 +769,7 @@ def main() -> None:
     parser.add_argument("--select", default="data", choices=["data", "oracle"], help="v4: hyper-parameter selection (oracle: reference only)")
     parser.add_argument("--sigma-scale", type=float, default=None, help="v4/v5 run: fixed sigma step scale instead of stage B")
     # tune: one run of one method with explicit settings (results in fwi_tune.json)
-    parser.add_argument("--lr", type=float)
+    parser.add_argument("--lr", type=float, help="tune: learning rate (default: the method's searched rate)")
     parser.add_argument("--iterations", type=int)
     parser.add_argument("--loss", default="l2", choices=["l2", "mssim"])
     parser.add_argument("--time-gain", type=float, default=0.0)
@@ -728,6 +778,8 @@ def main() -> None:
     parser.add_argument("--sigma-start", type=int, default=None, help="tune: first iteration that updates sigma (default iterations // 3)")
     parser.add_argument("--sketch-rank", type=int, default=0, help="tune: module-B wavefield compression with this spatial rank (rhs from_e)")
     parser.add_argument("--sketch-segment", type=int, default=32, help="tune: steps per native call of the compressed history")
+    parser.add_argument("--sigma-loss", default="none", choices=["none", "l2"], help="tune: separate data term for the sigma gradient")
+    parser.add_argument("--sigma-loss-gain", type=float, default=2.0, help="tune: time-gain power of that term")
     args = parser.parse_args()
     if args.command == "_worker":
         worker_main(fwi)
@@ -737,11 +789,13 @@ def main() -> None:
         specs, out, kind = search_specs(args.case, args.quick, args.protocol), out_dir / "fwi_search.json", "fwi-search"
     elif args.command == "tune":
         picked = [m for m in methods(args.case) if args.only and any(t.strip("|") == m["label"] for t in args.only)]
-        specs = [dict(m, name=f"{args.case}|{m['label']}|seed0|{args.tag}", case=args.case, lr=args.lr, iterations=args.iterations, seed=0,
+        searched = chosen_learning_rates(args.case, args.quick, args.protocol) if args.lr is None else {}
+        specs = [dict(m, name=f"{args.case}|{m['label']}|seed0|{args.tag}", case=args.case, lr=args.lr if args.lr is not None else searched[m["label"]], iterations=args.iterations, seed=0,
                       quick=args.quick, protocol=args.protocol, sigma_scale=1.0 if args.sigma_scale is None else args.sigma_scale,
                       loss=args.loss, time_gain=args.time_gain, schedule=args.schedule,
                       **({} if args.sigma_start is None else {"eps_only_iterations": args.sigma_start}),
-                      **({} if not args.sketch_rank else {"wavefield_sketch": dict(ranks=args.sketch_rank, oversampling=8, segment_steps=args.sketch_segment, rhs="from_e", recovery_device="host")}))
+                      **({} if not args.sketch_rank else {"wavefield_sketch": dict(ranks=args.sketch_rank, oversampling=8, segment_steps=args.sketch_segment, rhs="from_e", recovery_device="host")}),
+                      **({} if args.sigma_loss == "none" else {"sigma_loss": dict(loss=args.sigma_loss, time_gain=args.sigma_loss_gain)}))
                  for m in picked]
         out, kind = out_dir / "fwi_tune.json", "fwi-tune"
         run_specs(Path(__file__), kind, specs, out, force=args.force)
