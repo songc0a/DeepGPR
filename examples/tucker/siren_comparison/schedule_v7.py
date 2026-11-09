@@ -110,7 +110,8 @@ def main() -> None:
             attempt = 2 if task.get("retry") else 1
             log = open(LOGS / f"{task['name']}.log", "a")
             command = [sys.executable, str(HERE / "bench_fwi.py"), *task["args"], "--protocol", "v7"]
-            env = dict(__import__("os").environ, CUDA_VISIBLE_DEVICES=gpu, OMP_NUM_THREADS="8", MKL_NUM_THREADS="8")
+            env = dict(__import__("os").environ, CUDA_VISIBLE_DEVICES=gpu, OMP_NUM_THREADS="8", MKL_NUM_THREADS="8",
+                       PYTORCH_CUDA_ALLOC_CONF="max_split_size_mb:512")
             running[gpu] = [task, subprocess.Popen(command, cwd=HERE, stdout=log, stderr=subprocess.STDOUT, env=env), attempt]
             idle_since.pop(gpu, None)
             status(f"{task['name']} gpu{gpu} pass{attempt} start")

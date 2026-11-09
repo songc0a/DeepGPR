@@ -526,6 +526,9 @@ def fwi(spec: Dict[str, Any]) -> Dict[str, Any]:
             if spec["case"] == "3d":
                 deep = (slice(None), slice(zone[1].stop, None), slice(None))
                 errors["eps_deep"] = model_errors(eps, case["eps"], deep)
+        # The full-volume SSIM leaves a large allocator cache; release it before
+        # the next FDTD history allocation (shared GPUs).
+        torch.cuda.empty_cache()
         return errors
 
     def misfit(pairs) -> float:
