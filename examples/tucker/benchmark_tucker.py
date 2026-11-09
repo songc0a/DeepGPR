@@ -748,7 +748,67 @@ def scaling_specs(quick: bool) -> List[Dict[str, Any]]:
     return specs
 
 
-WORKERS = {"wavefield": (wavefield_worker, wavefield_specs), "scaling": (wavefield_worker, scaling_specs), "model": (model_worker, model_specs), "fwi": (fwi_worker, fwi_specs)}
+def size_fwi_worker(spec: Dict[str, Any], quick: bool) -> Dict[str, Any]:
+    """A few dense FWI iterations on the domain-scaled model with a Tucker-compressed history.
+
+    eps and sigma are the trainable tensors (Adam with its state on the GPU,
+    clamped to eps >= 1, sigma >= 0, as in the FWI notebooks); one shot. The
+    peak covers model, gradients, Adam moments, solver and compressed history,
+    i.e. what a full FWI iteration needs on the GPU.
+    """
+    device = torch.device("cuda")
+    case = build_case(quick, device, shots=1, nt=spec.get("nt"), domain_factor=spec.get("domain_factor", 1.0))
+    observed = observed_data(case, quick)[0]
+    options = shot_kwargs(case, 0)
+    sketch = sketch_config(spec)
+    scale = observed.square().sum()
+    air = case["air"]
+    eps = case["eps_init"].clone().requires_grad_(True)
+    sigma = case["sigma_init"].clone().requires_grad_(True)
+    optimizer = torch.optim.Adam([dict(params=[eps], lr=spec.get("lr", 0.02)), dict(params=[sigma], lr=spec.get("sigma_lr", 1e-5))])
+
+    def rmse() -> float:
+        return float((eps.detach()[:, air:] - case["eps"][:, air:]).square().mean().sqrt())
+
+    history = [dict(iteration=-1, eps_rmse=rmse())]
+    base = fresh_peak()
+    for iteration in range(spec.get("iterations", 3)):
+        sync()
+        t0 = time.perf_counter()
+        optimizer.zero_grad(set_to_none=True)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            data = DeepGPR.compute(eps_r=eps, sigma=sigma, wavefield_sketch=sketch, **options)[-1]
+        loss = 0.5 * (data - observed).square().sum() / scale
+        loss.backward()
+        eps.grad[:, :air] = 0
+        sigma.grad[:, :air] = 0
+        optimizer.step()
+        with torch.no_grad():
+            eps.clamp_(min=1.0)
+            sigma.clamp_(min=0.0)
+        sync()
+        history.append(dict(iteration=iteration, loss=float(loss), seconds=time.perf_counter() - t0, eps_rmse=rmse()))
+        del data, loss
+    import resource
+
+    cells = math.prod(size + 2 * options["pmlthick"] for size in case["eps"].shape)
+    return dict(
+        name=spec["name"], history=history, cells=cells, model_cells=case["eps"].numel(), nt=case["nt"],
+        peak_allocated_gib=(torch.cuda.max_memory_allocated() - base) / GIB + base / GIB,
+        peak_reserved_gib=torch.cuda.max_memory_reserved() / GIB,
+        host_peak_gib=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024 / GIB,
+        seconds_per_iteration=statistics_median([h["seconds"] for h in history[1:]]),
+    )
+
+
+def statistics_median(values: List[float]) -> float:
+    values = sorted(values)
+    return values[len(values) // 2] if values else float("nan")
+
+
+WORKERS = {"wavefield": (wavefield_worker, wavefield_specs), "scaling": (wavefield_worker, scaling_specs), "model": (model_worker, model_specs), "fwi": (fwi_worker, fwi_specs),
+           "size": (wavefield_worker, lambda quick: []), "sizefwi": (size_fwi_worker, lambda quick: [])}
 
 
 def run_suite(kind: str, quick: bool, only: Optional[List[str]] = None) -> None:
