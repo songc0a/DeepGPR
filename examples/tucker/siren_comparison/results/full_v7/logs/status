@@ -1,0 +1,66 @@
+2026-11-09 15:50:39 start, 9 tasks, GPUs ['0', '1', '2', '3', '4', '5', '6', '7']
+2026-11-09 15:51:10 3d_A_dense gpu6 pass1 start
+2026-11-09 15:59:48 3d_A_dense gpu6 pass1 exit 0
+2026-11-09 16:00:20 3d_A_dense gpu6 pass2 start
+2026-11-09 16:00:30 3d_A_dense gpu6 pass2 exit 0
+2026-11-09 16:01:01 3d_A_siren_4x128 gpu6 pass1 start
+2026-11-09 16:14:03 3d_A_siren_4x128 gpu6 pass1 exit 0
+2026-11-09 16:14:34 3d_A_siren_4x128 gpu6 pass2 start
+2026-11-09 16:14:44 3d_A_siren_4x128 gpu6 pass2 exit 0
+2026-11-09 16:15:16 3d_A_siren2_4x90 gpu6 pass1 start
+2026-11-09 16:22:54 3d_A_siren2_4x90 gpu6 pass1 exit 0
+2026-11-09 16:23:25 3d_A_siren2_4x90 gpu6 pass2 start
+2026-11-09 16:31:03 3d_A_siren2_4x90 gpu6 pass2 exit 0
+2026-11-09 16:31:35 3d_run_dense gpu6 pass1 start
+2026-11-09 17:53:17 3d_run_dense gpu6 pass1 exit 0
+2026-11-09 17:53:48 3d_run_dense gpu6 pass2 start
+2026-11-09 17:53:58 3d_run_dense gpu6 pass2 exit 0
+2026-11-09 17:54:29 3d_tune_dense_amp_s0.1 gpu6 pass1 start
+2026-11-09 18:53:44 start, 2 tasks, GPUs ['0', '1', '2', '3', '4', '5', '6', '7']
+2026-11-09 19:55:08 3d_tune_dense_amp_s0.1 gpu6 pass1 exit 0
+2026-11-09 19:55:39 3d_A_siren2_4x90 gpu6 pass1 start
+2026-11-09 19:55:39 3d_tune_dense_amp_s0.1 gpu6 pass2 start
+2026-11-09 19:55:49 3d_tune_dense_amp_s0.1 gpu6 pass2 exit 0
+2026-11-09 20:03:11 3d_A_siren2_4x90 gpu6 pass1 exit 0
+2026-11-09 20:03:42 3d_A_siren2_4x90 gpu6 pass2 start
+2026-11-09 20:03:42 3d_run_siren_4x128 gpu6 pass1 start
+2026-11-09 20:17:37 3d_A_siren2_4x90 gpu6 pass2 exit 0
+2026-11-09 21:34:33 3d_run_siren_4x128 gpu6 pass1 exit 0
+2026-11-09 21:35:04 3d_run_siren_4x128 gpu6 pass2 start
+2026-11-09 21:35:04 3d_run_siren2_4x90 gpu6 pass1 start
+2026-11-09 21:35:14 3d_run_siren_4x128 gpu6 pass2 exit 0
+2026-11-09 21:35:14 3d_run_siren2_4x90 gpu6 pass1 exit 0
+2026-11-09 21:35:45 3d_run_siren2_4x90 gpu6 pass2 start
+2026-11-09 21:35:45 3d_run_siren2_4x90 gpu6 pass1 start
+2026-11-09 21:35:55 3d_run_siren2_4x90 gpu6 pass2 exit 0
+2026-11-09 21:35:55 3d_run_siren2_4x90 gpu6 pass1 exit 0
+2026-11-09 21:36:06 ALL DONE
+2026-11-09 21:36:27 3d_run_siren2_4x90 gpu6 pass2 start
+2026-11-09 21:36:37 3d_run_siren2_4x90 gpu6 pass2 exit 0
+2026-11-09 21:37:08 3d_tune_dense_s0.1 gpu6 pass1 start
+2026-11-09 21:55:04 main scheduler stopped (3d_tune_dense_s0.1 keeps running); re-queue: siren2 search+run, then 3d_tune_dense_amp (single scheduler)
+2026-11-09 21:55:04 start, 3 tasks, GPUs ['0', '1', '2', '3', '4', '5', '6', '7']
+2026-11-09 22:59:16 3d_A_siren2_4x90 gpu6 pass1 start
+2026-11-09 23:06:48 3d_A_siren2_4x90 gpu6 pass1 exit 0
+2026-11-09 23:07:19 3d_A_siren2_4x90 gpu6 pass2 start
+2026-11-09 23:15:01 3d_A_siren2_4x90 gpu6 pass2 exit 0
+2026-11-09 23:15:31 3d_run_siren2_4x90 gpu6 pass1 start
+2026-11-09 23:15:42 3d_run_siren2_4x90 gpu6 pass1 exit 0
+2026-11-09 23:16:13 3d_run_siren2_4x90 gpu6 pass2 start
+2026-11-09 23:16:23 3d_run_siren2_4x90 gpu6 pass2 exit 0
+2026-11-09 23:16:54 3d_tune_dense_amp gpu6 pass1 start
+2026-11-10 00:06:09 re-queue siren2 (cache release after evaluation)
+2026-11-10 00:06:09 start, 2 tasks, GPUs ['0', '1', '2', '3', '4', '5', '6', '7']
+2026-11-10 01:17:41 3d_tune_dense_amp gpu6 pass1 exit 0
+2026-11-10 01:18:12 3d_tune_dense_amp gpu6 pass2 start
+2026-11-10 01:18:12 3d_A_siren2_4x90 gpu6 pass1 start
+2026-11-10 01:18:22 3d_tune_dense_amp gpu6 pass2 exit 0
+2026-11-10 01:18:32 ALL DONE
+2026-11-10 01:33:35 3d_A_siren2_4x90 gpu6 pass1 exit 0
+2026-11-10 01:34:07 3d_A_siren2_4x90 gpu6 pass2 start
+2026-11-10 01:34:17 3d_A_siren2_4x90 gpu6 pass2 exit 0
+2026-11-10 01:34:48 3d_run_siren2_4x90 gpu6 pass1 start
+2026-11-10 02:59:13 3d_run_siren2_4x90 gpu6 pass1 exit 0
+2026-11-10 02:59:44 3d_run_siren2_4x90 gpu6 pass2 start
+2026-11-10 02:59:54 3d_run_siren2_4x90 gpu6 pass2 exit 0
+2026-11-10 03:00:05 ALL DONE

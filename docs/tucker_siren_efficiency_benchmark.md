@@ -807,6 +807,64 @@ time 10x higher on this small model (0.55 M cells, exact 0.27 s per shot);
 the compression pays off only where the exact history does not fit (Section
 9.5-9.6 of `docs/tucker_model_wavefield_compression.md`).
 
+### 5.10 Round 7 (protocol v7: conductivity independent of eps)
+
+All sigma results so far used models with sigma proportional to eps. Round 7
+keeps the 4 x 4 x 2 m eps model, acquisition and v6 schedule (MS-SSIM, 500
+iterations, cosine lr, sigma from 250, lr searched on held-out shots) and
+replaces sigma by a structure eps does not have (`build_case_large(...,
+sigma_mode="independent")`): log10 sigma = -2.8 + 0.15 depth/m, a conductive
+layer at 0.6-0.9 m (+0.25), a conductive sphere (8 mS/m, radius 0.4 m, centre
+x 1.2 m, depth 1.0 m, z 2.8 m) and a resistive box (1 mS/m, x 2.4-3.4 m,
+depth 1.3-1.7 m, z 0.8-1.6 m); 1-8 mS/m in total. The sigma start is the
+laterally averaged, depth-smoothed truth (no anomaly), the eps start as
+before. Runs (seed 0; `schedule_v7.py`, `results/full_v7/`; GPU 6, shared with
+idle notebook kernels):
+
+* dense, shared-network SIREN 4 x 128, SIREN with two networks (eps, sigma;
+  4 x 90 each, 50 042 parameters vs 50 306);
+* dense variants: sigma step 0.1 x lr; an amplitude-preserving sigma term
+  (in the sigma phase eps takes its gradient from MS-SSIM and sigma from a
+  t^2-gained L2 misfit, two forward/adjoint passes per iteration because the
+  native adjoint cannot be replayed); both.
+
+| run (lr) | upper 1 m eps RMSE | lower 1 m eps RMSE | upper 1 m log10 sigma RMSE | log10 sigma RMSE / SSIM | final MS-SSIM | s / iteration |
+|---|---|---|---|---|---|---|
+| start | 0.621 | 0.451 | 0.091 | 0.086 / 0.700 | - | - |
+| dense (0.03) | **0.147** | **0.216** | **0.065** | **0.072** / 0.646 | 0.054 | 9.7 |
+| dense, sigma step 0.1 | 0.153 | 0.217 | 0.072 | 0.076 / **0.728** | 0.136 | 9.7 |
+| dense + amplitude sigma term | 0.167 | 0.219 | 0.097 | 0.090 / 0.655 | 0.346 | 14.4 |
+| dense + amplitude term, step 0.1 | 0.165 | 0.219 | 0.092 | 0.086 / 0.698 | 0.315 | 14.4 |
+| SIREN shared (1e-4) | 0.260 | 0.553 | 0.101 | 0.091 / 0.592 | 3.79 | 10.5 |
+| SIREN two networks (3e-4) | 0.271 | 0.487 | 0.141 | 0.133 / 0.346 | 2.99 | 9.8 |
+
+(`results/full_v7/figures/sigma_slices.png`: sections and depth slices through
+the anomalies; `comparison_slices.png`: eps.)
+
+* Dense with the plain MS-SSIM misfit recovers the conductive sphere (position
+  and shape, somewhat small) and the conductive layer (with eps-like streaks);
+  the resistive box only faintly. MS-SSIM does constrain sigma when sigma has
+  real contrast; the poor dense sigma of round 6 came from the thin
+  eps-proportional layers of that model.
+* A sigma step of 0.1 x lr gives a smoother sigma without the streaks (highest
+  SSIM 0.728) but weaker contrast (RMSE 0.072 vs 0.065).
+* The amplitude-preserving sigma term makes sigma worse (0.097) and also the
+  data fit: the t^2-gained L2 is still dominated by the early, direct arrivals
+  (86 % of the gained energy in the first 10 ns), so the sigma gradient fits the
+  near-surface amplitudes instead of the anomalies. This proposal of Section
+  5.9's follow-up does not work in this form.
+* The shared-network SIREN does not find the anomalies: it imprints the eps
+  folds into sigma (RMSE above the start). Its sigma advantage in rounds 4-6
+  was the eps-proportional sigma of those models.
+* The SIREN with two networks finds both anomalies, including the resistive
+  box that dense barely shows, but with a strongly blotched background, hence
+  the worst RMSE; its eps is between the shared SIREN and dense.
+
+Conclusion on sigma: separate parameterizations are needed (the shared network
+copies eps into sigma); dense with MS-SSIM is the most accurate; a smaller
+sigma step trades contrast for cleanliness; the gained-L2 sigma term is not
+useful. Single seed, noise-free data, inverse crime.
+
 ## 6. Answers
 
 | question | answer (measured) |
@@ -882,6 +940,7 @@ python report.py && python plots.py     # results/full/report_tables.md, figures
 #   plot_slices.py OUT.png "label=results/full_v6/fwi_runs/3d/<run>_final.pt" ...
 # smaller-lr Tucker-SIREN (Section 5.9): run_v6_tsiren_lr.sh
 # higher-rank Tucker-SIREN (Section 5.9): run_v6_tsiren_rank.sh; module-B dense: run_v6_dense_sketch.sh, probe_wavefield_sketch.py
+# round 7 (Section 5.10): python schedule_v7.py; plot_slices.py (PROTOCOL=v7), plot_sigma_v7.py
 # (server drivers: run_fwi_server.sh, run_v2_server.sh, rerun_v2_3d.sh, run_v3_server.sh)
 python stripe_check.py --protocol v2     # 2D stripe direction, results/full_v2/stripe_check.json
 python -m unittest discover -s ../../../tests -p "test_tucker_siren*.py"
