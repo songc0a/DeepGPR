@@ -121,7 +121,11 @@ def main() -> None:
     parser.add_argument("--quick", action="store_true")
     parser.add_argument("--gpu", default="", help="use only this GPU (default: the first idle one, then stay on it)")
     parser.add_argument("--no-wait", action="store_true", help="do not wait for an idle GPU (tests; timings not exclusive)")
+    parser.add_argument("--report", action="store_true", help="only write size_report.md")
     args = parser.parse_args()
+    if args.report:
+        write_report(bt.RESULTS / bt.scale_name(args.quick))
+        return
     out_dir = bt.RESULTS / bt.scale_name(args.quick)
     out_dir.mkdir(parents=True, exist_ok=True)
     path, fwi_path, status = out_dir / "size.json", out_dir / "size_fwi.json", out_dir / "size_status.log"
@@ -223,6 +227,8 @@ def write_report(out_dir: Path) -> None:
         lines += ["", "## Dense FWI iterations with the compressed history", "",
                   "| run | cells (M, with CPML) | nt | GPU peak alloc / reserved (GiB) | host peak (GiB) | s per iteration | loss | eps RMSE |", "|---|---|---|---|---|---|---|---|"]
         for name, r in fwi.items():
+            if name.startswith("_"):
+                continue
             if "error" in r:
                 lines.append(f"| {name} | failed: {r['error'][:120]} | | | | | | |")
                 continue
