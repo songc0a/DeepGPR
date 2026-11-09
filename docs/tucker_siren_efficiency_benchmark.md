@@ -776,6 +776,37 @@ the SIREN (MS-SSIM 1.1 vs 3.5). r48 needs 4.7x the SIREN's parameters. Sigma
 remains broken into horizontal blocks at every rank once it is updated (0.19-0.30,
 start 0.079); dense is still clearly best.
 
+Dense with module-B wavefield compression (the streaming Tucker sketch of the
+FDTD history read by the adjoint; Lei's request; `run_v6_dense_sketch.sh`,
+GPU 7): the same run as the round-6 dense (lr 0.03, MS-SSIM, 500 iterations,
+cosine, sigma from 250) with `TuckerSketchConfig(ranks=32, oversampling=8,
+segment_steps=32, rhs="from_e", recovery_device="host")`. The rank was chosen
+with a one-shot gradient probe at the start model (`probe_wavefield_sketch.py`;
+exact 0.27 s and 9.73 GiB per shot):
+
+| rank | eps-gradient cosine / rel. error | sigma-gradient cosine / rel. error | time per shot | peak |
+|---|---|---|---|---|
+| 16 (8-step segments) | 0.99703 / 7.7 % | 0.98366 / 18 % | 1.5 s | 0.40 GiB |
+| 24 (32-step segments) | 0.99996 / 0.9 % | 0.99955 / 3.0 % | 2.0 s | 1.05 GiB |
+| 32 (32-step segments) | 0.999998 / 0.2 % | 0.99999 / 0.5 % | 2.6 s | 1.36 GiB |
+
+(The segment length changes time and memory, not the error. With unlimited CPU
+threads the host recovery competed with a fully loaded server and stalled;
+8 threads were used.)
+
+| | upper 1 m eps RMSE | lower 1 m eps RMSE | eps SSIM | upper 1 m log10 sigma RMSE | log10 sigma SSIM | final MS-SSIM | peak | time per iteration |
+|---|---|---|---|---|---|---|---|---|
+| exact history | 0.145 | 0.213 | 0.939 | 0.059 | 0.383 | 0.042 | 9.76 GiB | 9.5 s |
+| compressed (r32) | 0.152 | 0.215 | 0.936 | 0.060 | 0.376 | 0.047 | 1.38 GiB | 99.5 s |
+
+The two runs track each other over all 500 iterations (upper-metre eps
+0.364/0.365 at 50, 0.168/0.171 at 250, 0.145/0.152 at 500); the final models
+differ by 0.034 eps RMSE (log10 sigma 0.010), and the reconstructions are
+visually identical (`dense_wavefield_compression.png`). Memory is 7x lower and
+time 10x higher on this small model (0.55 M cells, exact 0.27 s per shot);
+the compression pays off only where the exact history does not fit (Section
+9.5-9.6 of `docs/tucker_model_wavefield_compression.md`).
+
 ## 6. Answers
 
 | question | answer (measured) |
