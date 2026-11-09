@@ -72,10 +72,15 @@ def status(message: str) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--gpus", default="0,1,2,3,4,5,6,7")
+    parser.add_argument("--tasks", default="", help="comma-separated task names to run (default: all)")
     args = parser.parse_args()
     gpus = args.gpus.split(",")
     LOGS.mkdir(parents=True, exist_ok=True)
     pending, done = tasks(), set()
+    if args.tasks:
+        wanted = set(args.tasks.split(","))
+        done = {t["name"] for t in pending if t["name"] not in wanted}  # treat the others as finished
+        pending = [t for t in pending if t["name"] in wanted]
     running = {}  # gpu -> [task, process, pass]
     idle_since = {}
     status(f"start, {len(pending)} tasks, GPUs {gpus}")

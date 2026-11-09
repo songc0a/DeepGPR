@@ -368,6 +368,9 @@ def _build_field(spec, case, mapping, device):
     if air:
         field = FixedTopField(field, eps_init[:, :air], sigma_init[:, :air]).to(device)
     torch.cuda.synchronize()
+    # The full-grid pre-fit leaves a large fragmented allocator cache; release it
+    # so that the FDTD history (one ~10 GiB block) fits on a shared GPU.
+    torch.cuda.empty_cache()
     info["prefit_seconds"] = time.perf_counter() - started
     with torch.no_grad():
         eps0, sig0 = field()
