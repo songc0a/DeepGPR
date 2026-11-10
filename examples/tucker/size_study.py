@@ -184,7 +184,8 @@ def main() -> None:
             if rank in failed_ranks:
                 continue
             specs.append(dict(name=f"Z{g:g}_tucker_r{rank}", sketch=dict(ranks=rank, oversampling=8, segment_steps=segment, rhs="from_e", recovery_device="host"),
-                              reference=reference["name"], repeats=2 if cells < 60e6 else 1, **group))
+                              reference=reference["name"], repeats=2 if cells < 60e6 else 1,
+                              measure_errors=cells < 80e6, **group))  # no wavefield-error pass for the largest models
         if not any("sketch" in s for s in specs):
             break
         any_tucker = False

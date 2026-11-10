@@ -463,7 +463,9 @@ def wavefield_worker(spec: Dict[str, Any], quick: bool) -> Dict[str, Any]:
         del grads
         measure = sketch_config(spec, measure=True)
         assert measure is not None
-        if measure.time_block == 1 or (measure.segment_steps or 16) % measure.time_block == 0:
+        # (the error pass keeps exact frames next to their reconstruction: more
+        # memory than the timed run; ``measure_errors=False`` skips it).
+        if spec.get("measure_errors", True) and (measure.time_block == 1 or (measure.segment_steps or 16) % measure.time_block == 0):
             stats2 = WavefieldSketchStats()
             with torch.no_grad():
                 eps2 = case["eps_init"].clone().requires_grad_(True)
