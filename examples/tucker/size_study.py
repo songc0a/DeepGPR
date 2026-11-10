@@ -93,19 +93,54 @@ def run_worker(kind: str, spec: dict, gpu: str) -> dict:
     return result
 
 
+# GPUs never used here: those reserved for the TGRS agent study, and any card of
+# the user's own long jobs (a ``run_tiles.sh <gpu>`` worker, which also covers
+# the gaps between tiles, or a running ``fwi3d.py``); same rule as
+# ~/deepgpr-goal/code/gpu_protect.py.
+EXCLUDED_GPUS = set(os.environ.get("SIZE_STUDY_EXCLUDE", "1,3,7").split(",")) - {""}
+PROTECT_WORKERS = ("run_tiles.sh",)
+PROTECT_CMDS = ("fwi3d.py",)
+
+
+def protected_gpus() -> set:
+    out, heavy = set(), set()
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit():
+            continue
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as handle:
+                argv = [c.decode(errors="ignore") for c in handle.read().split(b"\0") if c]
+        except OSError:
+            continue
+        for k, arg in enumerate(argv):
+            if arg.endswith(PROTECT_WORKERS) and k + 1 < len(argv) and argv[k + 1].isdigit():
+                out.add(argv[k + 1])
+            if arg.endswith(PROTECT_CMDS):
+                heavy.add(pid)
+    if heavy:
+        index = dict(line.split(", ") for line in subprocess.run(["nvidia-smi", "--query-gpu=uuid,index", "--format=csv,noheader"], capture_output=True, text=True).stdout.strip().splitlines())
+        for line in subprocess.run(["nvidia-smi", "--query-compute-apps=pid,gpu_uuid", "--format=csv,noheader"], capture_output=True, text=True).stdout.strip().splitlines():
+            pid, uuid = [x.strip() for x in line.split(",")]
+            if pid in heavy and uuid in index:
+                out.add(index[uuid])
+    return out
+
+
 def idle_gpu(preferred: str = "") -> str:
-    """A GPU with < 1 GB in use and < 5 % utilisation at two checks one minute apart."""
+    """A GPU with < 1 GB in use and < 5 % utilisation at two checks one minute apart,
+    not excluded and not protected."""
     while True:
+        blocked = EXCLUDED_GPUS | protected_gpus()
         out = subprocess.run(["nvidia-smi", "--query-gpu=index,memory.used,utilization.gpu", "--format=csv,noheader,nounits"], capture_output=True, text=True).stdout
         rows = [tuple(int(v) for v in line.split(",")) for line in out.strip().splitlines()]
-        idle = [str(i) for i, used, util in rows if used < 1000 and util < 5]
+        idle = [str(i) for i, used, util in rows if used < 1000 and util < 5 and str(i) not in blocked]
         if preferred:
             idle = [g for g in idle if g == preferred]
         if idle:
             time.sleep(60)
             out = subprocess.run(["nvidia-smi", "-i", idle[0], "--query-gpu=memory.used,utilization.gpu", "--format=csv,noheader,nounits"], capture_output=True, text=True).stdout
             used, util = (int(v) for v in out.strip().split(","))
-            if used < 1000 and util < 5:
+            if used < 1000 and util < 5 and idle[0] not in (EXCLUDED_GPUS | protected_gpus()):
                 return idle[0]
         time.sleep(120)
 
