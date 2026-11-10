@@ -13,7 +13,8 @@ GPU memory is not tried at larger sizes. Finally a few dense FWI iterations
 (Adam state on the GPU) are run at the largest size the compressed gradient
 reached. Every run waits for an idle GPU (re-picked per run; all RTX 4090,
 recorded with the result) that is not excluded or protected. Results:
-``results/full/size.json``, ``size_fwi.json``, ``size_report.md``.
+``results/full/size.json``, ``size_fwi.json``, ``size_report.md``, ``size_study.png``
+(``--report`` rewrites the report and the figure).
 
 Usage: ``python size_study.py [--quick] [--gpu N]``.
 """
@@ -161,6 +162,7 @@ def main() -> None:
     args = parser.parse_args()
     if args.report:
         write_report(bt.RESULTS / bt.scale_name(args.quick))
+        write_plot(bt.RESULTS / bt.scale_name(args.quick))
         return
     out_dir = bt.RESULTS / bt.scale_name(args.quick)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -279,6 +281,85 @@ def write_report(out_dir: Path) -> None:
             lines.append(f"| {name} | {r['cells'] / 1e6:.1f} | {r['nt']} | {r['peak_allocated_gib']:.2f} / {r['peak_reserved_gib']:.2f} | {r['host_peak_gib']:.1f} | "
                          f"{r['seconds_per_iteration']:.0f} | {' -> '.join('%.3g' % x['loss'] for x in h[1:])} | {h[0]['eps_rmse']:.3f} -> {h[-1]['eps_rmse']:.3f} |")
     (out_dir / "size_report.md").write_text("\n".join(lines) + "\n")
+
+
+def write_plot(out_dir: Path) -> None:
+    """size_study.png: time per gradient, Tucker / exact time ratio and GPU peak vs model size."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    results = json.loads((out_dir / "size.json").read_text())
+    runs = [r for name, r in results.items() if name.startswith("Z") and "total_s" in r]
+    exact = sorted((r for r in runs if "tucker" not in r["name"]), key=lambda r: r["cells"])
+    colors = {"exact": "#2a78d6", 16: "#eb6834", 24: "#1baf7a", 32: "#eda100"}
+    ink, muted = "#0b0b0b", "#52514e"
+    fig, axes = plt.subplots(1, 3, figsize=(13.5, 4.2), constrained_layout=True)
+    for ax in axes:
+        ax.set_xscale("log")
+        ax.grid(True, which="major", color="#e4e3df", linewidth=0.8)
+        ax.set_axisbelow(True)
+        for side in ("top", "right"):
+            ax.spines[side].set_visible(False)
+        ax.set_xlabel("cells with CPML (millions)", color=muted)
+        ax.tick_params(colors=muted)
+    ax_t, ax_r, ax_m = axes
+    # Exact reference: single-level checkpointing (circles) or host-offloaded checkpointing (squares).
+    x = [r["cells"] / 1e6 for r in exact]
+    for ax, key in ((ax_t, "total_s"), (ax_m, "peak_allocated_gib")):
+        ax.plot(x, [r[key] for r in exact], color=colors["exact"], linewidth=2, label="exact (checkpointing)")
+        for r in exact:
+            marker = "s" if "offload" in r["name"] else "o"
+            ax.plot(r["cells"] / 1e6, r[key], marker=marker, markersize=8, color=colors["exact"], markeredgecolor="white", markeredgewidth=1.5)
+    for rank in RANKS:
+        rows = sorted((r for r in runs if r["name"].endswith(f"tucker_r{rank}")), key=lambda r: r["cells"])
+        if not rows:
+            continue
+        xr = [r["cells"] / 1e6 for r in rows]
+        for ax, key in ((ax_t, "total_s"), (ax_m, "peak_allocated_gib")):
+            ax.plot(xr, [r[key] for r in rows], color=colors[rank], linewidth=2, marker="o", markersize=6,
+                    markeredgecolor="white", markeredgewidth=1.5, label=f"Tucker r{rank}")
+        by_cells = {r["cells"]: r["total_s"] for r in exact}
+        pairs = [(r["cells"] / 1e6, r["total_s"] / by_cells[r["cells"]]) for r in rows if r["cells"] in by_cells]
+        if pairs:
+            ax_r.plot(*zip(*pairs), color=colors[rank], linewidth=2, marker="o", markersize=6, markeredgecolor="white",
+                      markeredgewidth=1.5, label=f"Tucker r{rank}")
+    cells = sorted({r["cells"] / 1e6 for r in runs})
+    for ax in axes:
+        ax.set_xlim(cells[0] / 1.3, cells[-1] * 1.3)
+        ax.set_xticks([t for t in (2, 5, 10, 20, 50, 100, 200) if cells[0] / 1.3 <= t <= cells[-1] * 1.3])
+        ax.set_xticklabels([str(int(t)) for t in ax.get_xticks()])
+        ax.xaxis.set_minor_formatter(matplotlib.ticker.NullFormatter())
+    if exact:
+        last = max(r["cells"] for r in exact) / 1e6
+        beyond = [c for c in cells if c > last]
+        if beyond:
+            start = math.sqrt(last * beyond[0])
+            for ax in axes:
+                ax.axvspan(start, cells[-1] * 1.3, color="#f1f0ec", zorder=0)
+            ax_t.text(start * 1.05, 1.5, "no exact\nmethod fits", color=muted, fontsize=8.5, va="bottom")
+        for r in exact:
+            if r.get("host_peak_gib", 0) > 5:
+                ax_m.annotate(f"+{r['host_peak_gib']:.0f} GiB host", (r["cells"] / 1e6, r["peak_allocated_gib"]), xytext=(0, -16),
+                              textcoords="offset points", ha="center", color=muted, fontsize=8)
+    ax_r.axhline(1.0, color=muted, linewidth=1, linestyle="--")
+    ax_r.text(ax_r.get_xlim()[0] * 1.05, 1.02, "same time as exact", color=muted, fontsize=8.5, va="bottom")
+    ax_m.axhline(23.65, color=muted, linewidth=1, linestyle="--")
+    ax_m.text(ax_m.get_xlim()[0] * 1.05, 23.0, "RTX 4090 (23.65 GiB)", color=muted, fontsize=8.5, va="top")
+    ax_t.set_yscale("log")
+    ax_t.set_ylabel("time per gradient, one shot (s)", color=ink)
+    ax_r.set_ylabel("Tucker time / exact time", color=ink)
+    ax_m.set_ylabel("GPU peak allocated (GiB)", color=ink)
+    ax_t.set_title("a) Time per gradient", loc="left", color=ink, fontsize=11)
+    ax_r.set_title("b) Tucker relative to the exact reference", loc="left", color=ink, fontsize=11)
+    ax_m.set_title("c) GPU memory", loc="left", color=ink, fontsize=11)
+    ax_t.legend(frameon=False, fontsize=8.5, loc="upper left")
+    ax_r.legend(frameon=False, fontsize=8.5, loc="upper right")
+    fig.text(0.01, -0.03, "Circles: single-level checkpointing on the GPU; squares: checkpointing with the boundary states in host memory. "
+             "Model enlarged at dx = 2 cm, nt = 600 g; one shot.\nTucker: 4-step segments, 2-step from 117 M cells (hence the lower peak there); 187 M cells ran out of memory at every rank.", va="top", color=muted, fontsize=8.5)
+    fig.savefig(out_dir / "size_study.png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
 
 
 if __name__ == "__main__":

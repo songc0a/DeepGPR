@@ -669,6 +669,96 @@ sigma error at r16 is 1.2-4.2e-3 and needs r24 for ~1e-3. A multi-level
 (revolve-type) checkpointing scheme would lower the reference's memory at the
 cost of more recomputation; it is not implemented in DeepGPR.
 
+### 9.7 Model size: where the sketch pays off, and the largest FWI on one 24 GB GPU
+
+`python examples/tucker/size_study.py` (results in
+`examples/tucker/results/full/size.json`, `size_fwi.json`, `size_report.md`,
+figure `size_study.png`). The 3D benchmark model is enlarged by a factor g per
+axis at fixed dx = 2 cm and dt = 30 ps (`120g x (110g + 10 air) x 100g` cells
+plus 10 CPML cells per side, 500 MHz Ricker), and the record grows as
+`nt = 600 g` so that the waves cross the larger domain. One shot, mode 3, eps
+and sigma gradients. The exact reference is the fastest exact method that
+fits: single-level checkpointing on the GPU (`sqrt(2 nt)`-step segments),
+otherwise checkpointing with the boundary states in host memory (the longest
+segment that fits on the GPU; host memory capped at 150 GB on the shared
+server, which has 503 GB). Tucker: `rhs="from_e"`, oversampling 8, recovery
+on the host, 4-step segments (2-step from 117 M cells). Every run used an
+otherwise idle RTX 4090 (re-picked per run); times are medians of two runs
+below 60 M cells (Tucker) or 20 M cells (reference). Gradient errors are
+against the exact reference and stop where no exact method fits; the
+wavefield-error pass was skipped above 80 M cells (it keeps exact frames next
+to their reconstruction and ran out of memory at 98.7 M cells, while the timed
+runs fit).
+
+| g | domain x / depth / z (m) | cells (M, with CPML) | nt | exact reference: GPU peak, time | Tucker r16: GPU peak, time, e_g eps / sigma | Tucker r24 | Tucker r32 | r16 / exact time |
+|---|---|---|---|---|---|---|---|---|
+| 1 | 2.4 / 2.2 / 2.0 | 2.4 | 600 | ckpt 2.41 GiB, 1.0 s | 0.44 GiB, 2.4 s, 8.6e-4 / 4.3e-4 | 0.54 GiB, 2.9 s, 1.7e-4 / 1.0e-4 | 0.71 GiB, 3.6 s, 2.4e-5 / 2.3e-5 | 2.38 |
+| 1.5 | 3.6 / 3.3 / 3.0 | 6.6 | 900 | ckpt 7.76 GiB, 4.4 s | 1.13 GiB, 7.3 s, 7.1e-4 / 5.8e-4 | 1.29 GiB, 8.2 s, 1.6e-4 / 2.9e-4 | 1.54 GiB, 9.6 s, 6.1e-5 / 1.3e-4 | 1.66 |
+| 2 | 4.8 / 4.4 / 4.0 | 14.3 | 1200 | ckpt 18.56 GiB (23.06 reserved), 10.6 s | 2.30 GiB, 18.4 s, 4.4e-4 / 7.2e-4 | 2.53 GiB, 18.7 s, 1.4e-4 / 4.7e-4 | 2.89 GiB, 20.5 s, 6.5e-5 / 2.2e-4 | 1.74 |
+| 2.5 | 6.0 / 5.5 / 5.0 | 26.4 | 1500 | host ckpt (40-step) 15.40 GiB + 26 GiB host, 36.7 s | 4.10 GiB, 38.3 s, 3.5e-4 / 7.3e-4 | 4.42 GiB, 40.5 s, 1.2e-4 / 3.9e-4 | 4.88 GiB, 42.6 s, 6.1e-5 / 2.1e-4 | 1.04 |
+| 3 | 7.2 / 6.6 / 6.0 | 43.8 | 1800 | host ckpt (24-step) 17.65 GiB + 82 GiB host, 93.0 s | 6.66 GiB, 73.7 s, 2.4e-4 / 5.7e-4 | 7.06 GiB, 78.2 s, 1.0e-4 / 3.5e-4 | 7.66 GiB, 81.3 s, 4.8e-5 / 2.7e-4 | **0.79** |
+| 3.5 | 8.4 / 7.7 / 7.0 | 67.6 | 2100 | none fits (single-level ~130 GB GPU; host ckpt 268 GB host with 16-step segments, 533 GB with 8-step) | 10.13 GiB, 137 s | 10.63 GiB, 142 s | 11.35 GiB, 149 s | - |
+| 4 | 9.6 / 8.8 / 8.0 | 98.7 | 2400 | none fits (host ckpt ~1.8 TB host) | 14.63 GiB, 231 s | 15.24 GiB, 242 s | 16.11 GiB, 250 s | - |
+| 4.25 | 10.2 / 9.4 / 8.5 | 117.5 | 2550 | none fits | 13.75 GiB, 317 s | 14.40 GiB, 321 s | 15.31 GiB, 336 s | - |
+| 4.5 | 10.8 / 9.9 / 9.0 | 138.2 | 2700 | none fits | 16.12 GiB (20.79 reserved), 398 s | 16.82 GiB, 413 s | 17.80 GiB (22.78 reserved), 417 s | - |
+| 5 | 12.0 / 11.0 / 10.0 | 187.0 | 3000 | none fits | out of memory | out of memory | out of memory | - |
+
+![Model-size study](../examples/tucker/results/full/size_study.png)
+
+**Where the sketch is most efficient relative to checkpointing.** The time
+ratio falls with the model size: Tucker r16 takes 2.4x the checkpointing time
+at 2.4 M cells, 1.7x at 7-14 M, the same time at 26 M (6 x 5.5 x 5 m) and
+0.79x at 44 M cells (7.2 x 6.6 x 6 m; 1.26x faster, with 2.7x less GPU memory
+and 1/70 of the host memory). Two effects meet:
+
+* Single-level checkpointing costs 0.62-0.74 ns per cell and time step (one
+  extra forward pass) but fits on 24 GB only up to ~15 M cells (at 14.3 M
+  cells it reserved 23.06 of 23.65 GiB; the same run ran out of memory on
+  2026-11-05, Section 9.5; the size study sets
+  `PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512`, the likely difference).
+  Beyond that the boundary states go to host memory and the cost rises to
+  0.93 ns (26 M cells, 26 GiB host traffic) and 1.18 ns (44 M cells, 82 GiB).
+* The sketch costs 1.7 ns per cell-step at 2.4 M cells (fixed overheads), then
+  0.93-1.07 ns from 44 M cells on: at 138 M cells 162 s sketching, 79 s
+  decompression and 157 s native forward + backward of 398 s. Ranks 24 and 32
+  add 3-10 % at the large sizes (20-50 % at the small ones).
+
+So checkpointing is the better choice up to ~20 M cells (1.7-2.4x faster;
+the sketch only saves memory), the two are even at ~26 M, and the sketch is
+ahead from there on. Above ~50 M cells no exact method in DeepGPR fits this
+machine: single-level checkpointing would need 130-420 GB of GPU memory, the
+host-held states 268 GB (67.6 M cells, GPU at its limit) to 1.8 TB
+(98.7 M cells). A multi-level (revolve-type) scheme could still give exact
+gradients there at the cost of further recomputation; it is not implemented,
+so this comparison is against DeepGPR's single- and two-level checkpointing.
+
+**Accuracy against size.** At a fixed rank the wavefield frame error grows
+with the domain (rank 16: 1.5 % at 2.4 M cells, 12 % at 44 M, 14 % at 68 M;
+rank 32: 0.05 %, 5 %, 6 %), because the larger domain holds more
+wavelengths. The gradient errors did not grow: rank 16 eps 8.6e-4 → 2.4e-4,
+sigma 4-7e-4; rank 24 1.0-1.7e-4 / 1-5e-4; rank 32 2-7e-5 / 2e-5-3e-4, up
+to 44 M cells (the largest size with an exact reference).
+
+**The largest FWI.** The compressed gradient fits up to 138.2 M cells
+(122.7 M model cells, 10.8 x 9.9 x 9.0 m at 2 cm, nt = 2700 = 81 ns); at
+187 M cells every rank ran out of memory (the failing allocation, 4.2 GiB, is
+the 2-step full-resolution segment buffer; the per-cell footprint of
+~150-160 B would need ~30 GB). Three dense FWI iterations (eps and sigma,
+Adam with its moments on the GPU, rank 16, 2-step segments, one shot):
+
+| run | cells (M, with CPML) | nt | GPU peak alloc / reserved | host peak | s per iteration | loss |
+|---|---|---|---|---|---|---|
+| F3.5 | 67.6 | 2100 | 10.23 / 10.71 GiB | 1.6 GiB | 151 | 0.0895 → 0.0752 → 0.0628 |
+| F4.5 | 138.2 | 2700 | 20.68 / 23.10 GiB | 1.8 GiB | 398 | 0.0878 → 0.0738 → 0.0616 |
+
+These runs test memory and time, not convergence (three steps; the eps RMSE
+does not change in the third digit). At 138 M cells the card is full (23.10
+of 23.65 GiB reserved); what fills it is the solver state and coefficients,
+the model, gradient and Adam tensors and the segment buffer. The compressed
+history itself is 0.9 GiB, 4500x below the 4.1 TiB default history. Shots are
+independent, so time per iteration scales with the number of shots per GPU
+(36 shots of this size: ~4 h per iteration on one GPU).
+
 ## 10. Limitations and open items
 
 * **Speed.** The sketch costs 3-5x the native forward + backward in 3D and
@@ -681,9 +771,11 @@ cost of more recomputation; it is not implemented in DeepGPR.
 * **When to use it.** Checkpointing is exact and faster whenever its memory
   (2.4 GiB for the 3D example) is available. The sketch is for memory-bound
   cases: 4-6x below the best checkpoint setting, growing far more slowly with
-  `nt` and with grid refinement; at ~15 M cells it is the only tested option
-  that fits on 24 GB without host memory, and at ~50 M cells it is 1.7x faster than
-  checkpointing with host-held states (Sections 9.5, 9.6).
+  `nt` and with grid refinement. With the domain enlarged at fixed dx it
+  breaks even with the best exact method at ~26 M cells, is 1.26x faster at
+  44 M cells (1.7x at 48 M cells with `nt = 1000`), and above ~50 M cells it
+  is the only option on a 24 GB GPU and 503 GB host; the largest FWI that fits
+  is 138 M cells (Sections 9.5-9.7).
   Combined with the existing temporal subsampling (nearly exact up to the
   recommended interval), it gives the smallest footprint measured (0.37 GiB).
 * **2D.** Little gain from per-frame Tucker; use checkpointing or time blocks.
