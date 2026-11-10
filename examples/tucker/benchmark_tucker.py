@@ -489,6 +489,8 @@ def add_gradient_errors(results: Dict[str, Any], quick: bool) -> None:
         if not (path.exists() and reference_path.exists()):
             continue
         grads, reference = torch.load(path), torch.load(reference_path)
+        if any(grads[key].shape != reference[key].shape for key in ("eps", "sigma")):
+            continue  # a stale cache of another model under the same name
         for key in ("eps", "sigma"):
             result[f"grad_{key}_rel_l2"] = relative_error(grads[key], reference[key])
             result[f"grad_{key}_cosine"] = cosine_similarity(grads[key], reference[key])

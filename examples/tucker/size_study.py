@@ -176,7 +176,9 @@ def main() -> None:
         if "skipped" in reference:
             bt.merge_result(path, reference["name"], dict(name=reference["name"], skipped=reference["skipped"], cells=cells, nt=nt))
         else:
-            ref = dict(reference, **group, repeats=2 if cells < 20e6 else 1)
+            # No gradient reference for the exact run itself (the worker's default
+            # "none" would pick up the full-history cache of the default model).
+            ref = dict(reference, **group, repeats=2 if cells < 20e6 else 1, reference="(self)")
             specs.append(ref)
         for rank in RANKS:
             if rank in failed_ranks:
