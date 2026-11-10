@@ -11,7 +11,8 @@ estimates calibrated on Section 9.5-9.6 of
 fit (GPU 24 GB, host memory capped at ``HOST_LIMIT``); a method that ran out of
 GPU memory is not tried at larger sizes. Finally a few dense FWI iterations
 (Adam state on the GPU) are run at the largest size the compressed gradient
-reached. All runs use one idle GPU (picked once). Results:
+reached. Every run waits for an idle GPU (re-picked per run; all RTX 4090,
+recorded with the result) that is not excluded or protected. Results:
 ``results/full/size.json``, ``size_fwi.json``, ``size_report.md``.
 
 Usage: ``python size_study.py [--quick] [--gpu N]``.
@@ -191,7 +192,9 @@ def main() -> None:
                 result = previous
             else:
                 if not args.no_wait:
-                    idle_gpu(gpu)  # wait until our GPU is idle again (shared host)
+                    # Any idle, unprotected GPU (all RTX 4090; the GPU is recorded per run):
+                    # another user may take the previous one between runs.
+                    gpu = idle_gpu(args.gpu)
                 log(status, f"{spec['name']}: {cells / 1e6:.1f} M cells, nt {nt} ...")
                 result = run_worker("size", spec, gpu)
                 result.update(cells=cells, nt=nt, gpu=gpu)
@@ -227,7 +230,9 @@ def main() -> None:
             if spec["name"] in fwi_done and "error" not in fwi_done[spec["name"]]:
                 break
             log(status, f"FWI {spec['name']}: {cells / 1e6:.1f} M cells ...")
-            result = run_worker("sizefwi", spec, gpu if args.no_wait else idle_gpu(gpu))
+            gpu = gpu if args.no_wait else idle_gpu(args.gpu)
+            result = run_worker("sizefwi", spec, gpu)
+            result["gpu"] = gpu
             bt.merge_result(fwi_path, spec["name"], result)
             log(status, f"   -> {'ERROR ' + result['error'][:160] if 'error' in result else 'peak %.2f GiB, %.0f s per iteration' % (result['peak_reserved_gib'], result['seconds_per_iteration'])}")
             if "error" not in result:
