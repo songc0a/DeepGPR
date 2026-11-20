@@ -54,7 +54,7 @@ from ..preprocessing.grid import pmlthick_revert
 from ..preprocessing.model_setup import _ExtendModel
 from ..solver.pml import build_pml_coeffs
 from ..utils.logger import get_logger
-from . import cuda2d, graphs
+from . import cuda2d, graphs, sweep3d
 from . import functional as fn
 from .coupling import InterfaceCoupling, interface_faces
 from .dgtd import (
@@ -93,6 +93,19 @@ _PENALTY_STABLE_FRACTION = ((0.0, 1.0), (0.05, 0.96), (0.1, 0.92), (0.25, 0.82),
 #: (P1) and 1.8e-4 -> 7.1e-5 (P2); the continuous-PML term exp(-1.6 f N)
 #: stays below 3e-6 for N = 20 at f = 0.4.
 DEFAULT_DG_PML_STRENGTH = 0.4
+
+
+#: Default fraction of the Yee stability limit taken by the macro step of the
+#: local time stepping (``lts``); the band's sub-step keeps ``cfl_safety``.
+DEFAULT_LTS_CFL = 0.9
+
+#: Default stabilisation parameter ``nu`` of the local time stepping (damped
+#: Chebyshev recursion of Grote, Michel & Sauter 2021; 0 = Diaz & Grote 2009).
+DEFAULT_LTS_NU = 0.3
+
+#: With a side UPML (3D) the macro step of the local time stepping is also limited
+#: to ``DEFAULT_LTS_UPML_LIMIT / s_max`` (measured: unstable above about 0.8).
+DEFAULT_LTS_UPML_LIMIT = 0.6
 
 
 def default_cfl_safety(alpha: float) -> float:
@@ -192,6 +205,10 @@ class HybridTM2D:
         pml_profile: str = "matched",
         nshot: int = 1,
         cuda_kernels: bool = True,
+        lts: Union[int, str, None] = None,
+        lts_cfl: float = DEFAULT_LTS_CFL,
+        lts_overlap: int = 1,
+        lts_nu: float = DEFAULT_LTS_NU,
         device="cpu",
         dtype=torch.float64,
     ):
@@ -267,17 +284,62 @@ class HybridTM2D:
 
         t_dt = time.perf_counter()
         self.lambda_max = None
+        self.lts = 1
+        self.lts_cfl = float(lts_cfl)
+        self.lts_overlap = int(lts_overlap)
+        self.lts_nu = float(lts_nu)
+        want_lts = lts not in (None, 1, False) and self.mode == "hybrid"
         if dt is None:
             self.lambda_max = self.estimate_lambda_max()
             if cfl_safety is None:
                 cfl_safety = default_cfl_safety(self.flux_alpha)
             dt = cfl_safety * 2.0 / math.sqrt(self.lambda_max)
+        if want_lts:
+            self._check_lts_fluxes(side_boundary)
+            self.lts, dt = self._lts_schedule(lts, float(dt), dt_given=self.lambda_max is None)
         self.dt = float(dt)
+        self.dt_fine = self.dt / self.lts
         self.dt_seconds = time.perf_counter() - t_dt
         self._build_subsolvers(self.dt, conservative=False)
         self.static = self._make_static(self.fd, self.dg, self.couplings, self.nshot)
         self.coefs = fn.build_coefficients(self.static, self._fields_of_model(), self.dt)
         self.state = fn.zero_state(self.static)
+
+    # ------------------------------------------------------------ local time stepping
+    def _check_lts_fluxes(self, side_boundary: str) -> None:
+        """The sub-cycled recursion is a (stabilised) Chebyshev polynomial of the
+        band's operator and needs it symmetric: central fluxes, PEC side faces."""
+        if self.flux_alpha > 0 or side_boundary == "abc":
+            raise ValueError("Local time stepping needs central fluxes in the DG band "
+                             "(flux='central') and PEC side faces: the explicit upwind "
+                             "penalty / Silver-Mueller terms are unstable inside the "
+                             "sub-cycled recursion (see docs/HYBRID_DGTD.md, Section 12).")
+
+    def yee_dt_limit(self) -> float:
+        """Stability limit of the (refined) Yee grid with its fastest medium."""
+        eps, _, mu = self.model
+        slow = float(torch.clamp((eps * mu).min(), max=self.air_values[0] * self.air_values[2]))
+        c_max = SPEED_OF_LIGHT / math.sqrt(max(slow, 1e-12))
+        return 1.0 / (c_max * math.sqrt(1.0 / self.dx ** 2 + 1.0 / self.dy ** 2))
+
+    def _lts_schedule(self, lts, dt_fine: float, dt_given: bool) -> Tuple[int, float]:
+        """``(p, dt)`` of the local time stepping (see :class:`HybridMaxwell3D`)."""
+        dt_coarse = self.lts_cfl * self.yee_dt_limit()
+        if isinstance(lts, str):
+            if lts != "auto":
+                raise ValueError("lts must be None, an integer or 'auto'.")
+            if dt_given:
+                raise ValueError("lts='auto' needs the band's time step estimate (dt=None).")
+            p = int(math.ceil(dt_coarse / dt_fine - 1e-9))
+            if p <= 1:
+                return 1, min(dt_fine, dt_coarse)
+            return p, dt_coarse
+        p = int(lts)
+        if p < 1 or p != lts:
+            raise ValueError("lts must be a positive integer or 'auto'.")
+        if dt_given:
+            return p, dt_fine
+        return p, min(dt_coarse, p * dt_fine)
 
     # ------------------------------------------------------------ geometry
     def surface_x_ext(self, y_ext: np.ndarray) -> np.ndarray:
@@ -484,11 +546,14 @@ class HybridTM2D:
         return fd, dg, couplings
 
     # ------------------------------------------------------------ stepping
-    def _make_static(self, fd, dg, couplings, nshot, dtype=None) -> fn.StepStatic:
+    def _make_static(self, fd, dg, couplings, nshot, dtype=None,
+                     conservative: bool = False) -> fn.StepStatic:
         st = fn.StepStatic(
             nshot=nshot,
             yee=None if fd is None else fn.yee_static(fd),
-            dg=None if dg is None else fn.dg_static(dg),
+            dg=None if dg is None else fn.dg_static(dg, lts=1 if conservative else self.lts,
+                                                    lts_overlap=self.lts_overlap,
+                                                    lts_nu=self.lts_nu),
             couplings=fn.coupling_static(couplings, fd) if couplings else [],
             dtype=self.dtype if dtype is None else dtype, device=self.device)
         if self.cuda_kernels and self.device.type == "cuda":
@@ -579,7 +644,7 @@ class HybridTM2D:
         """
         fd, dg, cps = self._build_subsolvers(1.0, conservative=True, nshot=1,
                                              dtype=torch.float64)
-        static = self._make_static(fd, dg, cps, 1, dtype=torch.float64)
+        static = self._make_static(fd, dg, cps, 1, dtype=torch.float64, conservative=True)
         coefs = fn.build_coefficients(
             static, self._fields_of_model(sigma_zero=True, dtype=torch.float64), 1.0)
         gen = torch.Generator(device="cpu").manual_seed(seed)
@@ -792,6 +857,18 @@ class HybridTM2D:
             torch.cuda.synchronize(self.device)
         t0 = time.perf_counter()
         st, coefs = self.static, self.coefs
+        if reset and not energy_every and callback is None and sweep3d.enabled(st):
+            # fused step replayed as CUDA Graphs on two fixed buffers (no state copies)
+            sg = sweep3d.SweepGraphs(st, src_ops, rec_ops, w.shape[0])
+            cc = coefs.replaced([t.contiguous() for t in coefs.tensors()])
+            with torch.no_grad():
+                final = sg.run(cc, w.contiguous(), nt, data)
+                self.state = tuple(t.clone() for t in final)
+            self._sync()
+            if self.device.type == "cuda":
+                torch.cuda.synchronize(self.device)
+            return {"receivers": data, "energy": None, "energy_steps": [],
+                    "seconds": time.perf_counter() - t0, "dt": self.dt}
         graph = graphs.make(st, coefs, src_ops, rec_ops, w.shape[0]) \
             if not energy_every and self.cuda_kernels else None
         if graph is not None:
@@ -833,6 +910,8 @@ class HybridTM2D:
             "model_dx": self.model_dx, "fdtd_refinement": self.fdtd_refinement,
             "pml": self.pml[:4], "lambda_max": self.lambda_max,
             "setup_seconds": self.setup_seconds, "dt_seconds": self.dt_seconds,
+            "lts": self.lts, "dt_fine": self.dt / max(self.lts, 1),
+            "lts_overlap": self.lts_overlap, "lts_nu": self.lts_nu,
         }
         if self.fd is not None:
             rows = sum(b - a for a, b in self.fd.e_ranges)

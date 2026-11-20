@@ -10,9 +10,13 @@
 //      rhs = dHyx/dx - dHxy/dy + (Aex dHyx + Bex pex) - (Aey dHxy + Bey pey)
 //      pex' = Eex pex - Fex dHyx, pey' = Eey pey - Fey dHxy,  Ez' = ca Ez + cb rhs
 //
-// One thread per shot and node. The transposes evaluate the cotangents of the
-// differences of the node and of its neighbour and gather them directly (no
-// temporaries, no atomics); ca/cb cotangents per shot (S, NX, NY).
+// Forward and H transpose: one thread per shot and node. E transpose: the shots of
+// a node are split over up to kEY threads (lanes), each reading the coefficients of
+// the node and of its neighbours once; ca/cb cotangents per shot (S, NX, NY) or
+// summed over the shots in registers and shared memory (NX, NY). The transposes
+// evaluate the cotangents of the differences of the node and of its neighbour and
+// gather them directly (no temporaries, no atomics). Inputs read at neighbours
+// (gHx/gHy/gphy/gphx, gEz/gpex/gpey) must not share memory with the outputs.
 
 #include <cuda_runtime.h>
 #include <stdint.h>
@@ -65,7 +69,7 @@ template <typename T>
 __global__ void yee2_h_bwd(Y2<T> y, const T* __restrict__ gHx, const T* __restrict__ gHy,
                            const T* __restrict__ gphy, const T* __restrict__ gphx,
                            T* __restrict__ gEz, T* __restrict__ oHx, T* __restrict__ oHy,
-                           T* __restrict__ ophy, T* __restrict__ ophx) {
+                           T* __restrict__ ophy, T* __restrict__ ophx, int acc) {
     const long long N = (long long)y.NX * y.NY;
     long long tid = (long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= (long long)y.S * N) return;
@@ -82,7 +86,10 @@ __global__ void yee2_h_bwd(Y2<T> y, const T* __restrict__ gHx, const T* __restri
     if (j >= 1) g += gdEy(y, node - 1, tid - 1, gHx, gphy);
     if (i <= y.NX - 2) g -= gdEx(y, node, tid, gHy, gphx);
     if (i >= 1) g += gdEx(y, node - y.NY, tid - y.NY, gHy, gphx);
-    gEz[tid] = g;
+    if (acc & 2)
+        gEz[tid] += g;
+    else
+        gEz[tid] = g;
 }
 
 template <typename T>
@@ -106,19 +113,10 @@ __global__ void yee2_e_fwd(Y2<T> y, const T* __restrict__ Hx, const T* __restric
     oEz[tid] = ca[node] * Ez[tid] + cb[node] * rhs;
 }
 
-// cotangents of dHyx, dHxy at (node)
-template <typename T>
-__device__ inline T gdHyx(const Y2<T>& y, long long node, long long id, const T* cb,
-                          const T* gEz, const T* gpex) {
-    const T gr = cb[node] * gEz[id];
-    return gr / y.dx + y.Aex[node] * gr - y.Fex[node] * gpex[id];
-}
-template <typename T>
-__device__ inline T gdHxy(const Y2<T>& y, long long node, long long id, const T* cb,
-                          const T* gEz, const T* gpey) {
-    const T gr = cb[node] * gEz[id];
-    return -gr / y.dy - y.Aey[node] * gr - y.Fey[node] * gpey[id];
-}
+// E transpose: blocks of kEX nodes x (up to kEY) shot lanes; lane y takes the shots
+// y, y + kEY, ...; the summed ca/cb cotangents are reduced over the lanes in shared
+// memory in a fixed order (deterministic).
+constexpr int kEX = 32, kEY = 8;
 
 template <typename T>
 __global__ void yee2_e_bwd(Y2<T> y, const T* __restrict__ Hx, const T* __restrict__ Hy,
@@ -128,33 +126,86 @@ __global__ void yee2_e_bwd(Y2<T> y, const T* __restrict__ Hx, const T* __restric
                            const T* __restrict__ gpex, const T* __restrict__ gpey,
                            T* __restrict__ oHx, T* __restrict__ oHy, T* __restrict__ oEz,
                            T* __restrict__ opex, T* __restrict__ opey, T* __restrict__ gca,
-                           T* __restrict__ gcb) {
+                           T* __restrict__ gcb, int acc) {
+    __shared__ T red[2][kEY][kEX];
     const long long N = (long long)y.NX * y.NY;
-    long long tid = (long long)blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= (long long)y.S * N) return;
-    const long long node = tid % N;
-    const int i = (int)(node / y.NY), j = (int)(node % y.NY);
-    const T ge = gEz[tid];
-    const T gr = cb[node] * ge;
-    const T dHyx = i >= 1 ? Hy[tid] - Hy[tid - y.NY] : T(0);
-    const T dHxy = j >= 1 ? Hx[tid] - Hx[tid - 1] : T(0);
-    const T px = pex[tid], py = pey[tid];
-    const T rhs = dHyx / y.dx - dHxy / y.dy + (y.Aex[node] * dHyx + y.Bex[node] * px)
-                - (y.Aey[node] * dHxy + y.Bey[node] * py);
-    oEz[tid] = ca[node] * ge;
-    opex[tid] = y.Bex[node] * gr + y.Eex[node] * gpex[tid];
-    opey[tid] = -y.Bey[node] * gr + y.Eey[node] * gpey[tid];
-    gca[tid] = ge * Ez[tid];
-    gcb[tid] = ge * rhs;
+    const long long nl = (long long)blockIdx.x * kEX + threadIdx.x;
+    const bool valid = nl < N;
+    const int node = valid ? (int)nl : 0;
+    const int lane = threadIdx.y, lanes = blockDim.y;
+    const int i = node / y.NY, j = node - i * y.NY;
     // Hy[i, j] enters dHyx(i, j) with +1 (i >= 1) and dHyx(i+1, j) with -1 (i+1 <= NX-1);
-    // Hx[i, j] enters dHxy(i, j) with +1 (j >= 1) and dHxy(i, j+1) with -1 (j+1 <= NY-1)
-    T gy = 0, gx = 0;
-    if (i >= 1) gy += gdHyx(y, node, tid, cb, gEz, gpex);
-    if (i + 1 <= y.NX - 1) gy -= gdHyx(y, node + y.NY, tid + y.NY, cb, gEz, gpex);
-    if (j >= 1) gx += gdHxy(y, node, tid, cb, gEz, gpey);
-    if (j + 1 <= y.NY - 1) gx -= gdHxy(y, node + 1, tid + 1, cb, gEz, gpey);
-    oHy[tid] = gy;
-    oHx[tid] = gx;
+    // Hx[i, j] enters dHxy(i, j) with +1 (j >= 1) and dHxy(i, j+1) with -1 (j+1 <= NY-1);
+    // cotangents gdHyx = gr/dx + Aex gr - Fex gpex, gdHxy = -gr/dy - Aey gr - Fey gpey
+    // with gr = cb gEz
+    T sca = 0, scb = 0;
+    if (valid) {
+        const bool up = i >= 1, dn = i + 1 <= y.NX - 1, lf = j >= 1, rt = j + 1 <= y.NY - 1;
+        const int nxp = dn ? node + y.NY : node, nyp = rt ? node + 1 : node;
+        const int nxm = up ? node - y.NY : node, nym = lf ? node - 1 : node;
+        const T can = ca[node], cbn = cb[node];
+        const T Aex = y.Aex[node], Bex = y.Bex[node], Eex = y.Eex[node], Fex = y.Fex[node];
+        const T Aey = y.Aey[node], Bey = y.Bey[node], Eey = y.Eey[node], Fey = y.Fey[node];
+        const T cbx = cb[nxp], Aexx = y.Aex[nxp], Fexx = y.Fex[nxp];
+        const T cby = cb[nyp], Aeyy = y.Aey[nyp], Feyy = y.Fey[nyp];
+        for (int s = lane; s < y.S; s += lanes) {
+            const long long off = (long long)s * N, tid = off + node;
+            const T ge = gEz[tid], gpx = gpex[tid], gpy = gpey[tid];
+            const T gex = gEz[off + nxp], gpxx = gpex[off + nxp];
+            const T gey = gEz[off + nyp], gpyy = gpey[off + nyp];
+            const T hy = Hy[tid], hym = Hy[off + nxm], hx = Hx[tid], hxm = Hx[off + nym];
+            const T px = pex[tid], py = pey[tid], ez = Ez[tid];
+            const T ohy = oHy[tid], ohx = oHx[tid];   // used with acc & 2 only
+            const T gr = cbn * ge;
+            const T dHyx = up ? hy - hym : T(0);
+            const T dHxy = lf ? hx - hxm : T(0);
+            const T rhs = dHyx / y.dx - dHxy / y.dy + (Aex * dHyx + Bex * px)
+                        - (Aey * dHxy + Bey * py);
+            oEz[tid] = can * ge;
+            opex[tid] = Bex * gr + Eex * gpx;
+            opey[tid] = -Bey * gr + Eey * gpy;
+            if (acc & 8) {
+                sca += ge * ez;
+                scb += ge * rhs;
+            } else if (acc & 4) {
+                gca[tid] += ge * ez;
+                gcb[tid] += ge * rhs;
+            } else {
+                gca[tid] = ge * ez;
+                gcb[tid] = ge * rhs;
+            }
+            T gy = 0, gx = 0;
+            if (up) gy += gr / y.dx + Aex * gr - Fex * gpx;
+            if (dn) {
+                const T g2 = cbx * gex;
+                gy -= g2 / y.dx + Aexx * g2 - Fexx * gpxx;
+            }
+            if (lf) gx += -gr / y.dy - Aey * gr - Fey * gpy;
+            if (rt) {
+                const T g2 = cby * gey;
+                gx -= -g2 / y.dy - Aeyy * g2 - Feyy * gpyy;
+            }
+            oHy[tid] = (acc & 2) ? ohy + gy : gy;
+            oHx[tid] = (acc & 2) ? ohx + gx : gx;
+        }
+    }
+    if (!(acc & 8)) return;                    // uniform over the launch
+    red[0][lane][threadIdx.x] = sca;
+    red[1][lane][threadIdx.x] = scb;
+    __syncthreads();
+    if (lane != 0 || !valid) return;
+    T a = red[0][0][threadIdx.x], b = red[1][0][threadIdx.x];
+    for (int l = 1; l < lanes; ++l) {
+        a += red[0][l][threadIdx.x];
+        b += red[1][l][threadIdx.x];
+    }
+    if (acc & 4) {
+        gca[node] += a;
+        gcb[node] += b;
+    } else {
+        gca[node] = a;
+        gcb[node] = b;
+    }
 }
 
 template <typename T>
@@ -174,7 +225,12 @@ Y2<T> make_y2(const int* gi, const double* gd, const void* const* cp) {
 template <typename T>
 int run(int side, int dir, const int* gi, const double* gd, const void* const* cp,
         const void* const* io, cudaStream_t st) {
+    // dir bit 0: transpose; bit 1: accumulate the cotangents of the differentiated fields
+    // (gEz of the H transpose, gHx/gHy of the E transpose); bit 2: accumulate gca/gcb;
+    // bit 3: gca/gcb summed over the shots (NX, NY)
     Y2<T> y = make_y2<T>(gi, gd, cp);
+    const int acc = dir & 14;
+    dir &= 1;
     const int nb = blocks((long long)y.S * y.NX * y.NY);
     if (side == 0 && dir == 0)        // io: Ez Hx Hy phy phx oHx oHy ophy ophx
         yee2_h_fwd<T><<<nb, kThreads, 0, st>>>(y, (const T*)io[0], (const T*)io[1],
@@ -183,18 +239,19 @@ int run(int side, int dir, const int* gi, const double* gd, const void* const* c
     else if (side == 0)               // io: gHx gHy gphy gphx gEz oHx oHy ophy ophx
         yee2_h_bwd<T><<<nb, kThreads, 0, st>>>(y, (const T*)io[0], (const T*)io[1],
                                                 (const T*)io[2], (const T*)io[3], (T*)io[4],
-                                                (T*)io[5], (T*)io[6], (T*)io[7], (T*)io[8]);
+                                                (T*)io[5], (T*)io[6], (T*)io[7], (T*)io[8], acc);
     else if (dir == 0)                // io: Hx Hy Ez pex pey ca cb oEz opex opey
         yee2_e_fwd<T><<<nb, kThreads, 0, st>>>(y, (const T*)io[0], (const T*)io[1],
                                                 (const T*)io[2], (const T*)io[3], (const T*)io[4],
                                                 (const T*)io[5], (const T*)io[6], (T*)io[7],
                                                 (T*)io[8], (T*)io[9]);
     else                              // io: Hx Hy Ez pex pey ca cb gEz gpex gpey oHx oHy oEz opex opey gca gcb
-        yee2_e_bwd<T><<<nb, kThreads, 0, st>>>(
+        yee2_e_bwd<T><<<(int)(((long long)y.NX * y.NY + kEX - 1) / kEX),
+                        dim3(kEX, y.S < kEY ? y.S : kEY), 0, st>>>(
             y, (const T*)io[0], (const T*)io[1], (const T*)io[2], (const T*)io[3],
             (const T*)io[4], (const T*)io[5], (const T*)io[6], (const T*)io[7], (const T*)io[8],
             (const T*)io[9], (T*)io[10], (T*)io[11], (T*)io[12], (T*)io[13], (T*)io[14],
-            (T*)io[15], (T*)io[16]);
+            (T*)io[15], (T*)io[16], acc);
     return (int)cudaGetLastError();
 }
 

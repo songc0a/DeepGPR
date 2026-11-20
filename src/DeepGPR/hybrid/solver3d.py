@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import math
 import time
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -35,13 +35,14 @@ from ..preprocessing.model_setup import _ExtendModel
 from ..solver.pml import build_pml_coeffs
 from . import cuda3d
 from . import functional3d as fn3
-from . import graphs
+from . import graphs, sweep3d
 from .coupling3d import InterfaceCoupling3D, horizontal_faces
 from .dgtd3d import (FACE_ABC, FACE_INTERFACE, FACE_INTERIOR, FACE_PEC, build_geometry_3d,
                      point_operators_3d)
 from .mesh3d import AIR, TetMesh, adaptive_column_tet_mesh, terrain_following_tet_mesh
 from .reference3d import reference_tetrahedron
-from .solver import DEFAULT_DG_PML_STRENGTH, DEFAULT_FLUX_ALPHA, FLUX_ALPHA, default_cfl_safety
+from .solver import (DEFAULT_DG_PML_STRENGTH, DEFAULT_FLUX_ALPHA, DEFAULT_LTS_CFL, DEFAULT_LTS_NU,
+                     DEFAULT_LTS_UPML_LIMIT, FLUX_ALPHA, default_cfl_safety)
 from .topography import Surface3D
 
 
@@ -94,9 +95,30 @@ class HybridMaxwell3D:
             ``alpha_if`` 1-3 for ``fdtd_refinement=1`` and 0.3-1 for 3. 0
             disables it (energy-conserving coupling).
         cuda_kernels: Use the fused CUDA kernels on GPUs (Yee and DG updates, see
-            :mod:`.cuda3d`; :meth:`run` and the adjoint replay the step as a CUDA
-            Graph, :mod:`.graphs`); otherwise the PyTorch implementation of the
-            same operator.
+            :mod:`.cuda3d`; coupling, sources and receivers, :mod:`.glue3d`; the whole
+            step with explicit outputs, :mod:`.fused3d`). :meth:`run` and the adjoint
+            replay the steps as CUDA Graphs on fixed buffers (:mod:`.sweep3d`);
+            otherwise the PyTorch implementation of the same operator.
+        lts: Local time stepping of the DG band (:func:`~DeepGPR.hybrid.functional3d.dg_h_update`).
+            ``None``/``1``: one global leapfrog step set by the band. An integer
+            ``p``: the Yee grid takes ``dt`` and the band ``p`` sub-steps ``dt / p``;
+            ``"auto"``: ``dt = lts_cfl`` times the Yee limit of the (refined) Yee
+            grid and the smallest ``p`` whose sub-step satisfies the band's limit
+            (``cfl_safety`` times the coupled leapfrog limit). An explicit ``dt``
+            is used as given. With ``lts > 1`` the adjoint uses the hand-written
+            transpose of the sub-cycled step (:func:`.fused3d.lts_vjp_into`) on CUDA,
+            autograd otherwise.
+        lts_cfl: Fraction of the Yee stability limit used for the macro step.
+        lts_overlap: Yee planes beyond each interface plane that are sub-cycled
+            with the band (the interface plane always is); 1 (default) keeps the
+            method stable up to the Yee limit, 0 is the minimal overlap.
+        lts_nu: Stabilisation of the inner recursion (damped Chebyshev
+            coefficients, Grote, Michel & Sauter 2021); 0 is the original
+            Diaz-Grote scheme, which is unstable at isolated time steps.
+        lts_upml_limit: With a side UPML the macro step is also limited to
+            ``lts_upml_limit / s_max`` (``s_max``: largest UPML rate of the band);
+            the sub-cycled band is unstable above about 0.8 (measured), 0.6 is
+            the default. Weaker ``dg_pml_strength`` allows a larger macro step.
     """
 
     def __init__(self, eps_r, sigma, dx, *, surface: Optional[Surface3D] = None,
@@ -108,7 +130,10 @@ class HybridMaxwell3D:
                  pml_max_velocity: float = SPEED_OF_LIGHT,
                  dg_pml_strength: float = DEFAULT_DG_PML_STRENGTH, fdtd_refinement: int = 1,
                  pml_profile: str = "matched", component: int = 2, nshot: int = 1,
-                 interface_penalty: float = 0.1, cuda_kernels: bool = True, device="cpu",
+                 interface_penalty: float = 0.1, cuda_kernels: bool = True,
+                 lts: Union[int, str, None] = None, lts_cfl: float = DEFAULT_LTS_CFL,
+                 lts_overlap: int = 1, lts_nu: float = DEFAULT_LTS_NU,
+                 lts_upml_limit: float = DEFAULT_LTS_UPML_LIMIT, device="cpu",
                  dtype=torch.float64):
         t0 = time.perf_counter()
         self.device, self.dtype = torch.device(device), dtype
@@ -174,16 +199,133 @@ class HybridMaxwell3D:
 
         t1 = time.perf_counter()
         self.lambda_max = None
+        self.lts = 1
+        self.lts_cfl = float(lts_cfl)
+        self.lts_overlap = int(lts_overlap)
+        self.lts_nu = float(lts_nu)
+        self.lts_upml_limit = float(lts_upml_limit)
+        want_lts = lts not in (None, 1, False) and self.mode == "hybrid"
+        if dt is None or want_lts:
+            if cfl_safety is None:
+                # with LTS the penalty acts as a split damping outside the sub-steps:
+                # the band's sub-step is that of the central fluxes
+                cfl_safety = default_cfl_safety(0.0 if want_lts else self.flux_alpha)
         if dt is None:
             self.lambda_max = self.estimate_lambda_max()
-            if cfl_safety is None:
-                cfl_safety = default_cfl_safety(self.flux_alpha)
             dt = cfl_safety * 2.0 / math.sqrt(self.lambda_max)
+        self.lts_cost_table = None
+        if want_lts:
+            self._check_lts_fluxes(side_boundary)
+            self.lts, dt = self._lts_schedule(lts, float(dt), dt_given=self.lambda_max is None)
         self.dt = float(dt)
+        self.dt_fine = self.dt / self.lts
         self.dt_seconds = time.perf_counter() - t1
+        self.lts_pen_k, self.lts_pen_rate = 1, None
         self.static = self.make_static(self.dt)
         self.coefs = fn3.build_coefficients(self.static, self._fields_of_model(), self.dt)
+        if self.static.dg is not None and self.static.dg.lts_split:
+            self.lts_pen_k, self.lts_pen_rate = self._lts_penalty_substeps()
+            self.static.dg.lts_pen_k = self.lts_pen_k
         self.state = fn3.zero_state(self.static)
+
+    # ------------------------------------------------------------ local time stepping
+    def _check_lts_fluxes(self, side_boundary: str) -> None:
+        """With LTS a penalty flux (``flux > 0``) is applied as a split damping of the
+        band's updates (:func:`~DeepGPR.hybrid.functional3d.lts_damp`); Silver-Mueller
+        side faces are not supported."""
+        if side_boundary == "abc":
+            raise ValueError("Local time stepping needs PEC side faces (the band's side "
+                             "UPML absorbs); Silver-Mueller faces are not supported "
+                             "(see docs/HYBRID_DGTD.md, Section 12).")
+
+    def _lts_penalty_substeps(self, iterations: int = 40, safety: float = 1.4):
+        """``(k, rho)``: sub-steps of the split penalty damping, ``k = ceil(rho / safety)``
+        with ``rho`` the spectral radius of the damping operator at the macro step
+        (power iteration, H and E parts; ``safety < 2`` leaves room for model updates)."""
+        d, c = self.static.dg, self.coefs
+        gen = torch.Generator().manual_seed(11)
+        rho = []
+        with torch.no_grad():
+            for kind in ("h", "e"):
+                x = torch.randn((1, 3, d.K, d.Np), generator=gen, dtype=torch.float64).to(
+                    self.device, self.dtype)
+                lam = 0.0
+                for _ in range(iterations):
+                    y = fn3.lts_penalty_rate(d, c, x, kind)
+                    ny = float(y.norm())
+                    if ny == 0.0:
+                        break
+                    lam = ny / float(x.norm())
+                    x = y / ny
+                rho.append(lam)
+        return max(1, int(math.ceil(max(rho) / safety))), tuple(rho)
+
+    def yee_dt_limit(self) -> float:
+        """Stability limit of the (refined) Yee grid, ``1 / (c_max sqrt(sum 1/h^2))``
+        with the fastest medium of the Yee part."""
+        eps, _, mu = self.model
+        air = self.air_values[0]
+        slow = float(torch.clamp((eps * mu).min(), max=air))   # air is always present above
+        c_max = SPEED_OF_LIGHT / math.sqrt(max(slow, 1e-12))
+        return 1.0 / (c_max * math.sqrt(sum(1.0 / h ** 2 for h in self.spacing)))
+
+    def _lts_schedule(self, lts, dt_fine: float, dt_given: bool) -> Tuple[int, float]:
+        """``(p, dt)`` of the local time stepping: ``dt_fine`` is the stable step of
+        the band (given or estimated), the macro step is ``lts_cfl`` times the Yee
+        limit (or the given ``dt`` with an integer ``lts``)."""
+        dt_coarse = self.lts_cfl * self.yee_dt_limit()
+        s_max = self.upml_rate_max()
+        if s_max > 0 and self.lts_upml_limit > 0:
+            dt_coarse = min(dt_coarse, self.lts_upml_limit / s_max)
+        if isinstance(lts, str):
+            if lts not in ("auto", "cost"):
+                raise ValueError("lts must be None, an integer, 'auto' or 'cost'.")
+            if dt_given:
+                raise ValueError(f"lts='{lts}' needs the band's time step estimate (dt=None).")
+            p = int(math.ceil(dt_coarse / dt_fine - 1e-9))
+            if lts == "cost":
+                return self._lts_cost_schedule(dt_fine, dt_coarse, max(p, 1))
+            if p <= 1:
+                return 1, min(dt_fine, dt_coarse)
+            return p, dt_coarse
+        p = int(lts)
+        if p < 1 or p != lts:
+            raise ValueError("lts must be a positive integer or 'auto'.")
+        if dt_given:
+            return p, dt_fine                 # an explicit dt is the macro step
+        return p, min(dt_coarse, p * dt_fine)
+
+    def _lts_cost_schedule(self, dt_fine: float, dt_coarse: float, p_max: int) -> Tuple[int, float]:
+        """``lts="cost"``: the number of sub-steps (1 = global stepping) with the least
+        predicted cost per simulated second, from the cost model of
+        :class:`~DeepGPR.subgrid.schedule.CostModel` (Yee and DG unknowns, ``2p`` DG
+        operator evaluations per macro step plus the split-penalty damping). ``p = 1``
+        runs at the band's limit with the explicit penalty, ``p > 1`` at
+        ``min(dt_coarse, p dt_fine)``. The table is kept in :attr:`lts_cost_table`."""
+        from ..subgrid.schedule import CostModel, TimeStepLadder
+
+        cost = CostModel()
+        n_yee = int(self.NX * self.NY * self.NZ) if hasattr(self, "NX") else 0
+        n_dg = int(self.geometry.K * self.ref.np_) if self.mode == "hybrid" else 0
+        dt1 = dt_fine
+        if self.flux_alpha > 0 and self.lambda_max:
+            dt1 = default_cfl_safety(self.flux_alpha) * 2.0 / math.sqrt(self.lambda_max)
+        table = []
+        for p in range(1, max(p_max, 1) + 1):
+            dt_p = dt1 if p == 1 else min(dt_coarse, p * dt_fine)
+            damping = 1 if (p > 1 and self.flux_alpha > 0) else 0
+            lad = TimeStepLadder(dt_p, p, n_yee, n_dg, dg_damping=damping)
+            table.append((p, dt_p, cost.seconds_per_step(lad) / dt_p))
+        self.lts_cost_table = table
+        p, dt_p, _ = min(table, key=lambda r: r[2])
+        return p, dt_p
+
+    def upml_rate_max(self) -> float:
+        """Largest damping rate ``sigma / eps0`` [1/s] of the band's side UPML (0 without)."""
+        if self.mode != "hybrid" or not any(self.pml[2:6]):
+            return 0.0
+        rates = [float(np.max(s)) for s in self.pml_sigma if s is not None]
+        return max(rates) / VACUUM_PERMITTIVITY if rates else 0.0
 
     # ------------------------------------------------------------ geometry
     def surface_x_ext(self, y_ext, z_ext):
@@ -379,6 +521,9 @@ class HybridMaxwell3D:
                                 self.band, dtype, self.device)
         if upml and any(self.pml[2:6]):
             yee.upml = fn3.yee_upml_3d(yee, self.upml_sigma, self.mu_fd_pad, dt, dtype, self.device)
+            if not conservative and self.lts > 1:
+                yee.upml_fine = fn3.yee_upml_3d(yee, self.upml_sigma, self.mu_fd_pad, dt / self.lts,
+                                                dtype, self.device)
         dg, cps = None, []
         if self.mode == "hybrid":
             tags = self.face_tags.copy()
@@ -387,7 +532,10 @@ class HybridMaxwell3D:
             dg = fn3.dg_static_3d(self.geometry, tags, self.dg_materials[2].detach().cpu(), dt,
                                   0.0 if conservative else self.flux_alpha,
                                   None if conservative else self.pml_sigma, dtype, self.device,
-                                  alpha_if=0.0 if conservative else self.interface_penalty)
+                                  alpha_if=0.0 if conservative else self.interface_penalty,
+                                  lts=1 if conservative else self.lts,
+                                  lts_overlap=self.lts_overlap, lts_nu=self.lts_nu)
+            dg.lts_pen_k = getattr(self, "lts_pen_k", 1)
             cps = self._coupling(dtype)
             if self.cuda_kernels:
                 cuda3d.attach(dg, self.device, slots=[cp.slots for cp in cps])
@@ -561,6 +709,17 @@ class HybridMaxwell3D:
             torch.cuda.synchronize(self.device)
         t0 = time.perf_counter()
         graph = None
+        if not energy_every and callback is None and sweep3d.enabled(self.static):
+            # fused step replayed as CUDA Graphs on two fixed buffers (no state copies)
+            sg = sweep3d.SweepGraphs(self.static, src, rec, w.shape[0])
+            coefs = self.coefs.replaced([t.contiguous() for t in self.coefs.tensors()])
+            with torch.no_grad():
+                final = sg.run(coefs, w.contiguous(), nt, data)
+                self.state = tuple(t.clone() for t in final)
+            if self.device.type == "cuda":
+                torch.cuda.synchronize(self.device)
+            return {"receivers": data, "energy": None, "energy_steps": [],
+                    "seconds": time.perf_counter() - t0, "dt": self.dt}
         if not energy_every and self.cuda_kernels:
             graph = graphs.make(self.static, self.coefs, src, rec, w.shape[0])
         with torch.no_grad():
@@ -593,7 +752,14 @@ class HybridMaxwell3D:
         info = {"mode": self.mode, "dt": self.dt, "spacing": self.spacing,
                 "model_spacing": self.model_spacing, "fdtd_refinement": self.fdtd_refinement,
                 "pml": self.pml, "lambda_max": self.lambda_max, "grid": (self.NX, self.NY, self.NZ),
-                "setup_seconds": self.setup_seconds, "dt_seconds": self.dt_seconds}
+                "setup_seconds": self.setup_seconds, "dt_seconds": self.dt_seconds,
+                "lts": self.lts, "dt_fine": self.dt / max(self.lts, 1),
+                "lts_overlap": self.lts_overlap, "lts_nu": self.lts_nu,
+                "lts_upml_limit": self.lts_upml_limit, "upml_rate_max": self.upml_rate_max(),
+                "lts_split_penalty": bool(self.static.dg is not None and self.static.dg.lts_split),
+                "lts_pen_k": self.lts_pen_k, "lts_pen_rate": self.lts_pen_rate,
+                "lts_cost_table": self.lts_cost_table,
+                "yee_dt_limit": self.yee_dt_limit()}
         y = self.static.yee
         info["fdtd_dofs"] = int(sum(int(a.sum()) for a in y.act))
         if self.mode == "hybrid":

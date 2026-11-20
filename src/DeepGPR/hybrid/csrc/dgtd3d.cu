@@ -29,8 +29,46 @@
 
 namespace {
 
+// Term tables (axis a_j, field f_j of the six curl terms) as compile-time functions: in
+// the unrolled term loops every index into the small per-term arrays (face normal, face
+// jump, lifted cotangent, R) is a constant, so they stay in registers (a __constant__
+// table gave run-time indices and a local-memory stack frame).
+__host__ __device__ constexpr int term_axis(int j) {
+    return j == 0 ? 1 : j == 1 ? 2 : j == 2 ? 2 : j == 3 ? 0 : j == 4 ? 0 : 1;
+}
+__host__ __device__ constexpr int term_field(int j) { return 2 - j % 3; }
+// The same tables in __constant__ memory, used only by the volume part of terms_fwd: with
+// the compile-time tables there the kernel was 20-25 % (P1) and 5-10 % (P2) slower than
+// with these run-time ones (RTX 4090, nvcc 11.8 and 12.4; docs/HYBRID_DGTD.md 12.15).
 __device__ __constant__ int kA[6] = {1, 2, 2, 0, 0, 1};
 __device__ __constant__ int kF[6] = {2, 1, 0, 2, 1, 0};
+
+// Epilogue of the forward operator (local time stepping, DeepGPR.hybrid.functional3d.
+// lts_h_half_step): instead of writing the six terms, apply the recursion update to the
+// curl curl_c = T[2c] - T[2c+1] in the same pass (saves the round trip of T):
+//   mode 1: o1 = eta_new = (first ? -b ch[k] curl : beta eta - b ch[k] curl),
+//           o2 = cavg_new = (first ? w curl : cavg + w curl)
+//   mode 2: o1 = z_new = z + a cb0[k] curl,  o2 (optional) = curl (kept for the cb0 cotangent)
+template <typename T>
+struct Epi {
+    int mode, first;
+    const T *eta, *cavg, *z, *ch, *cb0;
+    T beta, b, w, a;
+    T *o1, *o2;
+};
+
+// The matching cotangent source of the transpose: the six-term cotangent is formed in
+// registers from the cotangents of the epilogue outputs, g[2c] = v, g[2c+1] = -v with
+//   mode 1: v = w g_cavg_new - b ch[k] g_eta_new (each nullable); g_eta_in = beta g_eta_new
+//   mode 2: v = a cb0[k] g_z_new; g_cb0[s, k] = a sum_(c, i) curl g_z_new (curl from the forward)
+template <typename T>
+struct GEpi {
+    int mode;
+    int acc;                       // bit 0: accumulate gb0..gb3, bit 1: accumulate gcb0
+    const T *g1, *g2, *ch, *cb0, *curl;
+    T beta, b, w, a;
+    T *gcb0, *geta_in;
+};
 
 template <typename T>
 __device__ inline void cross3(const T* n, const T* v, T* out) {
@@ -48,7 +86,7 @@ __global__ void terms_fwd(int S, int K, const T* __restrict__ F, const T* __rest
                           const T* __restrict__ b2, const T* __restrict__ b3,
                           const T* __restrict__ Dr, const T* __restrict__ Ds,
                           const T* __restrict__ Dt, const T* __restrict__ LIFT,
-                          T* __restrict__ out, const int* __restrict__ xmap, int nX) {
+                          T* __restrict__ out, const int* __restrict__ xmap, int nX, Epi<T> epi) {
     constexpr int NF = 4 * NFP;
     long long tid = (long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= (long long)S * K) return;
@@ -97,7 +135,7 @@ __global__ void terms_fwd(int S, int K, const T* __restrict__ F, const T* __rest
             }
 #pragma unroll
             for (int j = 0; j < 6; ++j) {
-                const T fl = fs * n[kA[j]] * dF[kF[j]];
+                const T fl = fs * n[term_axis(j)] * dF[term_field(j)];
 #pragma unroll
                 for (int i = 0; i < NP; ++i) acc[j][i] += LIFT[i * NF + sg] * fl;
             }
@@ -125,18 +163,37 @@ __global__ void terms_fwd(int S, int K, const T* __restrict__ F, const T* __rest
                 dt += Dt[i * NP + jj] * f[c][jj];
             }
 #pragma unroll
-            for (int j = 0; j < 6; ++j)
+            for (int j = 0; j < 6; ++j)                       // run-time tables (see kA)
                 if (kF[j] == c) {
                     const int a = kA[j];
                     acc[j][i] += Rk[a][0] * dr + Rk[a][1] * ds + Rk[a][2] * dt;
                 }
         }
     }
-    T* o = out + (long long)s * 6 * KN + (long long)k * NP;
+    if (epi.mode == 0) {
+        T* o = out + (long long)s * 6 * KN + (long long)k * NP;
 #pragma unroll
-    for (int j = 0; j < 6; ++j)
+        for (int j = 0; j < 6; ++j)
 #pragma unroll
-        for (int i = 0; i < NP; ++i) o[j * KN + i] = acc[j][i];
+            for (int i = 0; i < NP; ++i) o[j * KN + i] = acc[j][i];
+        return;
+    }
+    const long long base = (long long)s * 3 * KN + (long long)k * NP;
+    const T bc = epi.mode == 1 ? epi.b * epi.ch[k] : epi.a * epi.cb0[k];
+#pragma unroll
+    for (int c = 0; c < 3; ++c)
+#pragma unroll
+        for (int i = 0; i < NP; ++i) {
+            const long long id = base + c * KN + i;
+            const T curl = acc[2 * c][i] - acc[2 * c + 1][i];
+            if (epi.mode == 1) {
+                epi.o1[id] = epi.first ? -bc * curl : epi.beta * epi.eta[id] - bc * curl;
+                epi.o2[id] = epi.first ? epi.w * curl : epi.cavg[id] + epi.w * curl;
+            } else {
+                epi.o1[id] = epi.z[id] + bc * curl;
+                if (epi.o2 != nullptr) epi.o2[id] = curl;
+            }
+        }
 }
 
 template <typename T, int NP, int NFP>
@@ -150,7 +207,8 @@ __global__ void terms_bwd1(int S, int K, const T* __restrict__ F, const T* __res
                            const T* __restrict__ Dt, const T* __restrict__ LIFT,
                            T* __restrict__ gFvol, T* __restrict__ hbuf, T* __restrict__ gX,
                            T* __restrict__ gb0, T* __restrict__ gb1, T* __restrict__ gb2,
-                           T* __restrict__ gb3, const int* __restrict__ xmap, int nX) {
+                           T* __restrict__ gb3, const int* __restrict__ xmap, int nX,
+                           GEpi<T> ge) {
     constexpr int NF = 4 * NFP;
     long long tid = (long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= (long long)S * K) return;
@@ -161,11 +219,41 @@ __global__ void terms_bwd1(int S, int K, const T* __restrict__ F, const T* __res
     const T* Fs = F + (long long)s * 3 * KN;
     const T* Gs = G + (long long)s * 3 * KN;
     T g[6][NP];
-    const T* gs = gT + (long long)s * 6 * KN + (long long)k * NP;
+    if (ge.mode == 0) {
+        const T* gs = gT + (long long)s * 6 * KN + (long long)k * NP;
 #pragma unroll
-    for (int j = 0; j < 6; ++j)
+        for (int j = 0; j < 6; ++j)
 #pragma unroll
-        for (int i = 0; i < NP; ++i) g[j][i] = gs[j * KN + i];
+            for (int i = 0; i < NP; ++i) g[j][i] = gs[j * KN + i];
+    } else {
+        const long long base = (long long)s * 3 * KN + (long long)k * NP;
+        const T bc = ge.mode == 1 ? ge.b * ge.ch[k] : ge.a * ge.cb0[k];
+        T acc_cb = 0;
+#pragma unroll
+        for (int c = 0; c < 3; ++c)
+#pragma unroll
+            for (int i = 0; i < NP; ++i) {
+                const long long id = base + c * KN + i;
+                T v;
+                if (ge.mode == 1) {
+                    const T g1 = ge.g1 != nullptr ? ge.g1[id] : (T)0;
+                    v = (ge.g2 != nullptr ? ge.w * ge.g2[id] : (T)0) - bc * g1;
+                    if (ge.geta_in != nullptr) ge.geta_in[id] = ge.beta * g1;
+                } else {
+                    const T g1 = ge.g1[id];
+                    v = bc * g1;
+                    if (ge.gcb0 != nullptr) acc_cb += ge.curl[id] * g1;
+                }
+                g[2 * c][i] = v;
+                g[2 * c + 1][i] = -v;
+            }
+        if (ge.mode == 2 && ge.gcb0 != nullptr) {
+            if (ge.acc & 2)
+                ge.gcb0[(long long)s * K + k] += ge.a * acc_cb;
+            else
+                ge.gcb0[(long long)s * K + k] = ge.a * acc_cb;
+        }
+    }
     T Rk[3][3];
 #pragma unroll
     for (int a = 0; a < 3; ++a)
@@ -180,8 +268,8 @@ __global__ void terms_bwd1(int S, int K, const T* __restrict__ F, const T* __res
             w[0][i] = w[1][i] = w[2][i] = T(0);
 #pragma unroll
             for (int j = 0; j < 6; ++j)
-                if (kF[j] == c) {
-                    const int a = kA[j];
+                if (term_field(j) == c) {
+                    const int a = term_axis(j);
                     w[0][i] += Rk[a][0] * g[j][i];
                     w[1][i] += Rk[a][1] * g[j][i];
                     w[2][i] += Rk[a][2] * g[j][i];
@@ -217,7 +305,7 @@ __global__ void terms_bwd1(int S, int K, const T* __restrict__ F, const T* __res
             }
             T h[3] = {0, 0, 0};
 #pragma unroll
-            for (int j = 0; j < 6; ++j) h[kF[j]] += fs * n[kA[j]] * L[j];
+            for (int j = 0; j < 6; ++j) h[term_field(j)] += fs * n[term_axis(j)] * L[j];
             T fm[3], fp[3], gm[3], jg[3];
 #pragma unroll
             for (int c = 0; c < 3; ++c) {
@@ -247,13 +335,26 @@ __global__ void terms_bwd1(int S, int K, const T* __restrict__ F, const T* __res
                 }
             }
         }
-        // per-face coefficient cotangents, (S, [2,] 4, K)
+        // per-face coefficient cotangents, (S, [2,] 4, K); accumulated into running sums
+        // over the reverse sweep when ge.acc & 1 (null pointers: not wanted)
         const long long o1 = ((long long)s * 4 + fc) * K + k;
-        gb0[o1] = sb0;
-        gb1[o1] = sb1;
-        gb3[o1] = sb3;
-        gb2[(((long long)s * 2 + 0) * 4 + fc) * K + k] = sb2x;
-        gb2[(((long long)s * 2 + 1) * 4 + fc) * K + k] = sb2t;
+        const long long o2x = (((long long)s * 2 + 0) * 4 + fc) * K + k;
+        const long long o2t = (((long long)s * 2 + 1) * 4 + fc) * K + k;
+        if (ge.acc & 1) {
+            if (gb0 != nullptr) gb0[o1] += sb0;
+            if (gb1 != nullptr) gb1[o1] += sb1;
+            if (gb3 != nullptr) gb3[o1] += sb3;
+            if (gb2 != nullptr) {
+                gb2[o2x] += sb2x;
+                gb2[o2t] += sb2t;
+            }
+        } else {
+            gb0[o1] = sb0;
+            gb1[o1] = sb1;
+            gb3[o1] = sb3;
+            gb2[o2x] = sb2x;
+            gb2[o2t] = sb2t;
+        }
     }
 }
 
@@ -435,17 +536,65 @@ constexpr int kThreads = 128;
 
 inline int blocks(long long n) { return (int)((n + kThreads - 1) / kThreads); }
 
+template <typename T>
+Epi<T> make_epi(const void* const* q, int mode, int first, double beta, double b, double w, double a) {
+    Epi<T> e;
+    e.mode = mode;
+    e.first = first;
+    e.eta = e.cavg = e.z = e.ch = e.cb0 = nullptr;
+    e.o1 = e.o2 = nullptr;
+    e.beta = (T)beta;
+    e.b = (T)b;
+    e.w = (T)w;
+    e.a = (T)a;
+    if (mode != 0 && q != nullptr) {        // [eta, cavg, z, ch, cb0, o1, o2]
+        e.eta = (const T*)q[0];
+        e.cavg = (const T*)q[1];
+        e.z = (const T*)q[2];
+        e.ch = (const T*)q[3];
+        e.cb0 = (const T*)q[4];
+        e.o1 = (T*)q[5];
+        e.o2 = (T*)q[6];
+    }
+    return e;
+}
+
+template <typename T>
+GEpi<T> make_gepi(const void* const* q, int mode_flags, double beta, double b, double w, double a) {
+    // mode_flags: epilogue mode (bits 0-1) | 4: accumulate gb0..gb3 | 8: accumulate gcb0
+    GEpi<T> e;
+    const int mode = mode_flags & 3;
+    e.mode = mode;
+    e.acc = ((mode_flags & 4) ? 1 : 0) | ((mode_flags & 8) ? 2 : 0);
+    e.g1 = e.g2 = e.ch = e.cb0 = e.curl = nullptr;
+    e.gcb0 = e.geta_in = nullptr;
+    e.beta = (T)beta;
+    e.b = (T)b;
+    e.w = (T)w;
+    e.a = (T)a;
+    if (mode != 0 && q != nullptr) {        // [g1, g2, ch, cb0, curl, gcb0, geta_in]
+        e.g1 = (const T*)q[0];
+        e.g2 = (const T*)q[1];
+        e.ch = (const T*)q[2];
+        e.cb0 = (const T*)q[3];
+        e.curl = (const T*)q[4];
+        e.gcb0 = (T*)q[5];
+        e.geta_in = (T*)q[6];
+    }
+    return e;
+}
+
 template <typename T, int NP, int NFP>
 int launch_fwd(int S, int K, const void* F, const void* G, const void* X, const void* R,
                const void* nrm, const void* fscale, const void* vmapM, const void* vmapP,
                const void* b0, const void* b1, const void* b2, const void* b3, const void* Dr,
                const void* Ds, const void* Dt, const void* LIFT, void* out, const void* xmap,
-               int nX, cudaStream_t st) {
+               int nX, const Epi<T>& epi, cudaStream_t st) {
     terms_fwd<T, NP, NFP><<<blocks((long long)S * K), kThreads, 0, st>>>(
         S, K, (const T*)F, (const T*)G, (const T*)X, (const T*)R, (const T*)nrm,
         (const T*)fscale, (const int*)vmapM, (const int*)vmapP, (const T*)b0,
         (const T*)b1, (const T*)b2, (const T*)b3, (const T*)Dr, (const T*)Ds, (const T*)Dt,
-        (const T*)LIFT, (T*)out, (const int*)xmap, nX);
+        (const T*)LIFT, (T*)out, (const int*)xmap, nX, epi);
     return (int)cudaGetLastError();
 }
 
@@ -456,7 +605,7 @@ int launch_bwd(int S, int K, const void* F, const void* G, const void* gT, const
                const void* b2, const void* b3, const void* Dr, const void* Ds, const void* Dt,
                const void* LIFT, void* work, void* gF, void* gG, void* gX, void* gb0, void* gb1,
                void* gb2, void* gb3, const void* xmap, int nX, const void* addF,
-               const void* addG, cudaStream_t st) {
+               const void* addG, const GEpi<T>& ge, cudaStream_t st) {
     const long long KN = (long long)K * NP;
     T* gFvol = (T*)work;
     T* hbuf = gFvol + (long long)S * 3 * KN;
@@ -465,7 +614,7 @@ int launch_bwd(int S, int K, const void* F, const void* G, const void* gT, const
         (const T*)fscale, (const int*)vmapM, (const int*)vmapP, (const T*)b0,
         (const T*)b1, (const T*)b2, (const T*)b3, (const T*)Dr, (const T*)Ds, (const T*)Dt,
         (const T*)LIFT, gFvol, hbuf, (T*)gX, (T*)gb0, (T*)gb1, (T*)gb2, (T*)gb3,
-        (const int*)xmap, nX);
+        (const int*)xmap, nX, ge);
     terms_bwd2<T, NP, NFP><<<blocks((long long)S * K), kThreads, 0, st>>>(
         S, K, gFvol, hbuf, (const T*)nrm, (const T*)b0, (const T*)b1, (const T*)b2,
         (const T*)b3, (const int*)slotP, (const int*)fmask, (T*)gF, (T*)gG, (const T*)addF,
@@ -482,15 +631,18 @@ long long dgtd3d_bwd_workspace(int S, int K, int np, int nfp) {
     return (long long)S * 3 * K * np + (long long)S * 3 * K * 4 * nfp;
 }
 
+// epi: pointer table [eta, cavg, z, ch, cb0, o1, o2] of the epilogue (mode 1 / 2), or NULL
+// (mode 0: the six terms are written to out).
 int dgtd3d_terms_fwd(int dtype, int np, int S, int K, const void* F, const void* G, const void* X,
                      const void* R, const void* nrm, const void* fscale, const void* vmapM,
                      const void* vmapP, const void* b0, const void* b1, const void* b2,
                      const void* b3, const void* Dr, const void* Ds, const void* Dt,
-                     const void* LIFT, void* out, const void* xmap, int nX, void* stream) {
+                     const void* LIFT, void* out, const void* xmap, int nX, const void** epi,
+                     int mode, int first, double beta, double b, double w, double a, void* stream) {
     cudaStream_t st = (cudaStream_t)stream;
 #define FWD(T, NP, NFP) return launch_fwd<T, NP, NFP>(S, K, F, G, X, R, nrm, fscale, vmapM, vmapP, \
                                                        b0, b1, b2, b3, Dr, Ds, Dt, LIFT, out, xmap, \
-                                                       nX, st)
+                                                       nX, make_epi<T>(epi, mode, first, beta, b, w, a), st)
     if (dtype == 0 && np == 4) FWD(float, 4, 3);
     if (dtype == 0 && np == 10) FWD(float, 10, 6);
     if (dtype == 1 && np == 4) FWD(double, 4, 3);
@@ -506,12 +658,14 @@ int dgtd3d_terms_bwd(int dtype, int np, int S, int K, const void* F, const void*
                      const void* Ds, const void* Dt, const void* LIFT, void* work, void* gF,
                      void* gG, void* gX, void* gb0, void* gb1, void* gb2, void* gb3,
                      const void* xmap, int nX, const void* addF, const void* addG,
+                     const void** gepi, int mode, double beta, double b, double w, double a,
                      void* stream) {
     cudaStream_t st = (cudaStream_t)stream;
 #define BWD(T, NP, NFP) return launch_bwd<T, NP, NFP>(S, K, F, G, gT, R, nrm, fscale, vmapM, vmapP, \
                                                        slotP, fmask, b0, b1, b2, b3, Dr, Ds, Dt,   \
                                                        LIFT, work, gF, gG, gX, gb0, gb1, gb2, gb3, \
-                                                       xmap, nX, addF, addG, st)
+                                                       xmap, nX, addF, addG,                       \
+                                                       make_gepi<T>(gepi, mode, beta, b, w, a), st)
     if (dtype == 0 && np == 4) BWD(float, 4, 3);
     if (dtype == 0 && np == 10) BWD(float, 10, 6);
     if (dtype == 1 && np == 4) BWD(double, 4, 3);

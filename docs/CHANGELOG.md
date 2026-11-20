@@ -4,6 +4,167 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased] — Local time stepping and adaptive scheduling (experimental, branch `feature/hybrid-dgtd-topography`)
+
+### Added
+
+- `DeepGPR.hybrid` (3D, CUDA): the whole hybrid step and its transpose run as fused
+  kernels (`docs/HYBRID_DGTD.md` 12.11).
+  - The mortar trace / `X_h`, ghost planes, interface penalty rows, source
+    injection and receiver sampling, and their transposes, are kernels in
+    `csrc/glue3d.cu` (`glue3d.py`).
+  - The Yee transpose accumulates in place (`yee3d_bwd_acc`). The LTS UPML
+    folds scatter and gather directly; the split-penalty damping runs as
+    operator epilogues.
+  - `fused3d.step_into` / `vjp_into` / `lts_step_into` / `lts_vjp_into` write
+    into given buffers.
+  - `sweep3d` captures the forward pass, the recomputation and the reverse
+    sweep as CUDA Graphs on fixed buffers, without per-step copies and at any
+    state size. The graphs are kept per propagator across calls;
+    `HybridPropagator.release()` frees them.
+  - Checkpoints stay on the device when they fit.
+  - Step-(a) model, 12 ns, RTX 4090: hybrid global step forward 1.60× and
+    gradient 1.55× faster; LTS forward 1.51× and gradient 1.87× faster; pure
+    Yee gradient 1.47× faster (hand-written transpose instead of autograd).
+    Results agree with the previous code to float32 round-off.
+  - `examples/hybrid/glue_benchmark3d.py` is the timing script.
+  - Follow-up: the DG, slab and fold transposes accumulate their cotangents in
+    the kernels (running sums converted once per sweep): LTS gradient another
+    4.6 % faster, global step 1.3 %.
+- `DeepGPR.hybrid` (2D, CUDA): the same treatment for the 2D (TM) solver
+  (`docs/HYBRID_DGTD.md` 12.12): 2D coupling and point kernels (`glue3d.cu` ops
+  14–17), accumulating transposes, `fused2d.step_into` / `vjp_into` /
+  `lts_step_into` / `lts_vjp_into` (a new hand-written transpose of the 2D LTS
+  step, which used autograd) and the `sweep3d` graphs for both dimensions.
+  Sand-pit field profile (10 shots, 32 ns): forward 2.67× and gradient 2.22×
+  faster; rugged DG-dominated model: 1.06–1.30×. Exact against autograd in
+  float64 (≤ 7e-15); `examples/hybrid/glue_benchmark2d.py`.
+- `DeepGPR.subgrid` (CUDA): the subgridded step (Yee main grid or the hybrid's
+  global step) has a hand-written transpose with explicit outputs
+  (`subgrid/fused.py`; the subgrids' intermediate sub-step states are recomputed
+  in the reverse step) and the propagator's sweeps run as CUDA Graphs
+  (`subgrid/sweep.py`), including subgrid sources and receivers and the DWR
+  indicator (eager); `docs/SUBGRID.md` 13. Sand-pit benchmark (9 shots, 16 ns):
+  forward 1.28–1.31× and gradient 1.33–1.53× faster with boxes; hybrid with a box
+  on rugged terrain: gradient 3.41× faster. Exact against autograd in float64
+  (≤ 1.4e-15 per step); `examples/subgrid/subgrid_benchmark.py`. A hybrid main
+  step with local time stepping keeps the autograd sweep.
+- `DeepGPR.hybrid`: local time stepping of the DG band (`lts`, `lts_cfl`,
+  `lts_overlap`, `lts_nu` of `HybridTM2D` / `HybridMaxwell3D`, also through
+  `HybridSubgridMaxwell3D`): the Yee grid keeps its own step, the band and the
+  interface planes take `p` sub-steps of the stabilised leapfrog LTS of
+  Diaz & Grote / Grote, Michel & Sauter written in the first-order variables
+  (`functional3d.lts_h_half_step`, `lts_slabs`, `lts_coefficients`;
+  `functional.lts_h_half_step`); `lts="auto"` picks `dt` and `p`. Energy
+  conserving for central fluxes (three-level invariant to round-off); the
+  adjoint differentiates the sub-cycled step with autograd (exact discrete
+  adjoint through interface coupling and sub-cycling, finite-difference checks
+  in 2D and 3D); CUDA Graph replay. The upwind penalty is rejected with LTS
+  (unstable inside the recursion) and in 3D the macro step is capped by the
+  side-UPML rate (`lts_upml_limit`; `docs/HYBRID_DGTD.md` Section 12).
+- `DeepGPR.subgrid.schedule`: `TimeStepLadder` (time steps and unknowns of
+  Yee / DG / subgrids), `CostModel` (per-unknown cost model, calibration,
+  fine-node budget) and `Scheduler` (error-balancing decisions from the DWR
+  estimate and the misfit history, planning under the time budget;
+  `docs/SUBGRID.md` Section 11). Opt-in `urgent` rule: refine at once, without
+  waiting for a misfit plateau or `min_cycle` iterations, when the estimate is at
+  least `urgent` of the misfit (the layout's own modelling error dominates the
+  residual), so a check before the first iteration can leave a hopeless level
+  immediately.
+- Fused CUDA kernels of the LTS recursion with exact transposes
+  (`src/DeepGPR/hybrid/csrc/lts3d.cu`, wrappers in `cuda3d.py` / `cuda2d.py`):
+  the DG recursion updates (`z`, `eta`), the Yee slab recursion including the
+  fine-plane corrections (`slab_q`, `slab_r`; 2D `slab_q2`, `slab_r2`), the
+  `p`-fold side-UPML sub-steps of the fine Yee planes (`fold`) and the macro
+  update of the band with the `p`-fold UPML of its PML elements (`ltsupd`,
+  `DGCudaOps.lts_update`). The mortar products of all couplings are one
+  `SparseOp` each (`functional3d.trace_op` / `ghost_op`, `functional.trace_op` /
+  `ghost_op`; also used by the plain step). The propagator replays the captured
+  LTS step in the forward pass and in the segment recomputation of the reverse
+  sweep. The 3D operator kernel (`dgtd3d.cu`) takes an epilogue that applies
+  the `η`/`z` recursion updates to the curl in the same pass (the six terms
+  are never written; `DGCudaOps.terms_eta` / `terms_z`, transposes formed in
+  registers). B3 macro step 7.73 → 4.04 ms (forward 1.19× of global stepping,
+  gradient 0.93×); 1.0–1.25× on Yee-dominated layouts
+  (`examples/hybrid/lts_benchmark3d_deep.py`); `docs/HYBRID_DGTD.md` 12.5.
+- Penalty fluxes with LTS in 3D (`HybridMaxwell3D(flux=α, lts=...)`): the recursion
+  uses the central fluxes and the dissipative jump terms act as a Strang-split
+  damping of the band's H and E updates (`functional3d.lts_damp`,
+  `lts_penalty_rate`, `lts_penalty_faces`; coefficients `pe1`, `ph1`, `ph3`;
+  `lts_pen_k` sub-steps from a power iteration), switched off on the faces of the
+  side-UPML elements. Central fluxes are 2.5–3 % off on rough terrain, the split
+  penalty matches the global penalty scheme (0.32 % vs 0.33 %); docs 12.2.
+- `HybridPropagator(offload_checkpoints=None)`: checkpoint states kept in host memory
+  when they would exceed `DEEPGPR_HYBRID_CKPT_GPU_MB` (4096 MB) on the device
+  (the 1.0 m deep 3D model of `amr_terrain3d.py` ran out of the 24 GB otherwise).
+- `HybridMaxwell3D(lts="cost")`: the number of sub-steps (1 = global stepping) with the
+  least modelled cost per simulated second; `CostModel` counts `2p` DG operator
+  evaluations per LTS macro step plus the split-penalty damping (was `(2p − 1)/2`).
+- `vjp3d_lts`: hand-written transpose of the fused LTS step (3e-10 against
+  autograd), used by the propagator on CUDA; `graphs.GraphedVJP` (CUDA Graph of
+  the autograd reverse step, for other autograd sweeps).
+- `examples/hybrid/fwi3d_lts.py` (3D joint ε/σ FWI on rugged terrain, LTS vs
+  global), `examples/subgrid/amr_terrain3d.py` (scheduler, coarse/static/AMR/fine
+  on a deep rugged model, global-refinement action, `--urgent`, `evaluate`:
+  equal-wall-time scoring of every method's model with the accurate level),
+  `docs/HYBRID_DGTD.md` 12.6–12.8 (12.8: the hybrid on the sand-pit field profile),
+  `docs/SUBGRID.md` Section 12 (scheduled refinement on rugged terrain).
+- Regime tests of the hybrid against a careful staircase FDTD (cell-averaged materials,
+  exact antenna positions): `examples/hybrid/showcase2d_staircase.py`,
+  `showcase2d_hybrid.py` (2D TM, CPU) and `coupled3d.py` (3D: ground-coupled and
+  air-launched antennas, point or finite antennas, a buried sphere scored by its target
+  response, homogeneous controls, and the full method band + coarse Yee + Huygens box via
+  `HybridSubgridMaxwell3D`); `docs/HYBRID_DGTD.md` 12.9–12.10.
+- Examples `examples/hybrid/lts_benchmark2d.py`, `lts_benchmark3d.py`,
+  `lts_benchmark3d_deep.py`, `lts_profile3d.py`, `examples/subgrid/amr_scheduled.py`;
+  tests `tests/test_hybrid_lts.py` (incl. the transpose of the fused LTS step
+  against autograd through the PyTorch step), `tests/test_subgrid_schedule.py`.
+
+### Changed
+
+- Yee transposes (`hybrid/csrc/yee3d.cu`, `yee2d.cu`; `docs/HYBRID_DGTD.md` 12.13): the
+  3D transpose is one kernel instead of two passes through a `6 S N` scratch array
+  (one thread per node looping over the shots, the neighbours' difference cotangents
+  re-evaluated; compile-time term tables; side UPML a template switch), and the
+  `ca`/`cb` (and material UPML factor) cotangents are summed over the shots in
+  registers, so the accumulators of `fused3d`, `fused2d`, `subgrid/fused` and the
+  autograd functions hold `N` values instead of `S × N` (`YeeCudaOps.e_bwd(...,
+  shot_sum=True)` or summed `coef_acc`; per-shot output still available). The 2D E
+  transpose splits the shots of a node over up to 8 lanes and sums `ca`/`cb` in
+  registers and shared memory (fixed order). Exact in float64 against
+  autograd of the PyTorch updates (≤ 2.9e-15). Gradients, RTX 4090: sand-pit
+  subgrid benchmark 1.21–1.29×, 3D pure FDTD 1.23–1.29×, 3D hybrid 1.05–1.10×,
+  2D pure FDTD 1.10×, 2D sand-pit hybrid 1.03× (rugged DG-dominated 2D model
+  unchanged); forward unchanged.
+- 3D Yee update kernel (`hybrid/csrc/yee3d.cu`, `yee_fwd`; `docs/HYBRID_DGTD.md` 12.14):
+  the term tables are compile-time functions in unrolled loops instead of
+  `__constant__` arrays, which removes the 64 B local-memory stack frame. Outputs
+  bitwise identical. RTX 4090: kernel 1.02–1.04× on large grids and 1.20–1.22× on
+  the small sand-pit main grid; forward 1.01–1.26× and gradients 1.01–1.12×, most
+  where small grids dominate (sand-pit oracle boxes 1.14× / 1.08×, terrain hybrid +
+  box 1.10× / 1.06×).
+- 3D DG operator and LTS slab kernels (`hybrid/csrc/dgtd3d.cu`, `lts3d.cu`;
+  `docs/HYBRID_DGTD.md` 12.15): `terms_fwd` (face part), `terms_bwd1` and
+  `slab_q_fwd/bwd`, `slab_r_fwd/bwd` use compile-time term tables instead of
+  `__constant__` arrays (no local-memory stack frames in the slab kernels and the P1
+  transpose). The volume part of `terms_fwd` keeps the run-time table: with
+  compile-time tables there the kernel was 5–13 % slower than before with nvcc 11.8. Outputs
+  bitwise identical. RTX 4090, nvcc 11.8: slab kernels 1.42–1.58×, `terms_bwd1`
+  1.08–1.11× (P1) and 1.24× (P2), `terms_fwd` 1.04–1.06×; model A LTS forward and
+  gradient 1.05×, global step 1.01–1.02×.
+- `mesh3d.locate_points_3d` (DG point sources and receivers of `HybridMaxwell3D`) tests
+  only the elements whose bounding box contains the point (KD-tree on the box centres,
+  cached on the mesh) instead of every element, and no longer inverts every element
+  matrix per point: identical element ids and barycentric coordinates (checked bitwise),
+  0.7 ms instead of about 0.6 s per point on a 1.4 M-element band.
+- The LTS step corrects the Yee arrays in place (no full-array copies) and builds
+  the mortar products of all couplings as one sparse operator; the propagator replays
+  the LTS step as a CUDA Graph also in the reverse sweep's segment recomputation.
+- `HybridTM2D._make_static` takes `conservative` (the Lanczos estimate uses the
+  plain step); `functional3d.step` and the subgrid-hybrid step share
+  `functional3d.h_half_step`; `flux_coefficients` accepts `alpha`/`alpha_if`
+  overrides.
+
 ## [Unreleased] — Huygens subgridding for 3D FDTD (experimental, branch `feature/hybrid-dgtd-topography`)
 
 ### Added

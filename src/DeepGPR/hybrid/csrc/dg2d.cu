@@ -143,7 +143,7 @@ __global__ void terms2_bwd1(Geo2<T> g, int S, const T* __restrict__ E, const T* 
                             const T* __restrict__ Hy, const T* __restrict__ gT,
                             const T* __restrict__ cm, const T* __restrict__ cp,
                             T* __restrict__ gvol, T* __restrict__ slot, T* __restrict__ gX,
-                            T* __restrict__ gcm, T* __restrict__ gcp) {
+                            T* __restrict__ gcm, T* __restrict__ gcp, int acc) {
     constexpr int NF = 3 * NFP;
     long long tid = (long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= (long long)S * g.K) return;
@@ -256,8 +256,13 @@ __global__ void terms2_bwd1(Geo2<T> g, int S, const T* __restrict__ E, const T* 
             slot[base + 3 * KF] = pE;
             slot[base + 4 * KF] = pHx;
             slot[base + 5 * KF] = pHy;
-            gcm[(long long)s * KF + idx] = gzm;
-            gcp[(long long)s * KF + idx] = gzp;
+            if (acc) {           // running sums over the reverse sweep (null: skipped)
+                if (gcm != nullptr) gcm[(long long)s * KF + idx] += gzm;
+                if (gcp != nullptr) gcp[(long long)s * KF + idx] += gzp;
+            } else {
+                gcm[(long long)s * KF + idx] = gzm;
+                gcp[(long long)s * KF + idx] = gzp;
+            }
         }
     }
 }
@@ -491,18 +496,20 @@ template <typename T, int NP, int NFP>
 int run_terms_bwd(int mode, int S, const int* gi, const double* gd, const void* const* gp,
                   const void* const* io, cudaStream_t st) {
     // io: E Hx Hy gT cm cp work gX gcm gcp gE gHx gHy addE addHx addHy
+    // mode bit 0: H (0) / E (1) terms; bit 2: accumulate the coefficient cotangents
     Geo2<T> g = make_geo<T>(gi, gd, gp);
     const int nb = blocks((long long)S * g.K);
     T* gvol = (T*)io[6];
     T* slot = gvol + (long long)S * 3 * g.K * NP;
-    if (mode == 0)
+    const int acc = (mode & 4) ? 1 : 0;
+    if ((mode & 1) == 0)
         terms2_bwd1<T, NP, NFP, 0><<<nb, kThreads, 0, st>>>(
             g, S, (const T*)io[0], (const T*)io[1], (const T*)io[2], (const T*)io[3],
-            (const T*)io[4], (const T*)io[5], gvol, slot, (T*)io[7], (T*)io[8], (T*)io[9]);
+            (const T*)io[4], (const T*)io[5], gvol, slot, (T*)io[7], (T*)io[8], (T*)io[9], acc);
     else
         terms2_bwd1<T, NP, NFP, 1><<<nb, kThreads, 0, st>>>(
             g, S, (const T*)io[0], (const T*)io[1], (const T*)io[2], (const T*)io[3],
-            (const T*)io[4], (const T*)io[5], gvol, slot, (T*)io[7], (T*)io[8], (T*)io[9]);
+            (const T*)io[4], (const T*)io[5], gvol, slot, (T*)io[7], (T*)io[8], (T*)io[9], acc);
     terms2_bwd2<T, NP, NFP><<<nb, kThreads, 0, st>>>(
         g, S, gvol, slot, (T*)io[10], (T*)io[11], (T*)io[12], (const T*)io[13],
         (const T*)io[14], (const T*)io[15]);

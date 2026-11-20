@@ -83,6 +83,10 @@ class DGStatic:
     pml_x: Optional[List[torch.Tensor]]
     pml_y: Optional[List[torch.Tensor]]
     cuda: Optional[object] = None  # :class:`~DeepGPR.hybrid.cuda2d.DG2Ops`
+    lts: int = 1                   # local time stepping: DG sub-steps per Yee step
+    lts_w: Optional[Tuple[float, ...]] = None
+    lts_overlap: int = 1           # Yee rows beyond the interface row in the fine set
+    lts_coef: Optional[dict] = None
 
 
 @dataclass
@@ -171,14 +175,29 @@ def yee_static(fd) -> YeeStatic:
                      tuple(groups["h_x"]), tuple(groups["e_x"]), tuple(groups["e_y"]))
 
 
-def dg_static(dg) -> DGStatic:
-    """Static operators of a :class:`~DeepGPR.hybrid.dgtd.DGTM2D`."""
+def lts_coefficients(p: int, nu: float = 0.0) -> dict:
+    """See :func:`DeepGPR.hybrid.functional3d.lts_coefficients`."""
+    from .functional3d import lts_coefficients as _lc
+    return _lc(p, nu)
+
+
+def lts_weights(p: int, nu: float = 0.0) -> Tuple[float, ...]:
+    """Weights of the sub-step curls in the local time stepping."""
+    return lts_coefficients(p, nu)["w"]
+
+
+def dg_static(dg, lts: int = 1, lts_overlap: int = 1, lts_nu: float = 0.0) -> DGStatic:
+    """Static operators of a :class:`~DeepGPR.hybrid.dgtd.DGTM2D` (``lts``: DG
+    sub-steps per Yee step, ``lts_overlap``: Yee rows beyond the interface row in
+    the fine set; :func:`lts_h_half_step`)."""
     neighbour = torch.as_tensor(dg.geometry.EToE, device=dg.device)
     return DGStatic(
         dg.K, dg.Np, dg.Nfp, dg.DrT, dg.DsT, dg.LIFTT, dg.rx, dg.ry, dg.sx, dg.sy,
         dg.nxf, dg.nyf, dg.fscale, dg.vmapM, dg.vmapP, dg.m_int, dg.m_pec, dg.m_abc, dg.m_if,
         dg.has_abc, dg.flux_alpha, dg.ch, neighbour, dg.pml_idx,
-        getattr(dg, "pml_x", None), getattr(dg, "pml_y", None))
+        getattr(dg, "pml_x", None), getattr(dg, "pml_y", None), lts=int(lts),
+        lts_w=lts_weights(lts, lts_nu), lts_overlap=int(lts_overlap),
+        lts_coef=lts_coefficients(lts, lts_nu))
 
 
 def coupling_static(couplings, fd) -> List[CouplingStatic]:
@@ -326,27 +345,327 @@ def _cached(st: StepStatic, key, make):
     return cache[key]
 
 
+def trace_op(st: StepStatic):
+    """The mortar products ``to_dg`` of all couplings as one
+    :class:`~DeepGPR.hybrid.coupling.SparseOp`: input the interface rows stacked
+    ``(S, ncp, NY)``, output the compact trace ``(S, nX)`` in coupling order (cached)."""
+    def make():
+        from .coupling import SparseOp
+        NY = st.yee.shape[1]
+        rows, cols, vals, off = [], [], [], 0
+        for i, cp in enumerate(st.couplings):
+            op = cp.to_dg
+            rows.append(op.rows + off)
+            cols.append(op.cols + i * NY)
+            vals.append(op.vals)
+            off += int(cp.slots.numel())
+        return SparseOp(torch.cat(rows), torch.cat(cols), torch.cat(vals),
+                        (off, len(st.couplings) * NY), vals[0].dtype, vals[0].device)
+    return _cached(st, "trace_op", make)
+
+
+def ghost_op(st: StepStatic):
+    """The mortar products ``to_fd`` of all couplings as one :class:`SparseOp`: input
+    the flat DG ``Hy`` ``(S, K Np)``, output the ghost rows ``(S, ncp, NY)`` (cached)."""
+    def make():
+        from .coupling import SparseOp
+        NY = st.yee.shape[1]
+        rows, cols, vals = [], [], []
+        for i, cp in enumerate(st.couplings):
+            op = cp.to_fd
+            rows.append(op.rows + i * NY)
+            cols.append(cp.nodes.index_select(0, op.cols))
+            vals.append(op.vals)
+        return SparseOp(torch.cat(rows), torch.cat(cols), torch.cat(vals),
+                        (len(st.couplings) * NY, st.dg.K * st.dg.Np), vals[0].dtype, vals[0].device)
+    return _cached(st, "ghost_op", make)
+
+
 def interface_trace(st: StepStatic, Ez, compact: bool):
     """Projected Yee trace ``E*`` on the interface face slots: compact
     ``(S, nX)`` in coupling order (fused kernels) or dense ``(S, K * 3 Nfp)``."""
     d, S = st.dg, st.nshot
-    rows = [cp.to_dg(Ez[:, cp.row, :]) for cp in st.couplings]
     if compact:
-        return torch.cat(rows, 1)
+        x = torch.stack([Ez[:, cp.row, :] for cp in st.couplings], dim=1)
+        return trace_op(st)(x.reshape(S, -1))
+    rows = [cp.to_dg(Ez[:, cp.row, :]) for cp in st.couplings]
     Eext = torch.zeros((S, d.K * 3 * d.Nfp), dtype=Ez.dtype, device=Ez.device)
     for cp, v in zip(st.couplings, rows):
         Eext = Eext.index_copy(1, cp.slots, v)
     return Eext
 
 
+def _terms_e(d: DGStatic, c: StepCoefs, E, Hx, Hy, X, fused: bool):
+    """``(D_x E, D_y E)`` as ``(S, 2, K, Np)`` (frozen penalty partner ``Hx, Hy`` and
+    external trace ``X``: compact on the fused kernels, dense otherwise)."""
+    if fused:
+        return d.cuda.terms(0, E, Hx, Hy, X, c.Ym, c.Yp)
+    return torch.stack(dg_grad_e(d, c, E, Hx, Hy, X), dim=1)
+
+
+def dg_h_update(d: DGStatic, c: StepCoefs, E, Hx, Hy, qhx, qhy, X, fused: bool, T=None):
+    """DG ``H^(n+1/2)`` (and the DG CPML auxiliaries) from the derivative terms ``T``
+    of ``E^n`` (computed here when not given): ``H += (dt/mu) (-D_y E, D_x E)`` with
+    the CPML stretching in the PML elements."""
+    if T is None:
+        T = _terms_e(d, c, E, Hx, Hy, X, fused)
+    if fused:
+        return d.cuda.update_h(T, Hx, Hy, qhx, qhy)
+    dxE, dyE = T[:, 0], T[:, 1]
+    rhs_hx, rhs_hy = -dyE, dxE
+    if d.pml_idx is not None:
+        idx = d.pml_idx
+        ra_x, rb_x, re_x, rf_x = d.pml_x
+        ra_y, rb_y, re_y, rf_y = d.pml_y
+        dx_p, dy_p = dxE[:, idx], dyE[:, idx]
+        rhs_hx = rhs_hx.index_copy(1, idx, -(ra_y * dy_p + rb_y * qhx))
+        rhs_hy = rhs_hy.index_copy(1, idx, ra_x * dx_p + rb_x * qhy)
+        qhx = re_y * qhx - rf_y * dy_p
+        qhy = re_x * qhy - rf_x * dx_p
+    return Hx + d.ch * rhs_hx, Hy + d.ch * rhs_hy, qhx, qhy
+
+
+# --------------------------------------------------------------------------- local time stepping
+@dataclass
+class LTSSlab2D:
+    """Yee rows ``lo..hi`` around one interface in the fine set of the local time
+    stepping (masks ``(1, n, NY)``: fine Ez rows and active nodes, fine Hx rows,
+    fine Hy rows); see :func:`DeepGPR.hybrid.functional3d.lts_slabs`."""
+    cp: CouplingStatic
+    lo: int
+    hi: int
+    fine_e: torch.Tensor
+    fine_hx: torch.Tensor
+    fine_hy: torch.Tensor
+    rows: torch.Tensor
+    ghost: torch.Tensor
+    cuda: Optional[dict] = None    # kernel data (cuda2d.Yee2Ops.slab_data)
+
+
+def lts_slabs(st: StepStatic):
+    def make():
+        y, d = st.yee, st.dg
+        b = int(getattr(d, "lts_overlap", 1))
+        if b < 0:
+            raise ValueError("lts_overlap must be a non-negative integer.")
+        NX, NY = y.shape
+        out = []
+        for cp in st.couplings:
+            rho = cp.row
+            if cp.ghost == rho:                                   # top interface
+                lo, hi = rho - b - 1, rho
+                e_rows, hy_rows = range(rho - b, rho + 1), range(rho - b - 1, rho + 1)
+            else:                                                 # bottom interface
+                lo, hi = rho - 1, rho + b + 1
+                e_rows, hy_rows = range(rho, rho + b + 1), range(rho - 1, rho + b + 1)
+            if lo < 1 or hi > NX - 2:
+                raise ValueError("The local time stepping overlap reaches the x boundary; "
+                                 "reduce lts_overlap or move the band.")
+            n = hi - lo + 1
+
+            def mask(rows):
+                m = torch.zeros(n, dtype=torch.bool)
+                for i in rows:
+                    m[i - lo] = True
+                return m.to(st.device).view(1, n, 1)
+
+            fine_e = mask(e_rows) & y.act_e[lo:hi + 1][None]
+            out.append(LTSSlab2D(cp, lo, hi, fine_e, mask(e_rows), mask(hy_rows),
+                                 torch.arange(lo, hi + 1, device=st.device),
+                                 torch.tensor([cp.ghost - lo], device=st.device)))
+        return out
+    return _cached(st, "lts_slabs", make)
+
+
+def _d_e(z):
+    """Raw Yee differences ``(dEy, dEx)`` of a slab ``(S, n, NY)``."""
+    dEy = F.pad(z[:, :, 1:] - z[:, :, :-1], (0, 1))
+    dEx = F.pad(z[:, 1:, :] - z[:, :-1, :], (0, 0, 0, 1))
+    return dEy, dEx
+
+
+def _curl_h(y: YeeStatic, hx, hy):
+    """Lossless Ez rate factor of a slab: ``dHy/dx - dHx/dy`` (times ``cb``)."""
+    dHyx = F.pad(hy[:, 1:, :] - hy[:, :-1, :], (0, 0, 1, 0))
+    dHxy = F.pad(hx[:, :, 1:] - hx[:, :, :-1], (1, 0))
+    return dHyx / y.dx - dHxy / y.dy
+
+
+def lts_h_half_step(st: StepStatic, c: StepCoefs, Ez, Hx, Hy, phy, phx, E, Hxd, Hyd, qhx, qhy):
+    r"""H half step with local time stepping (2D TM version of
+    :func:`DeepGPR.hybrid.functional3d.lts_h_half_step`): the DG band and the Yee
+    rows of :func:`lts_slabs` form the fine set and take ``p = dg.lts`` sub-steps of
+    the auxiliary recursion with the other Yee rows frozen at ``E^n``; the Yee
+    grid is then advanced by its plain update (fused or not) and the fine Hx/Hy
+    rows are corrected by the difference between the averaged and the plain Yee
+    differences (CPML auxiliaries included), the DG band by the plain update
+    with the averaged derivatives. Returns ``(Hx, Hy, phy, phx, Hxd, Hyd, qhx, qhy)``
+    with the ghost rows not yet written.
+    """
+    y, d, S = st.yee, st.dg, st.nshot
+    p = int(d.lts)
+    lc = d.lts_coef if d.lts_coef is not None else lts_coefficients(p)
+    w, c0, ck, beta = lc["w"], lc["c0"], lc["c"], lc["beta"]
+    inv_p = 1.0 / p
+    fused_dg = d.cuda is not None and E.is_cuda
+    fused_y = y.cuda is not None and Ez.is_cuda
+    slabs = lts_slabs(st)
+    # ---- plain Yee update
+    if fused_y:
+        Hx1, Hy1, phy1, phx1 = y.cuda.h_update(Ez, Hx, Hy, phy, phx)
+    else:
+        dEy, dEx = _d_e(Ez)
+        A, B, Em_, Fm = y.h_y
+        Hx1 = Hx - y.cHx * dEy - (A * dEy + B * phy)
+        phy1 = Em_ * phy - Fm * dEy
+        A, B, Em_, Fm = y.h_x
+        Hy1 = Hy + y.cHy * dEx + (A * dEx + B * phx)
+        phx1 = Em_ * phx - Fm * dEx
+    # ---- recursion on the fine set
+    cb0 = 2.0 * c.fd_cb / (1.0 + c.fd_ca)
+    cb0_dg = 2.0 * c.dg_cb / (1.0 + c.dg_ca)
+    sl_cb0 = [cb0[sl.lo:sl.hi + 1][None] for sl in slabs]
+    sl_cHx = [y.cHx[sl.lo:sl.hi + 1][None] for sl in slabs]
+    sl_cHy = [y.cHy[sl.lo:sl.hi + 1][None] for sl in slabs]
+    z_s = [Ez[:, sl.lo:sl.hi + 1] for sl in slabs]
+    z_dg = E
+    zero_dg = torch.zeros_like(E)
+
+    def trace_of(z_s):
+        rows = [cp_z[:, sl.cp.row - sl.lo, :] for cp_z, sl in zip(z_s, slabs)]
+        if fused_dg:
+            return trace_op(st)(torch.stack(rows, dim=1).reshape(S, -1))
+        trace = [cp.to_dg(r) for cp, r in zip(st.couplings, rows)]
+        X = torch.zeros((S, d.K * 3 * d.Nfp), dtype=E.dtype, device=E.device)
+        for cp, v in zip(st.couplings, trace):
+            X = X.index_copy(1, cp.slots, v)
+        return X
+
+    fused_lts = fused_dg and hasattr(d.cuda, "lts_z")
+    fused_slab = fused_y and hasattr(y.cuda, "slab_r")
+    sds = [y.cuda.slab_data(sl) for sl in slabs] if fused_slab else None
+
+    def slab_r(i, z, eta, ravg, first, last, bm, bk, wm, r0=None):
+        """``(r, eta_new, ravg_new, corr)`` of slab ``i`` from the Yee differences ``r =
+        (dEy, dEx)`` of ``z`` (:func:`_d_e`): ``r`` on the first sub-step only, ``eta_new =
+        (bm ex - bk/p cHx dEy, bm ey + bk/p cHy dEx)`` (not on the last), ``ravg_new =
+        ravg + wm r``; ``corr`` (fused kernel, last sub-step with ``r0``): the corrections
+        ``(Hx, phy, Hy, phx)`` of the fine rows."""
+        if fused_slab:
+            return y.cuda.slab_r(sds[i], z, eta, ravg, first, last, bm, bk * inv_p, wm, r0)
+        dEy, dEx = _d_e(z)
+        cx, cy = sl_cHx[i], sl_cHy[i]
+        if first:
+            ravg_new = [wm * dEy, wm * dEx]
+            eta_new = [(-bk * inv_p * cx) * dEy, (bk * inv_p * cy) * dEx]
+        else:
+            ravg_new = [ravg[0] + wm * dEy, ravg[1] + wm * dEx]
+            eta_new = None if last else [bm * eta[0] - (bk * inv_p * cx) * dEy,
+                                         bm * eta[1] + (bk * inv_p * cy) * dEx]
+        return ([dEy, dEx] if first else None), eta_new, ravg_new, None
+
+    def slab_z(i, eta, z):
+        """``z + (dt/p eps) curl_h(eta)`` on the fine Ez nodes of slab ``i``."""
+        if fused_slab:
+            return y.cuda.slab_z(sds[i], eta[0], eta[1], z, sl_cb0[i], inv_p)
+        q = _curl_h(y, eta[0], eta[1])
+        return torch.where(slabs[i].fine_e, z + (inv_p * sl_cb0[i]) * q, z)
+
+    def dg_eta(T, ex, ey, tavg, bm, bk, wm):
+        if fused_lts:
+            return d.cuda.lts_eta(T, ex, ey, tavg, bm, bk * inv_p, wm)
+        if ex is None:
+            return (-bk * inv_p * d.ch) * T[:, 1], (bk * inv_p * d.ch) * T[:, 0], wm * T
+        return (bm * ex - (bk * inv_p * d.ch) * T[:, 1], bm * ey + (bk * inv_p * d.ch) * T[:, 0],
+                tavg + wm * T)
+
+    def dg_z(Te, z):
+        if fused_lts:
+            return d.cuda.lts_z(Te, z, cb0_dg, inv_p)
+        return z + (inv_p * cb0_dg) * (Te[:, 0] - Te[:, 1])
+
+    T = _terms_e(d, c, z_dg, Hxd, Hyd, trace_of(z_s), fused_dg)
+    ex, ey, T_avg = dg_eta(T, None, None, None, 0.0, c0, w[0])
+    dd0, eta_s, dd_avg, corr = [], [], [], [None] * len(slabs)
+    for i in range(len(slabs)):
+        r_i, eta_i, avg_i, _ = slab_r(i, z_s[i], None, None, True, False, 0.0, c0, w[0])
+        dd0.append(r_i)
+        eta_s.append(eta_i)
+        dd_avg.append(avg_i)
+    gop = ghost_op(st)
+    for m in range(1, p):
+        g = gop(ey.reshape(S, -1)).view(S, len(slabs), -1)
+        for i, sl in enumerate(slabs):
+            val = 2.0 * g[:, i] - eta_s[i][1][:, sl.cp.inner - sl.lo, :]
+            eta_s[i][1] = eta_s[i][1].index_copy(1, sl.ghost, val[:, None, :])
+        if fused_dg:
+            Te = d.cuda.terms(1, zero_dg, ex, ey, None, c.Zm, c.Zp)
+        else:
+            Te = torch.stack(dg_curl_h(d, c, zero_dg, ex, ey), dim=1)
+        z_dg = dg_z(Te, z_dg)
+        for i in range(len(slabs)):
+            z_s[i] = slab_z(i, eta_s[i], z_s[i])
+        T = _terms_e(d, c, z_dg, Hxd, Hyd, trace_of(z_s), fused_dg)
+        ex, ey, T_avg = dg_eta(T, ex, ey, T_avg, beta[m], ck[m], w[m])
+        last = m == p - 1
+        for i in range(len(slabs)):
+            _, eta_s[i], dd_avg[i], corr[i] = slab_r(i, z_s[i], eta_s[i], dd_avg[i], False, last,
+                                                     beta[m], ck[m], w[m], dd0[i] if last else None)
+    # ---- DG: plain update with the averaged derivatives
+    Hxd, Hyd, qhx, qhy = dg_h_update(d, c, E, Hxd, Hyd, qhx, qhy, None, fused_dg, T=T_avg)
+    # ---- Yee: correct the fine rows (CPML auxiliaries exactly, the update is linear)
+    Ay, _, _, Fy = y.h_y
+    Ax, _, _, Fx = y.h_x
+    for i, sl in enumerate(slabs):
+        rows = sl.rows
+        if corr[i] is None:
+            dy_ = torch.where(sl.fine_hx, dd_avg[i][0] - dd0[i][0], torch.zeros_like(dd0[i][0]))
+            dx_ = torch.where(sl.fine_hy, dd_avg[i][1] - dd0[i][1], torch.zeros_like(dd0[i][1]))
+            corr[i] = [-(sl_cHx[i] + Ay[sl.lo:sl.hi + 1][None]) * dy_, -Fy[sl.lo:sl.hi + 1][None] * dy_,
+                       (sl_cHy[i] + Ax[sl.lo:sl.hi + 1][None]) * dx_, -Fx[sl.lo:sl.hi + 1][None] * dx_]
+        Hx1 = Hx1.index_add(1, rows, corr[i][0])
+        phy1 = phy1.index_add(1, rows, corr[i][1])
+        Hy1 = Hy1.index_add(1, rows, corr[i][2])
+        phx1 = phx1.index_add(1, rows, corr[i][3])
+    return Hx1, Hy1, phy1, phx1, Hxd, Hyd, qhx, qhy
+
+
 def step(st: StepStatic, c: StepCoefs, state, src=None, amp=None):
     """One leapfrog step of the coupled system (sources with samples ``amp``)."""
+    from . import fused2d
+    if fused2d.any_available(st) and not (torch.is_grad_enabled() and (
+            any(t.requires_grad for t in state) or any(t.requires_grad for t in c.tensors())
+            or (amp is not None and amp.requires_grad))):
+        out = fused2d.empty_state(st, state)
+        with torch.no_grad():
+            cc = c.replaced([t.contiguous() for t in c.tensors()])
+            pre = None
+            if fused2d.lts_available(st):
+                key = tuple(t.data_ptr() for t in c.tensors())
+                ent = st.__dict__.get("_lts_pre")
+                if ent is None or ent[0] != key:
+                    ent = st.__dict__["_lts_pre"] = (key, fused2d.prepare(st, cc))
+                pre = ent[1]
+            fused2d.step_any(st, cc, [t.contiguous() for t in state], out, src,
+                             None if amp is None else amp.contiguous(), pre=pre)
+        return tuple(out)
+    return _step_reference(st, c, state, src, amp)
+
+
+def _step_reference(st: StepStatic, c: StepCoefs, state, src=None, amp=None):
+    """The step with PyTorch glue (differentiable by autograd)."""
     (Ez, Hx, Hy, pex, pey, phx, phy, E, Hxd, Hyd, qex, qey, qhx, qhy) = state
     y, d = st.yee, st.dg
     S = st.nshot
     fy = y is not None and y.cuda is not None and Ez.is_cuda
     fdg = d is not None and d.cuda is not None and E.is_cuda
-    if fy:
+    sc = st.staircase
+    lts = (d is not None and y is not None and sc is None and st.couplings
+           and int(getattr(d, "lts", 1)) > 1)
+    if lts:
+        Hx, Hy, phy, phx, Hxd, Hyd, qhx, qhy = lts_h_half_step(
+            st, c, Ez, Hx, Hy, phy, phx, E, Hxd, Hyd, qhx, qhy)
+    elif fy:
         Hx, Hy, phy, phx = y.cuda.h_update(Ez, Hx, Hy, phy, phx)
     elif y is not None:
         dEy = F.pad(Ez[:, :, 1:] - Ez[:, :, :-1], (0, 1))
@@ -357,14 +676,14 @@ def step(st: StepStatic, c: StepCoefs, state, src=None, amp=None):
         A, B, Em_, Fm = y.h_x
         Hy = Hy + y.cHy * dEx + (A * dEx + B * phx)
         phx = Em_ * phx - Fm * dEx
-    sc = st.staircase
-    if fdg:
+    if lts:
+        pass
+    elif fdg:
         if sc is not None:
             X = sc.trace(Ez, True)
         else:
             X = interface_trace(st, Ez, True) if st.couplings else None
-        T = d.cuda.terms(0, E, Hxd, Hyd, X, c.Ym, c.Yp)
-        Hxd, Hyd, qhx, qhy = d.cuda.update_h(T, Hxd, Hyd, qhx, qhy)
+        Hxd, Hyd, qhx, qhy = dg_h_update(d, c, E, Hxd, Hyd, qhx, qhy, X, True)
     elif d is not None:
         if sc is not None:
             Eext = sc.trace(Ez, False, d.K, 3 * d.Nfp)
@@ -372,29 +691,17 @@ def step(st: StepStatic, c: StepCoefs, state, src=None, amp=None):
             Eext = interface_trace(st, Ez, False)
         else:
             Eext = torch.zeros((S, d.K * 3 * d.Nfp), dtype=E.dtype, device=E.device)
-        dxE, dyE = dg_grad_e(d, c, E, Hxd, Hyd, Eext)
-        rhs_hx, rhs_hy = -dyE, dxE
-        if d.pml_idx is not None:
-            idx = d.pml_idx
-            ra_x, rb_x, re_x, rf_x = d.pml_x
-            ra_y, rb_y, re_y, rf_y = d.pml_y
-            dx_p, dy_p = dxE[:, idx], dyE[:, idx]
-            rhs_hx = rhs_hx.index_copy(1, idx, -(ra_y * dy_p + rb_y * qhx))
-            rhs_hy = rhs_hy.index_copy(1, idx, ra_x * dx_p + rb_x * qhy)
-            qhx = re_y * qhx - rf_y * dy_p
-            qhy = re_x * qhy - rf_x * dx_p
-        Hxd = Hxd + d.ch * rhs_hx
-        Hyd = Hyd + d.ch * rhs_hy
+        Hxd, Hyd, qhx, qhy = dg_h_update(d, c, E, Hxd, Hyd, qhx, qhy, Eext, False)
     if sc is not None:
         Th, Tv = sc.traces(Hxd, Hyd)
         Hx, Hy = sc.ghosts(Hx, Hy, Th, Tv)
     elif d is not None and st.couplings:
-        hy = Hyd.reshape(S, -1)
         rows = _cached(st, "ghosts", lambda: torch.as_tensor(
             [cp.ghost for cp in st.couplings], device=Hy.device))
-        vals = torch.stack([2.0 * cp.to_fd(hy.index_select(1, cp.nodes)) - Hy[:, cp.inner, :]
-                            for cp in st.couplings], dim=1)
-        Hy = Hy.index_copy(1, rows, vals)
+        inner = _cached(st, "inners", lambda: torch.as_tensor(
+            [cp.inner for cp in st.couplings], device=Hy.device))
+        g = ghost_op(st)(Hyd.reshape(S, -1)).view(S, len(st.couplings), -1)
+        Hy = Hy.index_copy(1, rows, 2.0 * g - Hy.index_select(1, inner))
     Ez_old = Ez
     if fy:
         Ez, pex, pey = y.cuda.e_update(Hx, Hy, Ez, pex, pey, c.fd_ca, c.fd_cb)
@@ -466,6 +773,14 @@ def sample(st: StepStatic, ops: PointOps, state):
     """Ez at the receivers, ``(nshot, nrx)``."""
     S, n = st.nshot, ops.count
     Ez, E = state[0], state[7]
+    if (st.yee is not None and st.yee.cuda is not None and torch.device(st.device).type == "cuda"
+            and not (torch.is_grad_enabled() and (Ez.requires_grad or E.requires_grad))):
+        from .glue3d import point_glue
+        g = point_glue(st, ops)
+        if g is not None:
+            out = torch.empty((S, n), dtype=Ez.dtype, device=Ez.device)
+            g.sample(Ez.contiguous(), E.contiguous(), out)
+            return out
     out = torch.zeros((S * n,), dtype=Ez.dtype if Ez.numel() else E.dtype,
                       device=Ez.device if Ez.numel() else E.device)
     if ops.fd_shot.numel():
@@ -480,7 +795,7 @@ def sample(st: StepStatic, ops: PointOps, state):
 
 __all__ = [
     "CouplingStatic", "DGStatic", "PointOps", "STATE_SIZE", "StepCoefs", "StepStatic",
-    "YeeStatic", "build_coefficients", "coupling_static", "dg_coefficients", "dg_static",
-    "inject", "interface_trace", "sample", "step", "yee_coefficients", "yee_static",
-    "zero_state",
+    "YeeStatic", "build_coefficients", "coupling_static", "dg_coefficients", "dg_h_update",
+    "dg_static", "inject", "interface_trace", "lts_coefficients", "lts_h_half_step", "lts_slabs",
+    "lts_weights", "sample", "step", "yee_coefficients", "yee_static", "zero_state",
 ]

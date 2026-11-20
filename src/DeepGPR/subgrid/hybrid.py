@@ -110,43 +110,7 @@ def _hybrid_h(st: fn3.StepStatic3D, c: fn3.StepCoefs3D, state, pert_h=None):
     pse, psh = list(state[6:12]), list(state[12:18])
     E, H, Daux, Baux = state[18], state[19], state[20], state[21]
     Dfd, Bfd = state[22], state[23]
-    y, d = st.yee, st.dg
-    S = st.nshot
-    fused = y.cuda is not None and fe[0].is_cuda
-    if fused:
-        fh, psh, Bfd = y.cuda.h_update(fe, fh, psh, Bfd)
-    else:
-        rhs, psh = fn3._yee_curl(y, fe, y.ph, psh, fn3._fwd)
-        fh_new = [torch.where(y.act[3 + k], fh[k] - y.chr * rhs[k], fh[k]) for k in range(3)]
-        if y.upml is not None:
-            fh_new, Bfd = fn3._yee_upml(y.upml, "h", Bfd, rhs, fh, fh_new)
-        fh = fh_new
-    Eext, compact = None, False
-    if d is not None:
-        compact = d.cuda is not None and E.is_cuda
-        Eext = fn3.interface_trace(st, fe, compact) if st.couplings else None
-        if compact:
-            H, Baux = d.cuda.update_h(fn3.dg_operator(d, (c.e0, c.e1, c.e2, c.e3), E, H, Eext), H,
-                                      Baux)
-        else:
-            curl = fn3._dg_curl(fn3.dg_operator(d, (c.e0, c.e1, c.e2, c.e3), E, H, Eext))
-            H_new = H - d.ch * curl
-            if d.pml_idx is not None:
-                u = d.upml
-                H_new, Baux = fn3._upml(d.pml_idx, Baux, -curl, H, H_new, u["a1"], u["b1"],
-                                        u["h_hist"], u["h_new"], u["h_old"])
-            H = H_new
-        if st.couplings:
-            hflat = H.reshape(S, 3, -1)
-            NY, NZ = y.shape[1], y.shape[2]
-            rows = fn3._cached(st, "ghosts", lambda: torch.as_tensor(
-                [cp.ghost for cp in st.couplings], device=H.device))
-            hz = torch.stack([2.0 * cp.to_fd[0](hflat[:, 2].index_select(1, cp.nodes)).view(S, NY, NZ)
-                              - fh[2][:, cp.inner] for cp in st.couplings], dim=1)
-            hy = torch.stack([2.0 * cp.to_fd[1](hflat[:, 1].index_select(1, cp.nodes)).view(S, NY, NZ)
-                              - fh[1][:, cp.inner] for cp in st.couplings], dim=1)
-            fh[2] = fh[2].index_copy(1, rows, hz)
-            fh[1] = fh[1].index_copy(1, rows, hy)
+    fh, psh, Bfd, H, Baux, Eext, compact = fn3.h_half_step(st, c, fe, fh, psh, Bfd, E, H, Baux)
     if pert_h is not None:
         fh = [f + p for f, p in zip(fh, pert_h)]
     fh = [f if f._base is None else f.clone() for f in fh]
@@ -156,33 +120,7 @@ def _hybrid_h(st: fn3.StepStatic3D, c: fn3.StepCoefs3D, state, pert_h=None):
 def _hybrid_e(st: fn3.StepStatic3D, c: fn3.StepCoefs3D, parts, src=None, amp=None, pert_e=None):
     """Second half of :func:`DeepGPR.hybrid.functional3d.step` (Yee E, DG E, sources)."""
     fe, fh, pse, psh, E, H, Daux, Baux, Dfd, Bfd, Eext, compact = parts
-    y, d = st.yee, st.dg
-    fused = y.cuda is not None and fe[0].is_cuda
-    if fused:
-        pen = fn3.interface_penalty_rows(st, c, fe, E) if c.g_if is not None else None
-        fe, pse, Dfd = y.cuda.e_update(fh, fe, pse, Dfd, c, pen)
-    else:
-        rhs, pse = fn3._yee_curl(y, fh, y.pe, pse, fn3._bwd)
-        if c.g_if is not None:
-            rhs = fn3._yee_interface_penalty(st, c, rhs, fe, E)
-        fe_new = [torch.where(y.act[k], c.fd_ca * fe[k] + c.fd_cb * rhs[k], fe[k]) for k in range(3)]
-        if y.upml is not None:
-            fe_new, Dfd = fn3._yee_upml(y.upml, "e", Dfd, rhs, fe, fe_new,
-                                        (c.fu_hist, c.fu_new, c.fu_old))
-        fe = fe_new
-    if d is not None:
-        Xh = fn3.interface_x(st, c, Eext, compact) if c.g_if is not None else None
-        if compact:
-            E, Daux = d.cuda.update_e(fn3.dg_operator(d, (c.h0, c.h1, c.h2, c.h3), H, E, Xh), E,
-                                      Daux, c.dg_ca, c.dg_cb, c.u_hist, c.u_new, c.u_old)
-        else:
-            curl = fn3._dg_curl(fn3.dg_operator(d, (c.h0, c.h1, c.h2, c.h3), H, E, Xh))
-            E_new = c.dg_ca[None, None] * E + c.dg_cb[None, None] * curl
-            if d.pml_idx is not None:
-                u = d.upml
-                E_new, Daux = fn3._upml(d.pml_idx, Daux, curl, E, E_new, u["a1"], u["b1"],
-                                        c.u_hist, c.u_new, c.u_old)
-            E = E_new
+    fe, pse, Dfd, E, Daux = fn3.e_half_step(st, c, fe, fh, pse, Dfd, E, H, Daux, Eext, compact)
     if pert_e is not None:
         fe = [f + p for f, p in zip(fe, pert_e)]
     if src is not None and amp is not None:

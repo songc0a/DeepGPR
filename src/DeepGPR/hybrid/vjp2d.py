@@ -35,6 +35,8 @@ def supported(st: fn.StepStatic) -> bool:
     y, d = st.yee, st.dg
     if torch.device(st.device).type != "cuda" or (y is None and d is None):
         return False
+    if d is not None and int(getattr(d, "lts", 1)) != 1:
+        return False                     # local time stepping: autograd transpose of the step
     return (y is None or y.cuda is not None) and (d is None or d.cuda is not None)
 
 

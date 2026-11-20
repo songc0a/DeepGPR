@@ -164,8 +164,9 @@ Cost (Section 2 model, float32, 1 shot, 400 steps):
 | subgrid | 0.81 | 4.09 | 2.76 GB |
 | main grid only | 0.23 | 1.00 | 1.52 GB |
 
-A hand-written VJP of the whole step (as `hybrid/vjp3d.py`) is not
-implemented; the gradient costs about five forward steps.
+Since Section 13 the whole step has a hand-written transpose (`fused.py`) and the
+sweeps run as CUDA Graphs (`sweep.py`); the autograd sweep described here remains
+the reference (`DEEPGPR_SUBGRID_AUTOGRAD_VJP=1`).
 
 ### FWI (`examples/subgrid/fwi3d_subgrid.py`)
 
@@ -643,3 +644,359 @@ Results (24 scenarios):
 Limits: one acquisition geometry, differential data with a known baseline, one GPU;
 the v2 settings were chosen on round-1 snapshots of M1-M4 (only M5/M6 are an
 independent test); the 1 cm evaluator slightly favours the 1 cm solver.
+
+## 11. Dynamic mesh and time-step scheduling (`schedule.py`)
+
+`DeepGPR.subgrid.schedule` turns the pieces above (a priori planner, DWR
+indicator, `regrid`, the hybrid's local time stepping, the subgrids' time ratio)
+into a scheduling strategy for adaptive FWI that balances inversion error and
+cost:
+
+* `TimeStepLadder.from_solver(solver)` reads the time-step ladder of a layout
+  (Yee macro step `dt`, DG sub-steps `p` of the local time stepping,
+  `docs/HYBRID_DGTD.md` Section 12, subgrid time ratios `r`) and the unknown
+  counts of its parts.
+* `CostModel` predicts the wall-clock cost of a forward run or gradient as a
+  linear model in the unknowns (`yee·N_yee + dg·N_dg·(p + k) + sub·Σ N_g r_g`, with `k` the split-penalty damping sub-steps of 12.2 in HYBRID_DGTD.md; the earlier `(2p − 1)/2` undercounted the band: a macro step evaluates the operator `2p` times)
+  per macro step, times the steps and shots, times `gradient_factor` for a
+  gradient). The defaults are the RTX 4090 rates of the fused kernels;
+  `calibrate`/`measure` rescale them to the machine at hand.
+  `fine_node_budget` inverts the model: the subgrid nodes affordable per
+  gradient given the Yee/DG parts and a time budget.
+* `Scheduler` keeps the misfit history and decides between cycles:
+  **keep** while the misfit still falls (`plateau` test over `window`
+  iterations) or fewer than `min_cycle` iterations passed since the last
+  change; otherwise **refine** when the DWR estimate of the modelling error
+  (`DWRIndicator.estimate`, same units as the misfit) is at least `balance`
+  (default 0.25) of the misfit, **coarsen** when it is below
+  `coarsen_factor × balance` and boxes exist, **keep** in between (error
+  balancing: refinement only pays while the modelling error is a sizeable part
+  of the residual). With `urgent = u` (opt-in, 0.5 is sensible) the layout is
+  refined at once, without the plateau and `min_cycle` waits, when the estimate
+  is at least `u` of the misfit: its own modelling error is then most of the
+  residual, and iterating on it would mostly fit that error (Section 12: a check
+  before the first iteration leaves the 2 cm level after 44 s instead of after
+  four iterations, about 24 min). `plan` then calls `regrid` (maximum strategy `gamma`,
+  hysteresis, non-persistent boxes) under the fine-node budget of the remaining
+  time and iterations: the marking threshold is raised until the planned boxes
+  fit, and the boxes with the least indicator mass are dropped if they still do
+  not. Every decision is logged (`Scheduler.log`).
+
+Tests: `tests/test_subgrid_schedule.py` (ladders of all solvers, calibration,
+budget monotonicity, decision rules, planning under a budget).
+
+With local time stepping in the hybrid (`HybridSubgridMaxwell3D(..., lts="auto",
+flux="central")`) the main `dt` is the Yee step, so subgrids under the band must
+sub-cycle (`time_ratio = ratio`, the default; `time_ratio = 1` only fits when the
+band sets the global step). The split step of Section 6 shares the LTS half step
+of the hybrid (`functional3d.h_half_step`), so without subgrids it reproduces
+`HybridMaxwell3D` with LTS to round-off (`tests/test_hybrid_lts.py`).
+`examples/subgrid/amr_scheduled.py` runs the scheduler on the sand-pit benchmark
+(`amr_sandpit3d.py`, method `amr_sched*`: same model, data, optimiser, v3 marking
+and scoring as `amr_dyn_v3`; only the decisions come from the scheduler). Findings
+on M1 (2400 s budget, RTX 4090, 2026-11-07):
+
+* The DWR estimate of the differential objective must be scaled like the misfit
+  (`residual = 2 (d − obs) / norm`); so scaled, it is 1–4 % of the misfit during
+  the first 45 iterations and 30–70 % after the first refinement. With the
+  default `balance = 0.25` the scheduler therefore keeps the coarse grid at the
+  first plateau (iteration 45, ratio 0.02): the differential estimate measures the
+  change of the *anomaly response*, which is small while the model is still
+  close to the background, although the coarse grid cannot fit the total data
+  at all (forward floor 1.2). `balance = 0.01` refines at the first plateau and
+  reproduces the layout of `adaptive once v3` (516 k fine nodes, two boxes).
+* Held-out prediction error at equal wall time (`amr_sched_b`, balance 0.01,
+  check every 5 iterations, min cycle 5):
+
+  | t [s] | scheduled | dynamic v3 | adaptive once v3 | static whole | coarse | uniform fine |
+  |---|---|---|---|---|---|---|
+  | 75 | **0.216** | 0.230 | 0.232 | 1.000 | 0.203 | 1.000 |
+  | 300 | **0.180** | 0.190 | 0.192 | 0.215 | 0.186 | 1.000 |
+  | 600 | **0.160** | 0.170 | 0.187 | 0.185 | 0.176 | 0.215 |
+  | 1200 | 0.155 | **0.153** | 0.168 | 0.164 | 0.167 | 0.210 |
+  | 2400 | 0.159 | **0.144** | 0.159 | – | – | 0.182 |
+
+  Staying coarse until the first plateau makes the scheduled run the best
+  method up to 600 s and ties dynamic v3 at 1200 s; afterwards the cost
+  control (the affordable cost per gradient shrinks with the remaining time at
+  a fixed iteration target) made the layout oscillate (one box, two boxes, no
+  box: 7 changes in 39 checks, each restarting L-BFGS), which cost the
+  2400 s result. Two rules were added after this run: the plateau is counted
+  on the current layout only with `min_cycle = 10`, and no layout change is
+  made once less than `end_fraction = 0.1` of the budget remains. With them
+  (`amr_sched_c`) the layout settles after two changes (one box of 0.6 M fine
+  nodes from iteration ~50 on): PE 0.181 / 0.176 / 0.165 / 0.154 at
+  300 / 600 / 1200 / 2400 s, i.e. a steadier run that ends better than the
+  oscillating one (0.159) and than adaptive once v3 (0.159), but loses the
+  early advantage of the coarse phase (600–1200 s now at the level of the
+  static and coarse runs) and still trails dynamic v3 at 2400 s (0.144). On
+  this benchmark the scheduler is therefore a robust, cost-aware default rather
+  than a better strategy than the tuned fixed-interval re-planning; its
+  advantage is that it needs no re-plan interval and no node budget as inputs.
+* Cost model: calibrated on the measured gradient time of the current layout
+  (0.9 s coarse, 6–7 s with two boxes), the fine-node budget of a 200-iteration
+  plan is 0.79 M nodes, the cap of the whole-region box.
+
+## 12. Scheduled refinement for 3D joint ε/σ FWI on rugged terrain (`examples/subgrid/amr_terrain3d.py`)
+
+The scheduler of Section 11 on the hybrid with local time stepping: the deep
+variant of the rugged-terrain model of `docs/HYBRID_DGTD.md` 12.6, deep enough for
+Huygens subgrids under the DG band (a box needs 7 main cells of padding below the
+band's two-cell gap).
+
+**Set-up.** 2 cm model grid, 1.0 m deep, 0.8 m × 0.8 m, 8-cell absorbers; surface
+0.17 m ± 7 cm (11 × 11 samples, sine pattern plus random roughness, PCHIP); P1
+DG band 0.08–0.28 m (flux 0.1, with LTS the split penalty); ground εr 5, σ 3 mS/m;
+an εr 7.5 sphere and, 24 cm away, a 40 mS/m sphere (radius 8 cm, centres 0.60 m
+deep, about 0.43 m below the surface); a known reflector εr 8 below 0.86 m (in the
+initial model); 3 × 3 sources, 7 × 7 receivers 4 cm below the top, 400 MHz Ricker,
+16 ns, offsets below 12 cm muted; observed data from native DeepGPR on 4 mm; time
+gain `(t − 1 ns)^2`; misfit, parametrisation and optimiser of HYBRID_DGTD.md 12.6
+(L-BFGS, stage 1 εr only at 250 MHz, stage 2 joint, full band).
+
+Levels (RTX 4090, float32; modelling error = data error of the level at the true
+model against the 4 mm data, gained; gradient = nine shots):
+
+| level | Yee | band stepping | macro dt | modelling error | gradient |
+|---|---|---|---|---|---|
+| coarse | 2 cm | LTS, p = 4 | 2.50e-11 s | 26.8 % | 96 s |
+| whole-region box | 2 cm + one box (0.82 M nodes at 2/3 cm, 0.48–0.78 m deep, time ratio 3) | LTS, p = 4 | 2.50e-11 s | 23.8 % | 112 s |
+| fine | 2/3 cm everywhere | global | 7.45e-12 s | 2.1 % | 216 s |
+
+The anomaly signal of the observed data is 10.8 %: on the coarse level the
+modelling error is 2.5 times the signal, and the largest admissible box removes
+a tenth of it. 89 % of the gained data energy is the direct wave and the surface
+reflection; the error sits in the 2 cm Yee cells around the antennas and in the
+20 cm of 2 cm ground between the band (0.28 m) and the shallowest admissible box
+top (0.48 m), where boxes cannot go. The fine level runs with global stepping:
+at P1 with Yee 2/3 cm the LTS costs more than it saves (HYBRID_DGTD.md 12.6;
+`lts="cost"` makes the same choice).
+
+Methods, all from the same initial model:
+
+* `fine`: the fine level throughout, 8 + 24 iterations (reference);
+* `coarse`, `static`: the coarse level and the whole-region box, 8 + 8;
+* `sched`: the scheduler, 8 + 8; absolute DWR estimate of the coarse level on
+  shots 0, 4, 8; `balance = 0.01`, `urgent = 0.5`, budget 6000 s; a check at the
+  start of every stage; when more than half of the indicator mass lies where
+  boxes cannot go, a refinement becomes the switch to the fine level (global
+  refinement).
+
+The methods' own misfits are not comparable (each contains its own level's
+modelling error), so `amr_terrain3d.py evaluate` simulates the model every method
+holds at a given wall time with the fine level and scores it against the data
+(`results/amr_terrain3d/evaluate.json`, `report.md`, `curves.png`).
+
+**Results** (2026-11-08): data error with the fine level / εr error / σ error of
+the model held at each wall time.
+
+| method | 20 min | 40 min | 60 min | 90 min | 120 min | 180 min | end |
+|---|---|---|---|---|---|---|---|
+| fine | 10.1 % / 0.995 / 1.000 | 7.7 % / 0.983 / 1.000 | 6.6 % / 0.980 / 1.000 | 6.3 % / 0.978 / 1.000 | 2.2 % / 0.967 / 0.998 | 1.2 % / 0.961 / 0.999 | 0.87 % / 0.954 / 0.995 (281 min, 72 gradients) |
+| sched | 10.9 % / 1.000 / 1.000 | 7.7 % / 0.983 / 1.000 | 6.8 % / 0.980 / 1.000 | 6.2 % / 0.977 / 1.000 | 2.2 % / 0.966 / 0.998 | 1.45 % / 0.963 / 0.998 | same (155 min, 39 gradients, 16 iterations) |
+| static | 8.0 % / 1.002 / 1.000 | 12.5 % / 1.177 / 1.000 | 9.9 % / 1.245 / 1.015 | 9.0 % / 1.219 / 1.073 | – | – | 9.0 % / 1.219 / 1.073 (81 min) |
+| coarse | 10.4 % / 1.079 / 1.000 | 14.4 % / 1.286 / 1.000 | 13.5 % / 1.261 / 1.074 | 13.3 % / 1.260 / 1.080 | – | – | 13.3 % / 1.260 / 1.080 (66 min) |
+
+The initial model has a data error of 10.9 % (εr and σ errors 1).
+
+* **The scheduler leaves the hopeless level before the first iteration.** At the
+  check of iteration 0 the absolute estimate was −0.139 against a misfit of
+  0.0339 (ratio 4.1; the actual difference of the two levels at the initial
+  model is −0.028, ratio 0.83: the linearised estimate overshoots fivefold at
+  this error level, but sign and order are right), with 98 % of |η| outside the
+  region boxes can cover, so it switched to the fine level after a 44 s check.
+  From then on the run is the fine reference shifted by about one minute: equal
+  data errors at 40, 60, 90 and 120 min, the same model errors.
+* **The cheap levels fit their own modelling error.** Coarse and static reduce
+  their own misfits by 33 % and 25 % while the εr error rises to 1.26 and 1.22 and
+  the σ error to 1.08 and 1.07 (worse than the initial model); with the fine level
+  their data error ends at 13.3 % and 9.0 %. The box gives a short head start in
+  the 250 MHz stage (8.0 % at 20 min against 10.1 %), lost as soon as the
+  iterations exploit the modelling error.
+* **The plateau rule alone would have wasted a sixth of the run.** A first
+  `sched` run without the urgent rule (stopped, `run_sched_plateau_only.*`) spent
+  8 gradient evaluations (13.6 min) on its first coarse iteration and changed the
+  misfit by 0.006 %; the plateau test and `min_cycle = 4` would have kept the
+  2 cm level for four iterations (about 24 min, judging by the `coarse` run, whose
+  full-band misfit rose over them) before the same switch. This is why
+  `Scheduler(urgent=...)` exists (Section 11).
+* **Local refinement cannot help on this layout.** The error of the cheap level
+  lies near the surface, above and in the band's neighbourhood, where Huygens
+  boxes cannot go; the scheduler's correct decision is global refinement, and
+  its benefit over the uniform fine grid is nil here (but it avoids the
+  traps of the cheap levels at the cost of one indicator evaluation, 44 s). Boxes
+  pay when the modelling error is at depth (Sections 10 and 11: the sand-pit
+  benchmark); on rugged terrain they would need to reach the band, which the
+  present subgrid–band coupling does not allow.
+* **Deep targets stay weakly resolved.** After 32 iterations on the fine level
+  the εr sphere reaches 5.32 (true 7.5), the σ sphere 3.9 mS/m (true 40); 62 % of
+  the εr update energy lies at the targets' depth (0.48–0.66 m) and the update
+  correlates with the true εr perturbation at 0.27; σ is updated mostly near the
+  reflector. The data error with the fine level (0.87 %) ends below that level's
+  own modelling error (2.1 %): the last iterations fit solver error.
+
+## 13. Fused step, hand-written transpose and whole-sweep CUDA Graphs (`fused.py`, `sweep.py`)
+
+Before this change the forward step called its kernels from Python (the fused Yee
+updates of every grid, the precursor and correction kernels of `cuda.py`) and was
+replayed as one CUDA Graph per step, with the state copied in and out
+(`graphs.py`). The reverse sweep differentiated `hsg.step` (or `hybrid.step`)
+with autograd, step by step and eagerly: the kernels' transposes as autograd
+functions plus the clones, zero tensors and additions autograd needs. With the
+DG band, the hybrid halves went through the PyTorch glue of
+`functional3d.h_half_step` / `e_half_step`.
+
+**What was changed.**
+* `fused.py`: `step_into(st, c, u, out, ...)` writes `u^(n+1)` into given
+  buffers; `vjp_into(...)` applies the hand-written transpose of the step and
+  writes the cotangent of `u^n` into given buffers (destroying the input
+  cotangent). It serves both solvers. For `HybridSubgridMaxwell3D` the main step
+  is the fused global step of `DeepGPR.hybrid.fused3d`, split into its H and E
+  halves (`step_h_part` / `step_e_part`, `vjp_e_part` / `vjp_h_part`) so that the
+  subgrids' outer-surface H correction falls in between, as in `hybrid.step`.
+* Order of the transpose of one main step (`r` sub-steps per subgrid):
+  receivers^T; per subgrid OS E^T and the hsg_1 sub-steps^T; `pe_next`^T; the
+  main E half^T (sources, Yee and DG E); per subgrid OS H^T, subgrid
+  receivers^T and the hsg_2 sub-steps^T; `ph_cur`^T; the main H half^T;
+  `pe_cur`^T and `ph_prev`^T into the cotangent of `u^n`.
+* The E updates' transposes need their inputs for the `ca`/`cb` cotangents, so
+  the reverse step first recomputes the `r − 1` intermediate states of every
+  subgrid (fields and CPML auxiliaries) into scratch buffers; the main grid
+  needs only `u^n` and `u^(n+1)`. The precursors of the new main fields
+  (`ph_cur`, `pe_next`) are taken from `u^(n+1)`: `fused.available()` checks
+  once per static that no precursor stencil reads a main node changed by an
+  outer-surface correction (true for `is_os_sep ≥ 2` with the filter and
+  disjoint subgrids); otherwise the autograd sweep is used.
+* Point sources and receivers on every grid use the point kernels of
+  `hybrid/csrc/glue3d.cu`. Subgrid receivers are sampled straight into the data
+  (the receiver buffer of the state is not written on this path).
+* `sweep.py`: the CUDA Graph arrangement of `hybrid/sweep3d.py` (`k` forward
+  graphs `F_j`, `k` reverse graphs `R_j`, two ping-pong graphs for forward-only
+  runs) with per-step buffers for the main-rate and subgrid-rate source
+  samples, the main-grid and subgrid receiver data (subgrid receivers one step
+  late: `nt + 1` steps) and their cotangents. Buffers belong to the solver,
+  graphs to each propagator; the coefficients are refreshed by copy;
+  `fit_k`, fall-back to the eager fused steps on out-of-memory, checkpoints on
+  the device when they fit. `SubgridPropagator.release()` frees them.
+* `DEEPGPR_SUBGRID_DISABLE_GRAPHS=1` runs the same fused steps eagerly. With
+  `indicator=True` the reverse sweep runs eagerly on the fused transpose and
+  copies the cotangents of the main E and H updates for the DWR indicator, on
+  the segments of the autograd sweep (whose time term is skipped at each segment
+  start, so the segment length is kept). `DEEPGPR_SUBGRID_AUTOGRAD_VJP=1` runs the
+  autograd sweep.
+* Not fused: a hybrid main step with local time stepping (`lts > 1`) keeps the
+  autograd sweep.
+
+**Numerical validation** (float64).
+* One step, fused against `hsg.step` / `hybrid.step`: Yee main identical,
+  hybrid main ≤ 3e-16. Fused transpose against reverse-mode differentiation of
+  the reference step: ≤ 1.4e-15 for every state, coefficient (main and subgrid
+  `ca`/`cb`), wavelet (main-rate and subgrid-rate) and indicator cotangent.
+  Configurations: Yee main with one `r = 3` box, two boxes, an `r = 5` box
+  (sources and receivers in the main grid and in the boxes, 2 shots); hybrid
+  main with an `r = 3` box and with `time_ratio = 1` (2 shots).
+* Propagator data and ε/σ/wavelet gradients (graph sweep, eager fused, autograd
+  sweep; the models of `tests/test_subgrid_adjoint.py` and
+  `tests/test_subgrid_hybrid.py`): ≤ 7e-15; DWR indicator 3e-16 (Yee main) and
+  3e-14 (hybrid main).
+* float32 at full length against the code before the change: data 3e-8–5e-8
+  (Yee main) and 1e-6–2e-6 (hybrid main), ε gradient 1e-6–2e-6 and 8e-6.
+
+**Speed.** RTX 4090 (server, idle card), float32, minimum of three runs after a
+warm-up, ms per simulated ns of one propagation
+(`examples/subgrid/subgrid_benchmark.py`).
+* SP: the 3D sand-pit benchmark of Section 11 (`amr_sandpit3d.py`): Yee main
+  grid 2.25 cm, 0.75 cm boxes, the 9 training shots in one propagation, 44
+  receivers each, 16 ns (389 steps). `static`: one box over the whole update
+  region (1.13 M fine nodes); `oracle`: the boxes around the targets of M1
+  (three boxes, 0.73 M); `coarse`: the main grid alone; `fine`: uniform
+  0.75 cm FDTD, one shot per propagation (as in the study).
+* T: the rugged-terrain model of Section 12 (`amr_terrain3d.py`) with the
+  global time step: Yee 2 cm, P1 band, one shot, 16 ns (2147 steps). `static`:
+  one 2/3 cm box over the whole admissible region (0.82 M fine nodes);
+  `coarse`: no box.
+
+| model | forward before | forward after | gradient before | gradient after |
+|---|---|---|---|---|
+| SP static (9 shots) | 120.0 | **94.1** (1.28×) | 694.6 | **521.0** (1.33×) |
+| SP oracle (9 shots) | 88.3 | **67.3** (1.31×) | 548.9 | **358.1** (1.53×) |
+| SP coarse 2.25 cm (9 shots) | 14.0 | **6.9** (2.01×) | 54.6 | **30.8** (1.77×) |
+| SP fine 0.75 cm (1 shot) | 63.1 | **36.7** (1.72×) | 290.8 | **170.5** (1.71×) |
+| T static (hybrid + box) | 171.5 | **123.6** (1.39×) | 1921.9 | **563.2** (3.41×) |
+| T coarse (hybrid) | 112.6 | **76.3** (1.48×) | 1078.4 | **320.1** (3.37×) |
+
+Peak memory is unchanged except for the forward pass with boxes (+0.5 GB of
+scratch for the recomputed intermediates).
+
+After the change the boxes cost, relative to the coarse main grid alone, 13.6×
+(forward) and 16.9× (gradient) for the whole-region box and 9.8× and 11.6× for
+the oracle boxes; relative to uniform 0.75 cm FDTD for the same 9 shots
+(9 × the one-shot time) the whole-region box is 3.5× (forward) and 2.9×
+(gradient) faster, the oracle boxes 4.9× and 4.3×. Before the change these
+advantages were 4.7× and 3.8× (whole region): uniform FDTD gained more from the
+change than the boxes did. On the terrain model the box costs 1.62× (forward)
+and 1.76× (gradient) of the hybrid alone.
+
+**Where the time goes now** (SP static, gradient, eager profile on the local
+RTX 4090, GPU time 23.8 ms per step): Yee transposes 49 %, Yee forward updates 42 % (forward pass,
+segment recomputation and the in-step recomputation of the intermediates, the
+last about 10 % of the total), correction, precursor and point kernels 9 %. The
+remaining lever is the Yee transpose kernel itself (two passes through a
+six-component scratch array and per-shot coefficient accumulators), shared with
+the hybrid and the pure FDTD paths (not done).
+
+**Follow-up: single-pass Yee transposes** (`docs/HYBRID_DGTD.md` 12.13). The Yee
+transpose of every grid is now one kernel without the scratch array, and the
+`ca`/`cb` cotangents are summed over the shots in the kernel (the `main_ca:upd`
+and `sub_ca{g}:upd` accumulators hold `N` values instead of `S × N`). Exactness
+as before (step transposes ≤ 1.8e-15, propagator gradients ≤ 5e-15, indicator
+3.7e-14 in float64). Same protocol, before and after measured in one session on
+another idle card (so the "before" column differs slightly from the "after"
+column of the table above); forward times are unchanged:
+
+| model | gradient before | gradient after |
+|---|---|---|
+| SP static (9 shots) | 520.6 | **416.7** (1.25×) |
+| SP oracle (9 shots) | 359.6 | **296.2** (1.21×) |
+| SP coarse 2.25 cm (9 shots) | 31.1 | **25.2** (1.23×) |
+| SP fine 0.75 cm (1 shot) | 171.0 | **132.6** (1.29×) |
+| T static (hybrid + box) | 563.1 | **511.9** (1.10×) |
+| T coarse (hybrid) | 319.9 | **316.5** (1.01×) |
+
+Uniform FDTD gained as much as the boxes: the whole-region box is now 2.86×
+faster than uniform 0.75 cm FDTD for the 9 shots in the gradient (1193 against
+417 ms/ns; 2.96× before), the oracle boxes 4.03× (4.28×), and the box costs
+16.5× the coarse grid alone (16.7×). On the terrain model the box costs 1.62× of
+the hybrid alone (1.76×); the hybrid alone is DG-bound and barely changes. The
+SP static gradient now spends 54 % of its GPU time in the Yee updates (forward
+pass and recomputation), 35 % in the Yee transposes and 11 % in the correction,
+precursor and point kernels (eager profile, server, 16.5 ms per step against
+21.1 before).
+
+**Follow-up: compile-time term tables in the Yee update kernel**
+(`docs/HYBRID_DGTD.md` 12.14). The Yee update kernel of every grid (forward pass
+and recomputation) has no local-memory stack frame any more; its outputs are
+bitwise identical. Same protocol, before and after alternating per model on one
+idle card:
+
+| model | forward before → after | gradient before → after |
+|---|---|---|
+| SP static (9 shots) | 94.2 → **90.4** (1.04×) | 411.6 → **402.8** (1.02×) |
+| SP oracle (9 shots) | 67.9 → **59.3** (1.14×) | 296.1 → **275.3** (1.08×) |
+| SP coarse 2.25 cm (9 shots) | 7.0 → **5.6** (1.26×) | 25.3 → **22.5** (1.12×) |
+| SP fine 0.75 cm (1 shot) | 36.8 → **35.0** (1.05×) | 132.4 → **128.9** (1.03×) |
+| T static (hybrid + box) | 124.2 → **112.7** (1.10×) | 512.3 → **482.8** (1.06×) |
+| T coarse (hybrid) | 76.3 → **74.5** (1.02×) | 316.8 → **313.0** (1.01×) |
+
+The small grids gain most (the update kernel of the 2.25 cm main grid with 9
+shots 1.20–1.22×); the kernels of the whole-region box run close to the memory
+bandwidth and gain 2–4 %. Against uniform 0.75 cm FDTD for the 9 shots, the
+whole-region box is now 2.88× faster in the gradient (2.90× before, same session)
+and 3.48× in the forward pass (3.52×), the oracle boxes 4.21× (4.02×) and 5.31×
+(4.88×); in the gradient the box costs 17.9× the coarse grid alone (16.3×), and on
+the terrain model 1.54× of the hybrid alone (1.62×). The SP static gradient now
+spends 52 % of its GPU time in the Yee updates, 35 % in the Yee transposes and
+13 % in the correction, precursor and point kernels (16.2 ms per step). The
+gradients of the models with boxes are not bitwise reproducible from run to run
+(the transposes of the correction accumulate with atomics; two runs of one code
+differ by 2e-6 to 5e-6, relative L2, in float32).

@@ -39,7 +39,7 @@ def supported(st: fn3.StepStatic3D) -> bool:
     """``True`` when the step runs fully on the fused kernels (Yee and DG)."""
     y, d = st.yee, st.dg
     return (y is not None and y.cuda is not None and d is not None and d.cuda is not None
-            and torch.device(st.device).type == "cuda")
+            and torch.device(st.device).type == "cuda" and int(getattr(d, "lts", 1)) == 1)
 
 
 def _ranges(st: fn3.StepStatic3D):

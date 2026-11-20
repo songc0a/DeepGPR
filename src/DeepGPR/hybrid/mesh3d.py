@@ -274,17 +274,42 @@ def locate_points_columns(mesh: TetMesh, points: np.ndarray, tol: float = 1e-9):
     return elem, lam[np.arange(len(pts)), j]
 
 
+def _point_locator(mesh: TetMesh):
+    """Bounding boxes of the elements and a KD-tree on their centres, cached on the mesh
+    (rebuilt when its vertex or element arrays are replaced)."""
+    key = (id(mesh.vertices), id(mesh.tets), mesh.vertices.shape, mesh.tets.shape)
+    loc = mesh.__dict__.get("_locator")
+    if loc is None or loc[0] != key:
+        from scipy.spatial import cKDTree
+
+        p = mesh.vertices[mesh.tets]
+        lo, hi = p.min(axis=1), p.max(axis=1)
+        radius = 0.5 * float(np.linalg.norm(hi - lo, axis=1).max())
+        loc = (key, cKDTree(0.5 * (lo + hi)), radius, lo, hi, 1e-6 * float((hi - lo).max()))
+        mesh.__dict__["_locator"] = loc
+    return loc
+
+
 def locate_points_3d(mesh: TetMesh, points: np.ndarray, tol: float = 1e-9):
-    """``[(element_ids, barycentric (m, 4)), ...]`` per point (all containing tets)."""
-    p = mesh.vertices[mesh.tets]
-    T = np.stack([p[:, 1] - p[:, 0], p[:, 2] - p[:, 0], p[:, 3] - p[:, 0]], axis=2)  # (k,3,3)
-    Tinv = np.linalg.inv(T)
+    """``[(element_ids, barycentric (m, 4)), ...]`` per point (all containing tets).
+
+    Only elements whose (slightly padded) bounding box contains the point are tested
+    (KD-tree on the box centres, cached on the mesh); the test itself is the barycentric
+    one, so the result is that of testing every element, at a cost independent of the
+    mesh size."""
+    _, tree, radius, lo, hi, pad = _point_locator(mesh)
     out = []
-    for q in np.atleast_2d(points):
-        lam123 = np.einsum("kij,kj->ki", Tinv, q[None] - p[:, 0])
+    for q in np.atleast_2d(np.asarray(points, dtype=np.float64)):
+        cand = np.asarray(tree.query_ball_point(q, radius + pad), dtype=np.int64)
+        if cand.size:
+            cand = np.sort(cand[np.all((q >= lo[cand] - pad) & (q <= hi[cand] + pad), axis=1)])
+        p = mesh.vertices[mesh.tets[cand]]
+        T = np.stack([p[:, 1] - p[:, 0], p[:, 2] - p[:, 0], p[:, 3] - p[:, 0]], axis=2)
+        lam123 = np.einsum("kij,kj->ki", np.linalg.inv(T), q[None] - p[:, 0]) if cand.size \
+            else np.zeros((0, 3))
         lam = np.concatenate([1 - lam123.sum(1, keepdims=True), lam123], 1)
-        ids = np.nonzero(np.all(lam >= -tol, axis=1))[0]
-        out.append((ids, lam[ids]))
+        keep = np.all(lam >= -tol, axis=1)
+        out.append((cand[keep], lam[keep]))
     return out
 
 
