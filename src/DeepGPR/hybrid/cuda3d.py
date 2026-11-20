@@ -34,7 +34,8 @@ from ..utils.logger import get_logger
 
 _LOGGER = get_logger(__name__)
 _CSRC = Path(__file__).resolve().parent / "csrc"
-_SOURCES = (_CSRC / "dgtd3d.cu", _CSRC / "yee3d.cu", _CSRC / "dg2d.cu", _CSRC / "yee2d.cu")
+_SOURCES = (_CSRC / "dgtd3d.cu", _CSRC / "yee3d.cu", _CSRC / "dg2d.cu", _CSRC / "yee2d.cu",
+            _CSRC / "lts3d.cu", _CSRC / "glue3d.cu")
 _LOCK = threading.Lock()
 _LIBS: dict = {}
 
@@ -87,10 +88,13 @@ def load_library(device=None):
                 subprocess.run(cmd, check=True, capture_output=True)
                 os.replace(tmp, path)
             lib = ctypes.CDLL(str(path))
+            _D = ctypes.c_double
             lib.dgtd3d_terms_fwd.restype = _I
-            lib.dgtd3d_terms_fwd.argtypes = [_I, _I, _I, _I] + [_P] * 17 + [_P, _I, _P]
+            lib.dgtd3d_terms_fwd.argtypes = ([_I, _I, _I, _I] + [_P] * 17
+                                             + [_P, _I, _P, _I, _I, _D, _D, _D, _D, _P])
             lib.dgtd3d_terms_bwd.restype = _I
-            lib.dgtd3d_terms_bwd.argtypes = [_I, _I, _I, _I] + [_P] * 26 + [_P, _I, _P, _P, _P]
+            lib.dgtd3d_terms_bwd.argtypes = ([_I, _I, _I, _I] + [_P] * 26
+                                             + [_P, _I, _P, _P, _P, _I, _D, _D, _D, _D, _P])
             lib.dgtd3d_bwd_workspace.restype = ctypes.c_longlong
             lib.dgtd3d_bwd_workspace.argtypes = [_I, _I, _I, _I]
             for name in ("dgtd3d_update_fwd", "dgtd3d_update_bwd"):
@@ -101,6 +105,11 @@ def load_library(device=None):
                 fn = getattr(lib, name)
                 fn.restype = _I
                 fn.argtypes = [_I, _I, _P, _P, _P, _P, _P]
+            lib.yee3d_bwd_acc.restype = _I
+            lib.yee3d_bwd_acc.argtypes = [_I, _I, _I, _P, _P, _P, _P, _P]
+            # fused coupling / source / receiver glue (csrc/glue3d.cu, wrappers in glue3d.py)
+            lib.glue3d_call.restype = _I
+            lib.glue3d_call.argtypes = [_I, _I, _P, _P, _P, _P]
             # 2D kernels (csrc/dg2d.cu, csrc/yee2d.cu; wrappers in cuda2d.py)
             for name in ("dg2d_terms_fwd", "dg2d_terms_bwd"):
                 fn = getattr(lib, name)
@@ -114,6 +123,38 @@ def load_library(device=None):
                 fn.argtypes = [_I, _I, _I, _I, _P, _P, _P, _P]
             lib.yee2d_run.restype = _I
             lib.yee2d_run.argtypes = [_I, _I, _I, _P, _P, _P, _P, _P]
+            # fused elementwise updates of the local time stepping (csrc/lts3d.cu)
+            lib.lts3d_z_fwd.restype = _I
+            lib.lts3d_z_fwd.argtypes = [_I, _I, _I, _I, _P, _P, _P, _D, _P, _P]
+            lib.lts3d_z_bwd.restype = _I
+            lib.lts3d_z_bwd.argtypes = [_I, _I, _I, _I, _P, _P, _P, _D, _P, _P, _P]
+            lib.lts3d_eta_fwd.restype = _I
+            lib.lts3d_eta_fwd.argtypes = [_I, _I, _I, _I, _P, _P, _P, _P, _D, _D, _D, _I, _P, _P, _P]
+            lib.lts3d_eta_bwd.restype = _I
+            lib.lts3d_eta_bwd.argtypes = [_I, _I, _I, _I, _P, _P, _P, _D, _D, _D, _P, _P, _P]
+            lib.lts2d_z_fwd.restype = _I
+            lib.lts2d_z_fwd.argtypes = [_I, _I, _I, _I, _P, _P, _P, _D, _P, _P]
+            lib.lts2d_z_bwd.restype = _I
+            lib.lts2d_z_bwd.argtypes = [_I, _I, _I, _I, _P, _P, _P, _D, _P, _P, _P]
+            lib.lts2d_eta_fwd.restype = _I
+            lib.lts2d_eta_fwd.argtypes = [_I, _I, _I, _I, _P, _P, _P, _P, _P, _D, _D, _D, _I, _P, _P,
+                                          _P, _P]
+            lib.lts2d_eta_bwd.restype = _I
+            lib.lts2d_eta_bwd.argtypes = [_I, _I, _I, _I, _P, _P, _P, _P, _D, _D, _D, _P, _P, _P, _P]
+            # slab recursion and UPML folds of the 3D local time stepping (csrc/lts3d.cu)
+            _L = ctypes.c_longlong
+            lib.lts3d_slab_q.restype = _I
+            lib.lts3d_slab_q.argtypes = [_I, _I, _I, _I, _I, _I, _P, _P, _D, _I, _P]
+            lib.lts3d_slab_r.restype = _I
+            lib.lts3d_slab_r.argtypes = [_I, _I, _I, _I, _I, _I, _P, _P, _D, _D, _D, _I, _P]
+            lib.lts3d_fold.restype = _I
+            lib.lts3d_fold.argtypes = [_I, _I, _I, _L, _I, _D, _L, _L, _L, _P, _P]
+            lib.lts3d_update.restype = _I
+            lib.lts3d_update.argtypes = [_I, _I, _I, _I, _I, _I, _I, _I, _P, _P]
+            lib.lts2d_slab_q.restype = _I
+            lib.lts2d_slab_q.argtypes = [_I, _I, _I, _I, _I, _P, _P, _D, _P]
+            lib.lts2d_slab_r.restype = _I
+            lib.lts2d_slab_r.argtypes = [_I, _I, _I, _I, _I, _P, _P, _D, _D, _D, _I, _P]
         except Exception as exc:  # pragma: no cover - depends on the toolchain
             _LOGGER.warning("3D DGTD CUDA kernels unavailable (%s); using PyTorch.", exc)
             lib = None
@@ -193,26 +234,42 @@ class DGCudaOps:
             self.pml = pml
             self.Kp = d.pml_idx.numel()
             self.u = {k: v.contiguous() for k, v in d.upml.items()}
+            self.pml_list = d.pml_idx.to(torch.int32).contiguous()
+        uf = getattr(d, "upml_fine", None)      # sub-step UPML factors of the local time stepping
+        self.uf = {k: v.contiguous() for k, v in uf.items()} if uf is not None else None
 
     # ------------------------------------------------------------- raw kernels
-    def terms_fwd(self, F, G, X, b0, b1, b2, b3):
+    def terms_fwd(self, F, G, X, b0, b1, b2, b3, epi=None):
         """The six curl terms ``(S, 6, K, Np)`` (contiguous inputs; ``X`` compact
-        ``(S, 2, nX)`` on the interface slots or ``None``)."""
+        ``(S, 2, nX)`` on the interface slots or ``None``). With an epilogue
+        ``epi = (mode, ptrs, first, beta, b, w, a)`` the terms are not written: the
+        recursion update of the local time stepping is applied to the curl in the same
+        pass (mode 1: ``eta``/``cavg``, mode 2: ``z``; ``ptrs`` = ``[eta, cavg, z, ch, cb0,
+        o1, o2]``) and ``None`` is returned."""
         S = F.shape[0]
-        out = torch.empty((S, 6, self.K, self.Np), dtype=F.dtype, device=F.device)
         D = self.D
+        if epi is None:
+            out = torch.empty((S, 6, self.K, self.Np), dtype=F.dtype, device=F.device)
+            mode, q, first, beta, b, w, a = 0, None, 0, 0.0, 0.0, 0.0, 0.0
+        else:
+            out = None
+            mode, ptrs, first, beta, b, w, a = epi
+            q = _ptrs(ptrs)
         _check(self.lib.dgtd3d_terms_fwd(
             self.code, self.Np, S, self.K, _ptr(F), _ptr(G), _ptr(X), _ptr(self.R), _ptr(self.n),
             _ptr(self.fscale), _ptr(self.vmapM), _ptr(self.vmapP), _ptr(b0), _ptr(b1), _ptr(b2),
             _ptr(b3), _ptr(D[0]), _ptr(D[1]), _ptr(D[2]), _ptr(self.LIFT), _ptr(out),
-            _ptr(self.xmap), self.nX, _stream(F)), "forward")
+            _ptr(self.xmap), self.nX, q, mode, int(first), beta, b, w, a, _stream(F)), "forward")
         return out
 
-    def terms_bwd(self, F, G, gT, b0, b1, b2, b3, has_x, addF=None, addG=None):
+    def terms_bwd(self, F, G, gT, b0, b1, b2, b3, has_x, addF=None, addG=None, gepi=None,
+                  out=None, acc_face=None, acc_cb0=False):
         """Exact transpose of :meth:`terms_fwd`: ``(gF, gG, gX, gb0, gb1, gb2, gb3)`` with
         ``gX`` compact ``(S, 2, nX)`` (or ``None``) and the face-coefficient cotangents
         per shot ``(S, [2,] 4, K)``. ``addF``/``addG`` (optional, shaped like ``F``/``G``)
-        are added to ``gF``/``gG`` in the same pass."""
+        are added to ``gF``/``gG`` in the same pass. ``gepi = (mode, ptrs, beta, b, w, a)``
+        forms the six-term cotangent from the epilogue outputs' cotangents in registers
+        (``ptrs`` = ``[g1, g2, ch, cb0, curl, gcb0, geta_in]``; ``gT`` unused)."""
         S, K = F.shape[0], self.K
         kw = dict(dtype=F.dtype, device=F.device)
         nwork = int(self.lib.dgtd3d_bwd_workspace(S, K, self.Np, self.Nfp))
@@ -220,18 +277,31 @@ class DGCudaOps:
                 or self._work.device != F.device:
             self._work = torch.empty(nwork, **kw)
         work = self._work
-        gF, gG = torch.empty_like(F), torch.empty_like(G)
+        gF, gG = (torch.empty_like(F), torch.empty_like(G)) if out is None else out
         gX = torch.empty((S, 2, self.nX), **kw) if has_x else None
-        gb0, gb1, gb3 = (torch.empty((S, 4, K), **kw) for _ in range(3))
-        gb2 = torch.empty((S, 2, 4, K), **kw)
+        flags = 0
+        if acc_face is None:
+            gb0, gb1, gb3 = (torch.empty((S, 4, K), **kw) for _ in range(3))
+            gb2 = torch.empty((S, 2, 4, K), **kw)
+        else:          # accumulate into running sums (S, 4, K) / (S, 2, 4, K); None: skip
+            gb0, gb1, gb2, gb3 = acc_face
+            flags |= 4
+        if acc_cb0:    # the epilogue's g_cb0 output is accumulated (S, K)
+            flags |= 8
         D = self.D
+        if gepi is None:
+            mode, q, beta, b, w, a = 0, None, 0.0, 0.0, 0.0, 0.0
+        else:
+            mode, ptrs, beta, b, w, a = gepi
+            q = _ptrs(ptrs)
+        mode |= flags
         _check(self.lib.dgtd3d_terms_bwd(
             self.code, self.Np, S, K, _ptr(F), _ptr(G), _ptr(gT), _ptr(self.R), _ptr(self.n),
             _ptr(self.fscale), _ptr(self.vmapM), _ptr(self.vmapP), _ptr(self.slotP),
             _ptr(self.fmask), _ptr(b0), _ptr(b1), _ptr(b2), _ptr(b3), _ptr(D[0]), _ptr(D[1]),
             _ptr(D[2]), _ptr(self.LIFT), _ptr(work), _ptr(gF), _ptr(gG), _ptr(gX), _ptr(gb0),
             _ptr(gb1), _ptr(gb2), _ptr(gb3), _ptr(self.xmap), self.nX, _ptr(addF), _ptr(addG),
-            _stream(F)), "backward")
+            q, mode, beta, b, w, a, _stream(F)), "backward")
         return gF, gG, gX, gb0, gb1, gb2, gb3
 
     def _factors(self, mode, hist, nw, old):
@@ -240,12 +310,13 @@ class DGCudaOps:
             return (u.get("a1"), u.get("b1"), hist, nw, old)
         return (u.get("a1"), u.get("b1"), u.get("h_hist"), u.get("h_new"), u.get("h_old"))
 
-    def update_fwd(self, mode, T6, Fo, aux, ca=None, cb=None, hist=None, nw=None, old=None):
+    def update_fwd(self, mode, T6, Fo, aux, ca=None, cb=None, hist=None, nw=None, old=None,
+                   out=None):
         """Fused update from the curl terms (``mode`` 0: H, 1: E, with ``ca``/``cb``
-        flat ``(K,)`` and the UPML E factors); returns ``(F_new, aux_new)``."""
+        flat ``(K,)`` and the UPML E factors); returns ``(F_new, aux_new)`` (written into
+        ``out = (F_new, aux_new)`` when given)."""
         S = Fo.shape[0]
-        Fn = torch.empty_like(Fo)
-        auxn = torch.empty_like(aux)
+        Fn, auxn = (torch.empty_like(Fo), torch.empty_like(aux)) if out is None else out
         q = _ptrs([T6, Fo, aux, Fn, auxn, self.ch if mode == 0 else None, ca, cb, self.pml,
                    *self._factors(mode, hist, nw, old)])
         _check(self.lib.dgtd3d_update_fwd(self.code, self.Np, mode, S, self.K, self.Kp, q,
@@ -253,14 +324,15 @@ class DGCudaOps:
         return Fn, auxn
 
     def update_bwd(self, mode, T6, Fo, aux, gFn, gauxn, ca=None, cb=None, hist=None, nw=None,
-                   old=None):
+                   old=None, out_gaux=None):
         """Transpose of :meth:`update_fwd`: ``(gT6, gFo, gaux, gca, gcb, ghist, gnew, gold)``;
         the coefficient cotangents per shot ``(S, K)`` / ``(S, 3, Kp, Np)`` (E only).
-        ``T6`` is read in the E mode only."""
+        ``T6`` is read in the E mode only; ``gaux`` is written into ``out_gaux`` when given
+        (every entry is written)."""
         S = Fo.shape[0]
         kw = dict(dtype=Fo.dtype, device=Fo.device)
-        gT6, gFo, gaux = torch.empty((S, 6, self.K, self.Np), **kw), torch.empty_like(Fo), \
-            torch.zeros_like(aux)
+        gT6, gFo = torch.empty((S, 6, self.K, self.Np), **kw), torch.empty_like(Fo)
+        gaux = torch.zeros_like(aux) if out_gaux is None else out_gaux
         e = mode == 1
         gca = torch.empty((S, self.K), **kw) if e else None
         gcb = torch.empty((S, self.K), **kw) if e else None
@@ -273,6 +345,38 @@ class DGCudaOps:
         _check(self.lib.dgtd3d_update_bwd(self.code, self.Np, mode, S, self.K, self.Kp, q,
                                           _stream(Fo)), "DG update backward")
         return gT6, gFo, gaux, gca, gcb, gh, gn, go
+
+    # ------------------------------------------------------------- local time stepping
+    def lts_z(self, Te, z, cb0, a: float):
+        """``z + a cb0 curl(Te)`` (``cb0`` per element, ``(K,)``), differentiable."""
+        return _LTSZ.apply(self, Te, z, cb0, float(a))
+
+    def lts_eta(self, T, eta, cavg, beta: float, b: float, w: float):
+        """``(beta eta - b ch curl(T), cavg + w curl(T))``; ``eta``/``cavg`` ``None`` for
+        the first sub-step (``eta = -b ch curl(T)``, ``cavg = w curl(T)``)."""
+        return _LTSEta.apply(self, T, eta, cavg, float(beta), float(b), float(w))
+
+    def terms_eta(self, F, G, X, b0, b1, b2, b3, eta, cavg, beta: float, b: float, w: float):
+        """Operator + eta/cavg recursion update in one pass (``(eta_new, cavg_new)`` of
+        :meth:`lts_eta` from the curl of ``F``); ``eta``/``cavg`` ``None`` on the first
+        sub-step. Differentiable."""
+        return _TermsEta.apply(self, F, G, X, b0, b1, b2, b3, eta, cavg, float(beta), float(b),
+                               float(w))
+
+    def terms_z(self, F, G, X, b0, b1, b2, b3, z, cb0, a: float):
+        """Operator + z update in one pass (``z + a cb0 curl(F)``, :meth:`lts_z`)."""
+        return _TermsZ.apply(self, F, G, X, b0, b1, b2, b3, z, cb0, float(a))
+
+    def lts_update(self, mode: int, rate, f_old, aux, ca, cb, hist, nw, old, p: int):
+        """Macro-step update of the band with the ``p``-fold UPML of the PML elements in
+        one pass (``mode`` 0: ``H - ch cavg``, 1: ``ca E + cb curl(T)`` from the six
+        terms); returns ``(F_new, aux_new)``. ``ca``/``cb`` flat ``(K,)`` (E), the
+        sub-step UPML factors ``(3, Kp, Np)`` (``None`` without PML elements)."""
+        z = torch.zeros(0, dtype=self.dtype, device=self.ch.device)
+        return _LTSUpdate.apply(self, int(mode), int(p), rate, f_old, aux,
+                                z if ca is None else ca, z if cb is None else cb,
+                                z if hist is None else hist, z if nw is None else nw,
+                                z if old is None else old)
 
     # ------------------------------------------------------------- autograd
     def terms(self, F, G, X, b0, b1, b2, b3):
@@ -303,6 +407,76 @@ class _Terms(torch.autograd.Function):
                                                            b3, ctx.has_x)
         return (None, gF, gG, gX, gb0.sum(0).t(), gb1.sum(0).t(), gb2.sum(0).transpose(1, 2),
                 gb3.sum(0).t())
+
+
+def _face_grads(gb0, gb1, gb2, gb3):
+    return gb0.sum(0).t(), gb1.sum(0).t(), gb2.sum(0).transpose(1, 2), gb3.sum(0).t()
+
+
+class _TermsEta(torch.autograd.Function):
+    """Curl terms of ``F`` with the eta / cavg recursion update as the kernel epilogue."""
+
+    @staticmethod
+    def forward(ctx, ops: DGCudaOps, F, G, X, b0, b1, b2, b3, eta, cavg, beta, b, w):  # type: ignore[override]
+        F, G = F.contiguous(), G.contiguous()
+        X = None if X is None else X.contiguous()
+        b0, b1, b2, b3 = (t.contiguous() for t in (b0, b1, b2, b3))
+        first = eta is None
+        eta_c = None if first else eta.contiguous()
+        cavg_c = None if first else cavg.contiguous()
+        o1, o2 = torch.empty_like(F), torch.empty_like(F)
+        ops.terms_fwd(F, G, X, b0, b1, b2, b3,
+                      epi=(1, [eta_c, cavg_c, None, ops.ch, None, o1, o2], int(first), beta, b, w, 0.0))
+        ctx.ops, ctx.has_x, ctx.first, ctx.coef = ops, X is not None, first, (beta, b, w)
+        ctx.save_for_backward(F, G, b0, b1, b2, b3)
+        ctx.set_materialize_grads(False)
+        return o1, o2
+
+    @staticmethod
+    def backward(ctx, g1, g2):  # type: ignore[override]
+        ops, (beta, b, w) = ctx.ops, ctx.coef
+        F, G, b0, b1, b2, b3 = ctx.saved_tensors
+        g1 = None if g1 is None else g1.contiguous()
+        g2 = None if g2 is None else g2.contiguous()
+        geta = torch.empty_like(F) if (not ctx.first and g1 is not None) else None
+        gF, gG, gX, gb0, gb1, gb2, gb3 = ops.terms_bwd(
+            F, G, None, b0, b1, b2, b3, ctx.has_x,
+            gepi=(1, [g1, g2, ops.ch, None, None, None, geta], beta, b, w, 0.0))
+        gcavg = None if ctx.first else g2
+        return (None, gF, gG, gX, *_face_grads(gb0, gb1, gb2, gb3), geta, gcavg, None, None, None)
+
+
+class _TermsZ(torch.autograd.Function):
+    """Curl terms of ``F`` with the z update ``z + a cb0 curl`` as the kernel epilogue."""
+
+    @staticmethod
+    def forward(ctx, ops: DGCudaOps, F, G, X, b0, b1, b2, b3, z, cb0, a):  # type: ignore[override]
+        F, G, z = F.contiguous(), G.contiguous(), z.contiguous()
+        X = None if X is None else X.contiguous()
+        b0, b1, b2, b3 = (t.contiguous() for t in (b0, b1, b2, b3))
+        cb0 = cb0.reshape(-1).contiguous()
+        out = torch.empty_like(z)
+        # the curl is kept only when the cb0 cotangent (material gradient) is needed
+        curl = torch.empty_like(z) if ctx.needs_input_grad[9] else None
+        ops.terms_fwd(F, G, X, b0, b1, b2, b3,
+                      epi=(2, [None, None, z, None, cb0, out, curl], 0, 0.0, 0.0, 0.0, a))
+        ctx.ops, ctx.has_x, ctx.a = ops, X is not None, a
+        ctx.save_for_backward(F, G, b0, b1, b2, b3, cb0, *([curl] if curl is not None else []))
+        return out
+
+    @staticmethod
+    def backward(ctx, g):  # type: ignore[override]
+        ops, a = ctx.ops, ctx.a
+        F, G, b0, b1, b2, b3, cb0, *rest = ctx.saved_tensors
+        curl = rest[0] if rest else None
+        g = g.contiguous()
+        gcb0 = (torch.empty((F.shape[0], ops.K), dtype=F.dtype, device=F.device)
+                if curl is not None else None)
+        gF, gG, gX, gb0, gb1, gb2, gb3 = ops.terms_bwd(
+            F, G, None, b0, b1, b2, b3, ctx.has_x,
+            gepi=(2, [g, None, None, cb0, curl, gcb0, None], 0.0, 0.0, 0.0, a))
+        gcb0 = None if gcb0 is None else gcb0.sum(0).view(-1, 1)
+        return (None, gF, gG, gX, *_face_grads(gb0, gb1, gb2, gb3), g, gcb0, None)
 
 
 class _DGUpdate(torch.autograd.Function):
@@ -339,7 +513,110 @@ class _DGUpdate(torch.autograd.Function):
                 red(gh, hist), red(gn, nw), red(go, old))
 
 
+class _LTSZ(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, ops: DGCudaOps, Te, z, cb0, a):  # type: ignore[override]
+        Te, z = Te.contiguous(), z.contiguous()
+        cb0 = cb0.reshape(-1).contiguous()
+        out = torch.empty_like(z)
+        _check(ops.lib.lts3d_z_fwd(ops.code, z.shape[0], ops.K, ops.Np, _ptr(Te), _ptr(z),
+                                   _ptr(cb0), a, _ptr(out), _stream(z)), "LTS z update")
+        ctx.ops, ctx.a = ops, a
+        ctx.save_for_backward(Te, cb0)
+        return out
+
+    @staticmethod
+    def backward(ctx, g):  # type: ignore[override]
+        ops = ctx.ops
+        Te, cb0 = ctx.saved_tensors
+        g = g.contiguous()
+        gTe = torch.empty_like(Te)
+        gcb0 = torch.empty_like(cb0)
+        _check(ops.lib.lts3d_z_bwd(ops.code, g.shape[0], ops.K, ops.Np, _ptr(Te), _ptr(g), _ptr(cb0),
+                                   ctx.a, _ptr(gTe), _ptr(gcb0), _stream(g)), "LTS z transpose")
+        return None, gTe, g, gcb0.view(-1, 1), None
+
+
+class _LTSEta(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, ops: DGCudaOps, T, eta, cavg, beta, b, w):  # type: ignore[override]
+        T = T.contiguous()
+        first = eta is None
+        S = T.shape[0]
+        shape = (S, 3, ops.K, ops.Np)
+        eta_out = torch.empty(shape, dtype=T.dtype, device=T.device)
+        cavg_out = torch.empty(shape, dtype=T.dtype, device=T.device)
+        eta_c = None if first else eta.contiguous()
+        cavg_c = None if first else cavg.contiguous()
+        _check(ops.lib.lts3d_eta_fwd(ops.code, S, ops.K, ops.Np, _ptr(T), _ptr(eta_c), _ptr(cavg_c),
+                                     _ptr(ops.ch), beta, b, w, int(first), _ptr(eta_out),
+                                     _ptr(cavg_out), _stream(T)), "LTS eta update")
+        ctx.ops, ctx.first, ctx.coef = ops, first, (beta, b, w)
+        ctx.shape, ctx.dtype_, ctx.device_ = shape, T.dtype, T.device
+        ctx.set_materialize_grads(False)
+        return eta_out, cavg_out
+
+    @staticmethod
+    def backward(ctx, g_eta_new, g_cavg_new):  # type: ignore[override]
+        ops, (beta, b, w) = ctx.ops, ctx.coef
+        S, _, K, Np = ctx.shape
+        gT = torch.empty((S, 6, K, Np), dtype=ctx.dtype_, device=ctx.device_)
+        ge = None if g_eta_new is None else g_eta_new.contiguous()
+        gc = None if g_cavg_new is None else g_cavg_new.contiguous()
+        g_eta = None if (ctx.first or ge is None) else torch.empty(ctx.shape, dtype=ctx.dtype_,
+                                                                   device=ctx.device_)
+        _check(ops.lib.lts3d_eta_bwd(ops.code, S, K, Np, _ptr(ge), _ptr(gc), _ptr(ops.ch), beta, b, w,
+                                     _ptr(gT), _ptr(g_eta), _stream(gT)), "LTS eta transpose")
+        # on the first sub-step eta/cavg were None (not tensors): no cotangent for them
+        return None, gT, g_eta, (None if ctx.first else gc), None, None, None
+
+
+class _LTSUpdate(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, ops: DGCudaOps, mode, p, rate, f, aux, ca, cb, hist, nw, old):  # type: ignore[override]
+        rate, f, aux = rate.contiguous(), f.contiguous(), aux.contiguous()
+        ca, cb, hist, nw, old = _cont((ca, cb, hist, nw, old))
+        fnew, auxn = torch.empty_like(f), torch.empty_like(aux)
+        u = ops.uf or {}
+        q = _ptrs([ops.pml, rate, f, aux, ops.ch, ca, cb, u.get("a1"), u.get("b1"), hist, nw, old,
+                   fnew, auxn])
+        _check(ops.lib.lts3d_update(ops.code, 0, mode, f.shape[0], ops.K, ops.Np, ops.Kp, p, q,
+                                    _stream(f)), "LTS DG update")
+        ctx.ops, ctx.mode, ctx.p = ops, mode, p
+        ctx.save_for_backward(rate, f, aux, ca, cb, hist, nw, old)
+        ctx.set_materialize_grads(False)
+        return fnew, auxn
+
+    @staticmethod
+    def backward(ctx, gfn, gauxn):  # type: ignore[override]
+        ops, mode = ctx.ops, ctx.mode
+        rate, f, aux, ca, cb, hist, nw, old = ctx.saved_tensors
+        gfn = torch.zeros_like(f) if gfn is None else gfn.contiguous()
+        gauxn = None if gauxn is None else gauxn.contiguous()
+        grate, gf, gaux = torch.empty_like(rate), torch.empty_like(f), torch.empty_like(aux)
+        e = mode == 1 and any(ctx.needs_input_grad[6:8])
+        gca = torch.empty_like(ca) if e else None
+        gcb = torch.empty_like(cb) if e else None
+        want = ops.Kp > 0 and any(ctx.needs_input_grad[8:11])
+        gh, gn, go = ((torch.empty_like(hist), torch.empty_like(nw), torch.empty_like(old)) if want
+                      else (None, None, None))
+        u = ops.uf or {}
+        q = _ptrs([ops.pml, rate, f, aux, ops.ch, ca, cb, u.get("a1"), u.get("b1"), hist, nw, old,
+                   gfn, gauxn, grate, gf, gaux, gca, gcb, gh, gn, go])
+        _check(ops.lib.lts3d_update(ops.code, 1, mode, f.shape[0], ops.K, ops.Np, ops.Kp, ctx.p, q,
+                                    _stream(f)), "LTS DG update transpose")
+        return None, None, None, grate, gf, gaux, gca, gcb, gh, gn, go
+
+
 # --------------------------------------------------------------------------- Yee
+def _unaliased(g, gaux, gpsi, outs):
+    """The transposes read ``g``, ``gaux`` and ``gpsi`` at neighbouring nodes while other
+    threads write the outputs: copies of the inputs that share memory with an output."""
+    wr = {t.data_ptr() for t in outs if t is not None and t.numel()}
+    cp = lambda t: t.clone() if (t is not None and t.numel() and t.data_ptr() in wr) else t  # noqa: E731
+    return [cp(t) for t in g], cp(gaux), [cp(t) for t in gpsi]
+
+
 class YeeCudaOps:
     """Kernel data of a :class:`~DeepGPR.hybrid.functional3d.YeeStatic3D` (one side
     each for the H and the E update), the raw kernel calls (``h_fwd``/``h_bwd``,
@@ -427,70 +704,150 @@ class YeeCudaOps:
         return arr
 
     # ------------------------------------------------------------- raw kernels
-    def h_fwd(self, fe, fh, aux, psi):
-        """H update (contiguous inputs): ``(fh_new[3], aux_new, psi_new[6])``."""
+    def h_fwd(self, fe, fh, aux, psi, out=None):
+        """H update (contiguous inputs): ``(fh_new[3], aux_new, psi_new[6])`` (written into
+        ``out`` = the same triple when given)."""
         S = fe[0].shape[0]
-        out = [torch.empty_like(t) for t in fh]
-        psi_out = [torch.empty_like(t) for t in psi]
-        aux_out = torch.empty_like(aux)
+        if out is None:
+            out = [torch.empty_like(t) for t in fh]
+            psi_out = [torch.empty_like(t) for t in psi]
+            aux_out = torch.empty_like(aux)
+        else:
+            out, aux_out, psi_out = out
         io = _ptrs(list(fe) + list(fh) + list(psi) + psi_out
                    + [aux, aux_out, None, None, self.y.chr, None, None] + out)
         _check(self.lib.yee3d_fwd(self.code, 0, self.gi("h", S), self.gd, self.sp("h"), io,
                                   _stream(fe[0])), "Yee H forward")
         return out, aux_out, psi_out
 
-    def h_bwd(self, fe, fh, aux, psi, g, gaux, gpsi):
-        """Transpose of :meth:`h_fwd`: ``(g_fe[3], g_fh[3], g_aux, g_psi[6])``."""
+    def h_bwd(self, fe, fh, aux, psi, g, gaux, gpsi, out=None, gsrc_acc=None):
+        """Transpose of :meth:`h_fwd`: ``(g_fe[3], g_fh[3], g_aux, g_psi[6])``. ``out =
+        (g_fh[3], g_aux, g_psi[6])``: write those there; ``gsrc_acc`` (three tensors):
+        accumulate ``g_fe`` into them (returned as ``g_fe``)."""
         S = fe[0].shape[0]
-        gu = [torch.empty_like(t) for t in fh]
-        gpsi_in = [torch.empty_like(t) for t in psi]
-        gaux_in = torch.empty_like(aux)
-        lam = torch.empty((6,) + fe[0].shape, dtype=fe[0].dtype, device=fe[0].device)
-        gsrc = [torch.empty_like(t) for t in fe]
+        if out is None:
+            gu = [torch.empty_like(t) for t in fh]
+            gpsi_in = [torch.empty_like(t) for t in psi]
+            gaux_in = torch.empty_like(aux)
+        else:
+            gu, gaux_in, gpsi_in = out
+        gsrc = [torch.empty_like(t) for t in fe] if gsrc_acc is None else list(gsrc_acc)
+        g, gaux, gpsi = _unaliased(g, gaux, gpsi, list(gu) + [gaux_in] + list(gpsi_in) + gsrc)
         io = _ptrs(list(fe) + list(fh) + list(psi) + [aux, None, None, self.y.chr, None, None]
-                   + list(g) + list(gpsi) + [gaux] + gu + gpsi_in
-                   + [gaux_in, lam, None, None, None, None, None, None] + gsrc)
-        _check(self.lib.yee3d_bwd(self.code, 0, self.gi("h", S), self.gd, self.sp("h"), io,
-                                  _stream(fe[0])), "Yee H backward")
+                   + list(g) + list(gpsi) + [gaux] + list(gu) + list(gpsi_in)
+                   + [gaux_in, None, None, None, None, None, None, None] + gsrc)
+        accf = 2 if gsrc_acc is not None else 0
+        _check(self.lib.yee3d_bwd_acc(self.code, 0, accf, self.gi("h", S), self.gd, self.sp("h"),
+                                      io, _stream(fe[0])), "Yee H backward")
         return gsrc, gu, gaux_in, gpsi_in
 
-    def e_fwd(self, fh, fe, aux, ca, cb, hist, nw, old, pen, psi):
+    def e_fwd(self, fh, fe, aux, ca, cb, hist, nw, old, pen, psi, out=None):
         """E update (contiguous inputs; empty ``hist``/``pen`` = none):
-        ``(fe_new[3], aux_new, psi_new[6])``."""
+        ``(fe_new[3], aux_new, psi_new[6])`` (into ``out`` when given)."""
         S = fe[0].shape[0]
-        out = [torch.empty_like(t) for t in fe]
-        psi_out = [torch.empty_like(t) for t in psi]
-        aux_out = torch.empty_like(aux)
+        if out is None:
+            out = [torch.empty_like(t) for t in fe]
+            psi_out = [torch.empty_like(t) for t in psi]
+            aux_out = torch.empty_like(aux)
+        else:
+            out, aux_out, psi_out = out
         io = _ptrs(list(fh) + list(fe) + list(psi) + psi_out
                    + [aux, aux_out, ca, cb, None, pen, self.rowmap if pen.numel() else None] + out)
         _check(self.lib.yee3d_fwd(self.code, 1, self.gi("e", S), self.gd,
                                   self.sp("e", hist, nw, old), io, _stream(fe[0])), "Yee E forward")
         return out, aux_out, psi_out
 
-    def e_bwd(self, fh, fe, aux, ca, cb, hist, nw, old, pen, psi, g, gaux, gpsi):
+    def e_bwd(self, fh, fe, aux, ca, cb, hist, nw, old, pen, psi, g, gaux, gpsi, out=None,
+              gsrc_acc=None, coef_acc=None, shot_sum=False):
         """Transpose of :meth:`e_fwd`: ``(g_fh[3], g_fe[3], g_aux, g_psi[6], g_ca, g_cb,
-        g_hist, g_new, g_old, g_pen)``; ``g_ca``/``g_cb`` per shot ``(S, N)``, the UPML
-        factor cotangents ``(S, n_upml)``, ``g_pen`` ``None`` without penalty."""
+        g_hist, g_new, g_old, g_pen)``; ``g_ca``/``g_cb`` per shot ``(S, N)`` (summed over
+        the shots, ``(N,)``, with ``shot_sum``), the UPML factor cotangents ``(S, n_upml)``
+        (``(n_upml,)``), ``g_pen`` ``None`` without penalty. ``out = (g_fe[3], g_aux,
+        g_psi[6])``: write those there; ``gsrc_acc``: accumulate ``g_fh`` into these three
+        tensors; ``coef_acc = (g_ca, g_cb, g_hist, g_new, g_old)``: accumulate the
+        coefficient cotangents into these arrays, per shot ``(S, N)`` / ``(S, n_upml)`` or
+        summed over the shots ``(N,)`` / ``(n_upml,)`` (summed in the kernel)."""
         S = fe[0].shape[0]
         dev, dt = fe[0].device, fe[0].dtype
-        gu = [torch.empty_like(t) for t in fe]
-        gpsi_in = [torch.empty_like(t) for t in psi]
-        gaux_in = torch.empty_like(aux)
-        lam = torch.empty((6,) + fe[0].shape, dtype=dt, device=dev)
-        gsrc = [torch.empty_like(t) for t in fh]
-        gca = torch.empty((S, self.N), dtype=dt, device=dev)
-        gcb = torch.empty_like(gca)
+        if out is None:
+            gu = [torch.empty_like(t) for t in fe]
+            gpsi_in = [torch.empty_like(t) for t in psi]
+            gaux_in = torch.empty_like(aux)
+        else:
+            gu, gaux_in, gpsi_in = out
+        gsrc = [torch.empty_like(t) for t in fh] if gsrc_acc is None else list(gsrc_acc)
         ntot = self.side["e"]["ntot"]
-        gh = torch.zeros((S, ntot), dtype=dt, device=dev)
-        gn, go = torch.zeros_like(gh), torch.zeros_like(gh)
+        if coef_acc is None:
+            lead = () if shot_sum else (S,)
+            gca = torch.empty(lead + (self.N,), dtype=dt, device=dev)
+            gcb = torch.empty_like(gca)
+            gh = torch.zeros(lead + (ntot,), dtype=dt, device=dev)
+            gn, go = torch.zeros_like(gh), torch.zeros_like(gh)
+        else:
+            gca, gcb, gh, gn, go = coef_acc
+            shot_sum = gca.numel() == self.N
         gpen = torch.zeros_like(pen) if pen.numel() else None
+        g, gaux, gpsi = _unaliased(g, gaux, gpsi, list(gu) + [gaux_in] + list(gpsi_in) + gsrc
+                                   + [gpen])
         io = _ptrs(list(fh) + list(fe) + list(psi)
                    + [aux, ca, cb, None, pen, self.rowmap if pen.numel() else None]
-                   + list(g) + list(gpsi) + [gaux] + gu + gpsi_in
-                   + [gaux_in, lam, gca, gcb, gh, gn, go, gpen] + gsrc)
-        _check(self.lib.yee3d_bwd(self.code, 1, self.gi("e", S), self.gd,
-                                  self.sp("e", hist, nw, old), io, _stream(fe[0])), "Yee E backward")
+                   + list(g) + list(gpsi) + [gaux] + list(gu) + list(gpsi_in)
+                   + [gaux_in, None, gca, gcb, gh, gn, go, gpen] + gsrc)
+        accf = ((1 if coef_acc is not None else 0) | (2 if gsrc_acc is not None else 0)
+                | (4 if shot_sum else 0))
+        _check(self.lib.yee3d_bwd_acc(self.code, 1, accf, self.gi("e", S), self.gd,
+                                      self.sp("e", hist, nw, old), io, _stream(fe[0])),
+               "Yee E backward")
         return gsrc, gu, gaux_in, gpsi_in, gca, gcb, gh, gn, go, gpen
+
+    # ------------------------------------------------------------- local time stepping
+    def slab_data(self, sl):
+        """Kernel data of a :class:`~DeepGPR.hybrid.functional3d.LTSSlab` (cached on it):
+        fine E masks ``(n, NY, NZ)`` uint8, ``chr`` of the active H nodes per component,
+        int32 index triples ``(field, aux, rate)`` of the side-UPML entries."""
+        sd = sl.cuda
+        if sd is None:
+            y, (lo, hi) = self.y, (sl.lo, sl.hi)
+            n = hi - lo + 1
+            u8 = lambda m: m.reshape(n, *self.shape[1:]).to(torch.uint8).contiguous()  # noqa: E731
+            sd = dict(n=n, mask_e=[u8(m) for m in sl.fine_e], mask_h=[u8(m) for m in sl.fine_h],
+                      chr=[(y.chr[lo:hi + 1] * y.act[3 + k][lo:hi + 1]).to(self.dtype).contiguous()
+                           for k in range(3)])
+            for kind, ents in (("h", sl.upml_h), ("e", sl.upml_e)):
+                sd[kind] = [tuple(t.to(torch.int32).contiguous() for t in (idx_full, pos, local))
+                            for (_, pos, idx_full, local, _) in ents]
+            sl.cuda = sd
+        return sd
+
+    def slab_z(self, sd, eta, z, cb0, a: float):
+        """``where(fine_e, z + a cb0 curl_bwd(eta), z)`` on a slab (three components)."""
+        return list(_SlabQ.apply(self, sd, float(a), *eta, *z, cb0))
+
+    def slab_curl_bwd(self, sd, f):
+        """``curl_bwd`` of three slab fields (the E rates on the H planes)."""
+        return list(_SlabQ.apply(self, sd, 0.0, *f, None, None, None, None))
+
+    def slab_r(self, sd, z, eta, ravg, first: bool, last: bool, beta: float, b: float, w: float,
+               r0=None):
+        """``(r, eta_new, ravg_new, corr)`` from the H rates ``r = curl_fwd(z)``: ``r`` on
+        the first sub-step only, ``eta_new = beta eta - b chr r`` (not on the last),
+        ``ravg_new = ravg + w r`` (``eta``/``ravg`` ``None`` on the first) and, with the
+        first-sub-step rates ``r0`` (last sub-step), the correction of the fine H planes
+        ``corr = -chr fine_h (ravg_new - r0)``."""
+        e = (None, None, None) if eta is None else tuple(eta)
+        r_ = (None, None, None) if ravg is None else tuple(ravg)
+        q = (None, None, None) if r0 is None else tuple(r0)
+        out = _SlabR.apply(self, sd, bool(first), bool(last), float(beta), float(b), float(w),
+                           *z, *e, *r_, *q)
+        return ((list(out[0:3]) if first else None), (None if last else list(out[3:6])),
+                list(out[6:9]), (list(out[9:12]) if r0 is not None else None))
+
+    def fold(self, f, aux, rate, idx, fac, p: int, sign: float):
+        """``p`` UPML sub-steps of gathered entries (:func:`functional3d._fold_upml`):
+        ``f``/``aux``/``rate`` flat per shot, ``idx = (field, aux, rate)`` int32 entry
+        indices (``None``: identity), ``fac = (a1, b1, hist, new, old)`` per entry;
+        returns ``(values, aux_new)`` ``(S, n)``."""
+        return _Fold.apply(self, int(p), float(sign), tuple(idx), f, aux, rate, *fac)
 
     # ------------------------------------------------------------- autograd
     def h_update(self, fe, fh, psh, Bfd):
@@ -509,6 +866,134 @@ class YeeCudaOps:
 
 def _grads(gs, refs):
     return [torch.zeros_like(t) if g is None else g.contiguous() for g, t in zip(gs, refs)]
+
+
+class _SlabQ(torch.autograd.Function):
+    """``out = where(fine_e, z + a cb0 curl_bwd(f), z)`` (z mode) or ``curl_bwd(f)``."""
+
+    @staticmethod
+    def forward(ctx, ops: YeeCudaOps, sd, a, f0, f1, f2, z0, z1, z2, cb0):  # type: ignore[override]
+        f = _cont((f0, f1, f2))
+        zmode = z0 is not None
+        z = _cont((z0, z1, z2)) if zmode else [None, None, None]
+        cb0 = cb0.contiguous() if zmode else None
+        out = [torch.empty_like(t) for t in f]
+        m = sd["mask_e"] if zmode else [None, None, None]
+        q = _ptrs(list(f) + list(z) + [cb0] + list(m) + out)
+        _check(ops.lib.lts3d_slab_q(ops.code, 0, f[0].shape[0], sd["n"], ops.shape[1], ops.shape[2],
+                                    ops.gd, q, a, int(zmode), _stream(f[0])), "LTS slab E rates")
+        ctx.ops, ctx.sd, ctx.a, ctx.zmode = ops, sd, a, zmode
+        ctx.save_for_backward(*f, *([cb0] if zmode else []))
+        ctx.set_materialize_grads(False)
+        return tuple(out)
+
+    @staticmethod
+    def backward(ctx, g0, g1, g2):  # type: ignore[override]
+        ops, sd, zmode = ctx.ops, ctx.sd, ctx.zmode
+        sv = ctx.saved_tensors
+        f, cb0 = list(sv[0:3]), (sv[3] if zmode else None)
+        g = _grads((g0, g1, g2), f)
+        gf = [torch.empty_like(t) for t in f]
+        gcb0 = torch.empty_like(cb0) if (zmode and ctx.needs_input_grad[9]) else None
+        m = sd["mask_e"] if zmode else [None, None, None]
+        q = _ptrs(f + g + [cb0] + list(m) + gf + [gcb0])
+        _check(ops.lib.lts3d_slab_q(ops.code, 1, f[0].shape[0], sd["n"], ops.shape[1], ops.shape[2],
+                                    ops.gd, q, ctx.a, int(zmode), _stream(f[0])),
+               "LTS slab E rates transpose")
+        gz = tuple(g) if zmode else (None, None, None)
+        return (None, None, None, *gf, *gz, gcb0)
+
+
+class _SlabR(torch.autograd.Function):
+    """H rates of a slab and the eta / average recursion (twelve outputs: ``r`` (first
+    sub-step), ``eta_new`` (not the last), ``ravg_new``, ``corr`` (with ``r0``); unused
+    ones empty)."""
+
+    @staticmethod
+    def forward(ctx, ops: YeeCudaOps, sd, first, last, beta, b, w,  # type: ignore[override]
+                z0, z1, z2, e0, e1, e2, a0, a1, a2, q0, q1, q2):
+        z = _cont((z0, z1, z2))
+        eta = _cont((e0, e1, e2)) if (e0 is not None and not first and not last) else [None] * 3
+        ravg = _cont((a0, a1, a2)) if not first else [None] * 3
+        cm = q0 is not None
+        r0 = _cont((q0, q1, q2)) if cm else [None] * 3
+        r_out = [torch.empty_like(t) for t in z] if first else [None] * 3
+        eta_out = [torch.empty_like(t) for t in z] if not last else [None] * 3
+        ravg_out = [torch.empty_like(t) for t in z]
+        corr = [torch.empty_like(t) for t in z] if cm else [None] * 3
+        mh = sd["mask_h"] if cm else [None] * 3
+        q = _ptrs(list(z) + list(eta) + list(ravg) + sd["chr"] + r_out + eta_out + ravg_out
+                  + list(r0) + list(mh) + corr)
+        _check(ops.lib.lts3d_slab_r(ops.code, 0, z[0].shape[0], sd["n"], ops.shape[1], ops.shape[2],
+                                    ops.gd, q, beta, b, w, int(first), _stream(z[0])),
+               "LTS slab H rates")
+        ctx.ops, ctx.sd, ctx.flags, ctx.coef = ops, sd, (first, last, cm), (beta, b, w)
+        ctx.shape, ctx.dtype_, ctx.device_ = z[0].shape, z[0].dtype, z[0].device
+        ctx.set_materialize_grads(False)
+        empty = lambda: torch.empty(0, dtype=z[0].dtype, device=z[0].device)  # noqa: E731
+        return tuple(t if t is not None else empty() for t in r_out + eta_out + ravg_out + corr)
+
+    @staticmethod
+    def backward(ctx, *gs):  # type: ignore[override]
+        ops, sd = ctx.ops, ctx.sd
+        first, last, cm = ctx.flags
+        beta, b, w = ctx.coef
+        c = lambda t: None if t is None else t.contiguous()  # noqa: E731
+        gr = [c(t) for t in gs[0:3]] if first else [None] * 3
+        ge = [c(t) for t in gs[3:6]] if not last else [None] * 3
+        ga = [c(t) for t in gs[6:9]]
+        gq = [c(t) for t in gs[9:12]] if cm else [None] * 3
+        kw = dict(dtype=ctx.dtype_, device=ctx.device_)
+        new = lambda: torch.empty(ctx.shape, **kw)  # noqa: E731
+        gz = [new() for _ in range(3)]
+        gein = [new() for _ in range(3)] if (not first and not last) else [None] * 3
+        gain = [new() for _ in range(3)] if (cm and not first) else [None] * 3
+        gr0 = [new() for _ in range(3)] if cm else [None] * 3
+        mh = sd["mask_h"] if cm else [None] * 3
+        q = _ptrs(gr + ge + ga + sd["chr"] + gz + gein + gq + list(mh) + gain + gr0)
+        _check(ops.lib.lts3d_slab_r(ops.code, 1, ctx.shape[0], sd["n"], ops.shape[1], ops.shape[2],
+                                    ops.gd, q, beta, b, w, int(first), _stream(gz[0])),
+               "LTS slab H rates transpose")
+        if first:
+            g_ravg = [None] * 3
+        else:
+            g_ravg = gain if cm else ga
+        return (None,) * 7 + tuple(gz) + tuple(gein) + tuple(g_ravg) + tuple(gr0)
+
+
+class _Fold(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, ops: YeeCudaOps, p, sign, idx, f, aux, rate, a1, b1, hist, nw, old):  # type: ignore[override]
+        f, aux, rate = f.contiguous(), aux.contiguous(), rate.contiguous()
+        fac = _cont((a1, b1, hist, nw, old))
+        S, n = f.shape[0], fac[0].numel()
+        fval = torch.empty((S, n), dtype=f.dtype, device=f.device)
+        auxn = torch.empty_like(fval)
+        q = _ptrs(list(idx) + [f, aux, rate] + fac + [fval, auxn])
+        _check(ops.lib.lts3d_fold(ops.code, 0, S, n, p, sign, f.shape[1], aux.shape[1], rate.shape[1],
+                                  q, _stream(f)), "LTS UPML fold")
+        ctx.ops, ctx.p, ctx.sign, ctx.idx = ops, p, sign, idx
+        ctx.save_for_backward(f, aux, rate, *fac)
+        ctx.set_materialize_grads(False)
+        return fval, auxn
+
+    @staticmethod
+    def backward(ctx, gfval, gauxn):  # type: ignore[override]
+        ops, idx = ctx.ops, ctx.idx
+        f, aux, rate, *fac = ctx.saved_tensors
+        S, n = f.shape[0], fac[0].numel()
+        gfval = (torch.zeros((S, n), dtype=f.dtype, device=f.device) if gfval is None
+                 else gfval.contiguous())
+        gauxn = None if gauxn is None else gauxn.contiguous()
+        # scattered writes at the entries: zero the targets that are gathered
+        gf, gaux, grate = (torch.zeros_like(t) if i is not None else torch.empty_like(t)
+                           for t, i in zip((f, aux, rate), idx))
+        want = any(ctx.needs_input_grad[9:12])
+        gfac = [torch.empty_like(t) for t in fac[2:]] if want else [None] * 3
+        q = _ptrs(list(idx) + [f, aux, rate] + fac + [gfval, gauxn, gf, gaux, grate] + gfac)
+        _check(ops.lib.lts3d_fold(ops.code, 1, S, n, ctx.p, ctx.sign, f.shape[1], aux.shape[1],
+                                  rate.shape[1], q, _stream(f)), "LTS UPML fold transpose")
+        return (None, None, None, None, gf, gaux, grate, None, None, *gfac)
 
 
 class _YeeH(torch.autograd.Function):
@@ -550,10 +1035,10 @@ class _YeeE(torch.autograd.Function):
         psi = list(sv[13:19])
         gsrc, gu, gaux_in, gpsi_in, gca, gcb, gh, gn, go, gpen = ctx.ops.e_bwd(
             fh, fe, aux, ca, cb, hist, nw, old, pen, psi, _grads((g0, g1, g2), fe),
-            _grads((gaux,), (aux,))[0], _grads(gpsi, psi))
+            _grads((gaux,), (aux,))[0], _grads(gpsi, psi), shot_sum=True)
         shape = ca.shape
-        red = lambda t, ref: t.sum(0) if ref.numel() else None  # noqa: E731
-        return (None, *gsrc, *gu, gaux_in, gca.sum(0).view(shape), gcb.sum(0).view(shape),
+        red = lambda t, ref: t if ref.numel() else None  # noqa: E731
+        return (None, *gsrc, *gu, gaux_in, gca.view(shape), gcb.view(shape),
                 red(gh, hist), red(gn, nw), red(go, old), gpen, *gpsi_in)
 
 

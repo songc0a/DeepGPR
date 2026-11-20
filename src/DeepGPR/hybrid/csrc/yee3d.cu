@@ -10,10 +10,11 @@
 //             E' = ca E + cb rhs (active), UPML: D' = a1 D + b1 rhs, E' = hist E + new D' - old D
 //   psi' = E psi - F d on every slab node (also inactive ones, as in PyTorch).
 //
-// Backward: pass 1 per node forms the cotangents of the old fields, auxiliaries
-// and coefficients and the cotangent of every difference d_t (temporary array);
-// pass 2 gathers the transposed differences onto the differentiated field. No
-// atomics: results are deterministic.
+// Backward: one pass, one thread per node looping over the shots (see yee_bwd):
+// the cotangents of the old fields, auxiliaries and coefficients at the node and
+// the gather of the transposed differences, the difference cotangents of the
+// neighbours re-evaluated in place of a temporary array. No atomics: results are
+// deterministic.
 //
 // Terms t = (component c, axis a, field f, sign): (0,1,2,+) (0,2,1,-) (1,2,0,+)
 // (1,0,2,-) (2,0,1,+) (2,1,0,-), as functional3d.TERMS.
@@ -23,9 +24,17 @@
 
 namespace {
 
-__device__ __constant__ int tA[6] = {1, 2, 2, 0, 0, 1};
-__device__ __constant__ int tF[6] = {2, 1, 0, 2, 1, 0};
-__device__ __constant__ float tS[6] = {1.f, -1.f, 1.f, -1.f, 1.f, -1.f};
+// term tables (axis a_t, differentiated field f_t, sign) as compile-time functions: in
+// the unrolled term loops every index into the small per-term arrays is a constant, so
+// they stay in registers (a __constant__ table gave runtime indices and a local-memory
+// stack frame)
+__host__ __device__ constexpr int term_axis(int t) {
+    return t == 0 ? 1 : t == 1 ? 2 : t == 2 ? 2 : t == 3 ? 0 : t == 4 ? 0 : 1;
+}
+__host__ __device__ constexpr int term_field(int t) { return 2 - t % 3; }
+__host__ __device__ constexpr int term_sign(int t) { return (t & 1) ? -1 : 1; }
+
+constexpr int kThreadsBwd = 128;  // transpose blocks (more resident warps at its register use)
 
 struct Grid {
     int S, n[3];
@@ -104,11 +113,13 @@ __global__ void yee_fwd(Yee<T> y, const T* __restrict__ src0, const T* __restric
     const T* src[3] = {src0 + (long long)s * g.N, src1 + (long long)s * g.N, src2 + (long long)s * g.N};
     const T* uo[3] = {u0, u1, u2};
     T* out[3] = {o0, o1, o2};
+#pragma unroll
     for (int c = 0; c < 3; ++c) {
         T rhs = 0;
+#pragma unroll
         for (int tt = 0; tt < 2; ++tt) {
-            const int t = 2 * c + tt, a = tA[t];
-            const T d = diff<T, HSIDE>(src[tF[t]], g, node, co[a], a);
+            const int t = 2 * c + tt, a = term_axis(t);
+            const T d = diff<T, HSIDE>(src[term_field(t)], g, node, co[a], a);
             T sv = d / T(g.h[a]);
             const Prof<T>& p = y.prof[a];
             if (p.pos != nullptr) {
@@ -120,7 +131,7 @@ __global__ void yee_fwd(Yee<T> y, const T* __restrict__ src0, const T* __restric
                     psi_out.p[t][pi] = p.E[q] * ps - p.F[q] * d;
                 }
             }
-            rhs += T(tS[t]) * sv;
+            rhs += T(term_sign(t)) * sv;
         }
         if (!HSIDE && pen != nullptr && c > 0 && rowmap[i] >= 0)
             rhs += pen[(((long long)s * nrows + rowmap[i]) * 2 + (c - 1)) * (g.stride[0]) + node % g.stride[0]];
@@ -145,137 +156,247 @@ __global__ void yee_fwd(Yee<T> y, const T* __restrict__ src0, const T* __restric
 }
 
 // ------------------------------------------------------------------ backward
-// pass 1: cotangents of the updated fields, auxiliaries, psi, coefficients and
-// of the differences (lam_d, (6, S, N)).
-template <typename T, bool HSIDE>
-__global__ void yee_bwd1(Yee<T> y, const T* __restrict__ src0, const T* __restrict__ src1,
-                         const T* __restrict__ src2, const T* __restrict__ u0,
-                         const T* __restrict__ u1, const T* __restrict__ u2,
-                         P6<T> psi_in, const T* __restrict__ aux_in,
-                         const T* __restrict__ ca, const T* __restrict__ cb,
-                         const T* __restrict__ chr, const T* __restrict__ pen,
-                         const int* __restrict__ rowmap, int nrows,
-                         const T* __restrict__ g0, const T* __restrict__ g1,
-                         const T* __restrict__ g2,                 // cotangents of the outputs
-                         P6<T> gpsi_out, const T* __restrict__ gaux_out,
-                         T* __restrict__ gu0, T* __restrict__ gu1, T* __restrict__ gu2,
-                         P6<T> gpsi_in, T* __restrict__ gaux_in,
-                         T* __restrict__ lam_d, T* __restrict__ gca, T* __restrict__ gcb,
-                         T* __restrict__ ghist, T* __restrict__ gnew, T* __restrict__ gold,
-                         T* __restrict__ gpen) {
+// One pass, one thread per node looping over the shots. At its node the thread
+// forms the cotangents of the old fields, auxiliaries, psi and coefficients; the
+// transposed differences are gathered onto the differentiated fields by
+// re-evaluating the difference cotangents of the three neighbours (node - e_a on
+// the H side, node + e_a on the E side) instead of storing them: no temporary
+// arrays, no atomics, deterministic. The per-node data (masks, coefficients, slab
+// positions) is read once for all shots; per shot the plain loads are issued
+// before any branch. Inputs read at neighbours (g, gpsi_out, gaux_out) must not
+// share memory with the outputs. UPML: side-UPML nodes present (compile time).
+//
+// Difference cotangent of term t at a node, with lrhs the cotangent of the rhs of
+// its component there (-chr g on active nodes of the H side, cb g on the E side,
+// -/+ b1 (gaux_out + new g) on side-UPML nodes, 0 on inactive nodes):
+//   ld_t = s_t lrhs / h_a [+ A s_t lrhs - F gpsi_out_t on CPML slab nodes].
+//
+// accf bit 0: accumulate the coefficient cotangents into their outputs, bit 1:
+// accumulate the cotangents of the differentiated fields, bit 2: the coefficient
+// cotangents are summed over the shots ((N,) and (n_upml,) instead of per shot).
+template <typename T, bool HSIDE, bool UPML>
+__global__ void __launch_bounds__(kThreadsBwd, (HSIDE && UPML) ? 8 : 1)
+yee_bwd(Yee<T> y, const T* __restrict__ src0, const T* __restrict__ src1,
+        const T* __restrict__ src2, const T* __restrict__ u0, const T* __restrict__ u1,
+        const T* __restrict__ u2, P6<T> psi_in, const T* __restrict__ aux_in,
+        const T* __restrict__ ca, const T* __restrict__ cb, const T* __restrict__ chr,
+        const T* __restrict__ pen, const int* __restrict__ rowmap, int nrows,
+        const T* __restrict__ g0, const T* __restrict__ g1, const T* __restrict__ g2,
+        P6<T> gpsi_out, const T* __restrict__ gaux_out,
+        T* __restrict__ gu0, T* __restrict__ gu1, T* __restrict__ gu2,
+        P6<T> gpsi_in, T* __restrict__ gaux_in, T* __restrict__ gca, T* __restrict__ gcb,
+        T* __restrict__ ghist, T* __restrict__ gnew, T* __restrict__ gold,
+        T* __restrict__ gpen, T* __restrict__ gs0, T* __restrict__ gs1,
+        T* __restrict__ gs2, int accf) {
     const Grid& g = y.g;
-    long long tid = (long long)blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= (long long)g.S * g.N) return;
-    const int s = (int)(tid / g.N);
-    const long long node = tid % g.N;
-    int i, j, k;
-    unflat(g, node, i, j, k);
+    const long long nl = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (nl >= g.N) return;
+    const int node = (int)nl;
+    const int st0 = (int)g.stride[0];
+    const int i = node / st0, rem = node - i * st0;
+    const int j = rem / g.n[2], k = rem - j * g.n[2];
     const int co[3] = {i, j, k};
-    const long long id = (long long)s * g.N + node;
-    const T* src[3] = {src0 + (long long)s * g.N, src1 + (long long)s * g.N, src2 + (long long)s * g.N};
-    const T* uo[3] = {u0, u1, u2};
     const T* gout[3] = {g0, g1, g2};
+    const T* uo[3] = {u0, u1, u2};
     T* gu[3] = {gu0, gu1, gu2};
-    T sca = 0, scb = 0;
+    T* gsrc[3] = {gs0, gs1, gs2};
+    // ---- per-node data, read once for all shots
+    bool act[3];
+    int upo[3];
+#pragma unroll
     for (int c = 0; c < 3; ++c) {
-        const T go = gout[c][id];
-        const T f = uo[c][id];
-        T lrhs = 0, gf = go;
-        // recompute rhs (needed for the cb and UPML-aux gradients on the E side)
-        T rhs = 0;
-        if (!HSIDE) {
-            for (int tt = 0; tt < 2; ++tt) {
-                const int t = 2 * c + tt, a = tA[t];
-                const T d = diff<T, false>(src[tF[t]], g, node, co[a], a);
-                T sv = d / T(g.h[a]);
-                const Prof<T>& p = y.prof[a];
-                if (p.pos != nullptr) {
-                    const int q = p.pos[co[a]];
-                    if (q >= 0) sv += p.A[q] * d + p.B[q] * psi_in.p[t][psi_index(g, s, a, q, i, j, k, p.nslab)];
-                }
-                rhs += T(tS[t]) * sv;
-            }
-            if (pen != nullptr && c > 0 && rowmap[i] >= 0)
-                rhs += pen[(((long long)s * nrows + rowmap[i]) * 2 + (c - 1)) * g.stride[0] + node % g.stride[0]];
-        }
-        if (y.act[c][node]) {
-            const int pu = y.upos[c] != nullptr ? y.upos[c][node] : -1;
-            if (pu >= 0) {
-                const long long cu = y.uoff[c] + pu;
-                const long long ai = (long long)s * y.ntot_u + cu;
-                const T Ao = aux_in[ai];
-                const T lA = gaux_out[ai] + y.nw[cu] * go;       // total cotangent of the new aux
-                gf = y.hist[cu] * go;
-                gaux_in[ai] = y.a1[cu] * lA - y.old[cu] * go;
-                lrhs = HSIDE ? -y.b1[cu] * lA : y.b1[cu] * lA;
-                if (!HSIDE) {
-                    const T An = y.a1[cu] * Ao + y.b1[cu] * rhs;
-                    ghist[ai] = go * f;
-                    gnew[ai] = go * An;
-                    gold[ai] = -go * Ao;
-                }
-            } else if (HSIDE) {
-                lrhs = -chr[node] * go;
-            } else {
-                gf = ca[node] * go;
-                lrhs = cb[node] * go;
-                sca += go * f;
-                scb += go * rhs;
-            }
-        }
-        gu[c][id] = gf;
-        if (!HSIDE && gpen != nullptr && c > 0 && rowmap[i] >= 0)
-            gpen[(((long long)s * nrows + rowmap[i]) * 2 + (c - 1)) * g.stride[0] + node % g.stride[0]] = lrhs;
-        for (int tt = 0; tt < 2; ++tt) {
-            const int t = 2 * c + tt, a = tA[t];
-            const T ls = T(tS[t]) * lrhs;
-            T ld = ls / T(g.h[a]);
-            const Prof<T>& p = y.prof[a];
-            if (p.pos != nullptr) {
-                const int q = p.pos[co[a]];
-                if (q >= 0) {
-                    const long long pi = psi_index(g, s, a, q, i, j, k, p.nslab);
-                    const T gpo = gpsi_out.p[t][pi];
-                    ld += p.A[q] * ls - p.F[q] * gpo;
-                    gpsi_in.p[t][pi] = p.B[q] * ls + p.E[q] * gpo;
-                }
-            }
-            lam_d[(long long)t * g.S * g.N + id] = ld;
-        }
+        act[c] = y.act[c][node] != 0;
+        upo[c] = (UPML && act[c] && y.upos[c] != nullptr) ? y.upos[c][node] : -1;
     }
-    if (!HSIDE) {
-        gca[id] = sca;
-        gcb[id] = scb;
+    const T kself = HSIDE ? -chr[node] : cb[node];
+    const T caself = HSIDE ? T(0) : ca[node];
+    bool hasn[3];
+    int nb[3], qo[3], qn[3];     // neighbour (the node itself at the edge), slab positions
+    int nbs[3];                  // E side: backward neighbour of the rhs differences
+#pragma unroll
+    for (int a = 0; a < 3; ++a) {
+        hasn[a] = HSIDE ? co[a] >= 1 : co[a] + 1 <= g.n[a] - 1;
+        nb[a] = hasn[a] ? (HSIDE ? node - (int)g.stride[a] : node + (int)g.stride[a]) : node;
+        nbs[a] = co[a] >= 1 ? node - (int)g.stride[a] : node;
+        const int* pos = y.prof[a].pos;
+        qo[a] = pos != nullptr ? pos[co[a]] : -1;
+        qn[a] = (pos != nullptr && hasn[a]) ? pos[HSIDE ? co[a] - 1 : co[a] + 1] : -1;
     }
-}
-
-// pass 2: gather the transposed differences onto the differentiated fields.
-template <typename T, bool HSIDE>
-__global__ void yee_bwd2(Grid g, const T* __restrict__ lam_d, T* __restrict__ gs0,
-                         T* __restrict__ gs1, T* __restrict__ gs2) {
-    long long tid = (long long)blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= (long long)g.S * g.N) return;
-    const long long node = tid % g.N;
-    int i, j, k;
-    unflat(g, node, i, j, k);
-    const int co[3] = {i, j, k};
-    T acc[3] = {0, 0, 0};
+    T kn[6];                     // -chr / cb of the neighbour of term t (0: inactive or none)
+    int un[6];                   // its compact UPML position or -1
+#pragma unroll
     for (int t = 0; t < 6; ++t) {
-        const int a = tA[t];
-        const T* L = lam_d + (long long)t * g.S * g.N;
-        T v = 0;
-        if (HSIDE) {            // d[i] = f[i+1] - f[i] for i <= n-2
-            if (co[a] >= 1) v += L[tid - g.stride[a]];
-            if (co[a] <= g.n[a] - 2) v -= L[tid];
-        } else {                // d[i] = f[i] - f[i-1] for i >= 1
-            if (co[a] >= 1) v += L[tid];
-            if (co[a] + 1 <= g.n[a] - 1) v -= L[tid + g.stride[a]];
+        const int a = term_axis(t), c = t >> 1;
+        kn[t] = T(0);
+        un[t] = -1;
+        if (hasn[a] && y.act[c][nb[a]]) {
+            kn[t] = HSIDE ? -chr[nb[a]] : cb[nb[a]];
+            if (UPML && y.upos[c] != nullptr) un[t] = y.upos[c][nb[a]];
         }
-        acc[tF[t]] += v;
     }
-    gs0[tid] = acc[0];
-    gs1[tid] = acc[1];
-    gs2[tid] = acc[2];
+    const int row = (!HSIDE && pen != nullptr) ? rowmap[i] : -1;
+    T sca_s = 0, scb_s = 0, sh[3] = {0, 0, 0}, sn[3] = {0, 0, 0}, so[3] = {0, 0, 0};
+    for (int s = 0; s < g.S; ++s) {
+        const long long off = (long long)s * g.N, id = off + node;
+        // ---- plain loads of the shot first (no branches between them)
+        T go[3], gn[6], gsv[3], f[3], hv[3], hb[6];
+#pragma unroll
+        for (int c = 0; c < 3; ++c) go[c] = gout[c][id];
+#pragma unroll
+        for (int t = 0; t < 6; ++t) gn[t] = gout[t >> 1][off + nb[term_axis(t)]];
+#pragma unroll
+        for (int q = 0; q < 3; ++q) gsv[q] = gsrc[q][id];   // used with accf & 2 only
+        if (!HSIDE) {
+            const T* sp[3] = {src0 + off, src1 + off, src2 + off};
+#pragma unroll
+            for (int c = 0; c < 3; ++c) {
+                f[c] = uo[c][id];
+                hv[c] = sp[c][node];
+            }
+#pragma unroll
+            for (int t = 0; t < 6; ++t) hb[t] = sp[term_field(t)][nbs[term_axis(t)]];
+        }
+        T ldo[6];
+        T sca = 0, scb = 0;
+#pragma unroll
+        for (int c = 0; c < 3; ++c) {
+            T lrhs = 0, gf = go[c], rhs = 0;
+            if (!HSIDE) {        // rhs (for the cb and UPML-factor cotangents)
+#pragma unroll
+                for (int tt = 0; tt < 2; ++tt) {
+                    const int t = 2 * c + tt, a = term_axis(t);
+                    const T d = co[a] >= 1 ? hv[term_field(t)] - hb[t] : T(0);
+                    T sv = d / T(g.h[a]);
+                    if (qo[a] >= 0) {
+                        const Prof<T>& p = y.prof[a];
+                        sv += p.A[qo[a]] * d
+                            + p.B[qo[a]] * psi_in.p[t][psi_index(g, s, a, qo[a], i, j, k, p.nslab)];
+                    }
+                    rhs += T(term_sign(t)) * sv;
+                }
+                if (row >= 0 && c > 0)
+                    rhs += pen[(((long long)s * nrows + row) * 2 + (c - 1)) * st0 + rem];
+            }
+            if (act[c]) {
+                if (UPML && upo[c] >= 0) {
+                    const long long cu = y.uoff[c] + upo[c];
+                    const long long ai = (long long)s * y.ntot_u + cu;
+                    const T Ao = aux_in[ai];
+                    const T lA = gaux_out[ai] + y.nw[cu] * go[c];
+                    gf = y.hist[cu] * go[c];
+                    gaux_in[ai] = y.a1[cu] * lA - y.old[cu] * go[c];
+                    lrhs = HSIDE ? -y.b1[cu] * lA : y.b1[cu] * lA;
+                    if (!HSIDE) {
+                        const T An = y.a1[cu] * Ao + y.b1[cu] * rhs;
+                        if (accf & 4) {
+                            sh[c] += go[c] * f[c];
+                            sn[c] += go[c] * An;
+                            so[c] -= go[c] * Ao;
+                        } else if (accf & 1) {
+                            ghist[ai] += go[c] * f[c];
+                            gnew[ai] += go[c] * An;
+                            gold[ai] -= go[c] * Ao;
+                        } else {
+                            ghist[ai] = go[c] * f[c];
+                            gnew[ai] = go[c] * An;
+                            gold[ai] = -go[c] * Ao;
+                        }
+                    }
+                } else if (HSIDE) {
+                    lrhs = kself * go[c];
+                } else {
+                    gf = caself * go[c];
+                    lrhs = kself * go[c];
+                    sca += go[c] * f[c];
+                    scb += go[c] * rhs;
+                }
+            }
+            gu[c][id] = gf;
+            if (row >= 0 && c > 0 && gpen != nullptr)
+                gpen[(((long long)s * nrows + row) * 2 + (c - 1)) * st0 + rem] = lrhs;
+#pragma unroll
+            for (int tt = 0; tt < 2; ++tt) {
+                const int t = 2 * c + tt, a = term_axis(t);
+                const T ls = T(term_sign(t)) * lrhs;
+                T ld = ls / T(g.h[a]);
+                if (qo[a] >= 0) {
+                    const Prof<T>& p = y.prof[a];
+                    const long long pi = psi_index(g, s, a, qo[a], i, j, k, p.nslab);
+                    const T gpo = gpsi_out.p[t][pi];
+                    ld += p.A[qo[a]] * ls - p.F[qo[a]] * gpo;
+                    gpsi_in.p[t][pi] = p.B[qo[a]] * ls + p.E[qo[a]] * gpo;
+                }
+                ldo[t] = ld;
+            }
+        }
+        // ---- gather the transposed differences
+        T acc[3] = {0, 0, 0};
+#pragma unroll
+        for (int t = 0; t < 6; ++t) {
+            const int a = term_axis(t), c = t >> 1;
+            T lr;                // rhs cotangent of the neighbour (0 without one)
+            if (UPML && un[t] >= 0) {
+                const long long cu = y.uoff[c] + un[t];
+                const T lA = gaux_out[(long long)s * y.ntot_u + cu] + y.nw[cu] * gn[t];
+                lr = HSIDE ? -y.b1[cu] * lA : y.b1[cu] * lA;
+            } else {
+                lr = kn[t] * gn[t];
+            }
+            const T ls = T(term_sign(t)) * lr;
+            T ln = ls / T(g.h[a]);   // difference cotangent of term t at the neighbour
+            if (qn[a] >= 0) {
+                const Prof<T>& p = y.prof[a];
+                ln += p.A[qn[a]] * ls
+                    - p.F[qn[a]] * gpsi_out.p[t][psi_index(g, s, a, qn[a], i, j, k, p.nslab)];
+            }
+            T v = 0;
+            if (HSIDE) {         // d[i] = f[i+1] - f[i] for i <= n-2
+                if (co[a] >= 1) v += ln;
+                if (co[a] <= g.n[a] - 2) v -= ldo[t];
+            } else {             // d[i] = f[i] - f[i-1] for i >= 1
+                if (co[a] >= 1) v += ldo[t];
+                if (co[a] + 1 <= g.n[a] - 1) v -= ln;
+            }
+            acc[term_field(t)] += v;
+        }
+#pragma unroll
+        for (int q = 0; q < 3; ++q) gsrc[q][id] = (accf & 2) ? gsv[q] + acc[q] : acc[q];
+        if (!HSIDE) {
+            if (accf & 4) {
+                sca_s += sca;
+                scb_s += scb;
+            } else if (accf & 1) {
+                gca[id] += sca;
+                gcb[id] += scb;
+            } else {
+                gca[id] = sca;
+                gcb[id] = scb;
+            }
+        }
+    }
+    if (!HSIDE && (accf & 4)) {
+        if (accf & 1) {
+            gca[node] += sca_s;
+            gcb[node] += scb_s;
+        } else {
+            gca[node] = sca_s;
+            gcb[node] = scb_s;
+        }
+#pragma unroll
+        for (int c = 0; c < 3; ++c) {
+            if (!UPML || upo[c] < 0) continue;
+            const long long cu = y.uoff[c] + upo[c];
+            if (accf & 1) {
+                ghist[cu] += sh[c];
+                gnew[cu] += sn[c];
+                gold[cu] += so[c];
+            } else {
+                ghist[cu] = sh[c];
+                gnew[cu] = sn[c];
+                gold[cu] = so[c];
+            }
+        }
+    }
 }
 
 constexpr int kThreads = 256;
@@ -340,22 +461,22 @@ int run_fwd(const int* gi, const double* gd, const void* const* sp, const void* 
 
 template <typename T, bool H>
 int run_bwd(const int* gi, const double* gd, const void* const* sp, const void* const* io,
-            cudaStream_t st) {
+            cudaStream_t st, int accf = 0) {
     Yee<T> y = make<T>(gi, gd, sp);
     // io: src0..2 (0-2), u0..2 (3-5), psi_in x6 (6-11), aux_in (12), ca (13), cb (14), chr (15),
     //     pen (16), rowmap (17), g0..2 (18-20), gpsi_out x6 (21-26), gaux_out (27),
-    //     gu0..2 (28-30), gpsi_in x6 (31-36), gaux_in (37), lam_d (38), gca (39), gcb (40),
+    //     gu0..2 (28-30), gpsi_in x6 (31-36), gaux_in (37), (38 unused), gca (39), gcb (40),
     //     ghist (41), gnew (42), gold (43), gpen (44), gs0..2 (45-47)
-    const long long n = (long long)y.g.S * y.g.N;
-    yee_bwd1<T, H><<<blocks(n), kThreads, 0, st>>>(
+    const bool upml = y.ntot_u > 0;
+    auto kern = upml ? yee_bwd<T, H, true> : yee_bwd<T, H, false>;
+    kern<<<(int)((y.g.N + kThreadsBwd - 1) / kThreadsBwd), kThreadsBwd, 0, st>>>(
         y, (const T*)io[0], (const T*)io[1], (const T*)io[2], (const T*)io[3], (const T*)io[4],
         (const T*)io[5], pack<T>(io, 6), (const T*)io[12], (const T*)io[13], (const T*)io[14],
         (const T*)io[15], (const T*)io[16], (const int*)io[17], gi[11], (const T*)io[18],
         (const T*)io[19], (const T*)io[20], pack<T>(io, 21), (const T*)io[27], (T*)io[28],
-        (T*)io[29], (T*)io[30], pack<T>(io, 31), (T*)io[37], (T*)io[38], (T*)io[39], (T*)io[40],
-        (T*)io[41], (T*)io[42], (T*)io[43], (T*)io[44]);
-    yee_bwd2<T, H><<<blocks(n), kThreads, 0, st>>>(y.g, (const T*)io[38], (T*)io[45],
-                                                   (T*)io[46], (T*)io[47]);
+        (T*)io[29], (T*)io[30], pack<T>(io, 31), (T*)io[37], (T*)io[39], (T*)io[40],
+        (T*)io[41], (T*)io[42], (T*)io[43], (T*)io[44], (T*)io[45], (T*)io[46], (T*)io[47],
+        accf);
     return (int)cudaGetLastError();
 }
 
@@ -381,6 +502,18 @@ int yee3d_bwd(int dtype, int side, const int* gi, const double* gd, const void* 
                                      : run_bwd<float, false>(gi, gd, sp, io, st);
     if (dtype == 1) return side == 0 ? run_bwd<double, true>(gi, gd, sp, io, st)
                                      : run_bwd<double, false>(gi, gd, sp, io, st);
+    return -1;
+}
+
+// as yee3d_bwd; accf bit 0: accumulate the coefficient cotangents (gca, gcb, UPML factors)
+// into their outputs, bit 1: accumulate the cotangents of the differentiated fields (gs)
+int yee3d_bwd_acc(int dtype, int side, int accf, const int* gi, const double* gd,
+                  const void* const* sp, const void* const* io, void* stream) {
+    cudaStream_t st = (cudaStream_t)stream;
+    if (dtype == 0) return side == 0 ? run_bwd<float, true>(gi, gd, sp, io, st, accf)
+                                     : run_bwd<float, false>(gi, gd, sp, io, st, accf);
+    if (dtype == 1) return side == 0 ? run_bwd<double, true>(gi, gd, sp, io, st, accf)
+                                     : run_bwd<double, false>(gi, gd, sp, io, st, accf);
     return -1;
 }
 

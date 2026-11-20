@@ -24,6 +24,12 @@ state per step), whereas the eager step just rebinds them. Measured on an RTX
 Graphs are therefore used only for states below ``DEEPGPR_HYBRID_GRAPH_MAX_MB``
 (default 32 MB). ``DEEPGPR_HYBRID_DISABLE_GRAPHS=1`` turns them off.
 
+The 3D solver with the fused kernels does not use these classes any more: its step
+writes into given buffers (:mod:`.fused3d`), so whole sweeps are captured on fixed
+buffers without any per-step copy (:mod:`.sweep3d`), at any state size and also for
+the reverse sweep. :class:`GraphedStep` and :class:`GraphedVJP` remain for the 2D
+solver and for the autograd paths (``DEEPGPR_HYBRID_AUTOGRAD_VJP``).
+
 The graph is tied to the static data, the coefficient tensors and the source /
 receiver operators it was captured with; it is rebuilt for every propagation
 (cheap compared with the time loop).
@@ -76,11 +82,15 @@ def state_bytes(st) -> int:
 
 
 def enabled(st) -> bool:
-    """Graphs on CUDA, not disabled, and a state small enough for replay to pay off."""
+    """Graphs on CUDA, not disabled, and a state small enough for replay to pay off.
+    With local time stepping the step is host-bound at any size (the sub-cycled
+    recursion is a long sequence of small kernels), so replay is always used."""
     if torch.device(st.device).type != "cuda" or not hasattr(torch.cuda, "CUDAGraph"):
         return False
     if os.environ.get("DEEPGPR_HYBRID_DISABLE_GRAPHS"):
         return False
+    if st.dg is not None and int(getattr(st.dg, "lts", 1)) > 1:
+        return True
     limit = float(os.environ.get("DEEPGPR_HYBRID_GRAPH_MAX_MB", "32")) * 2 ** 20
     return state_bytes(st) <= limit
 
@@ -152,4 +162,126 @@ def make(st, c, src=None, rec=None, nsrc=1) -> Optional[GraphedStep]:
 
 GraphedStep3D = GraphedStep   # former name
 
-__all__ = ["GraphedStep", "GraphedStep3D", "enabled", "make", "state_bytes"]
+
+class GraphedVJP:
+    """CUDA Graph of one reverse step of the autograd adjoint sweep: the step is
+    recomputed from the static state :attr:`u` and differentiated with
+    ``torch.autograd.grad`` (``(dS/du)^T``, ``(dS/dc)^T``, ``(dS/dw)^T`` applied to the
+    static cotangents :attr:`lam_in` of the next state and :attr:`gd` of the
+    receiver samples), all inside one captured graph.
+
+    Used by :class:`~DeepGPR.hybrid.adjoint.HybridPropagator` when no hand-written
+    transpose exists (local time stepping), where rebuilding the autograd graph of
+    the sub-cycled step in Python costs several times its GPU time. The kernels
+    and their order are those of the eager sweep, so the gradient agrees with it
+    to round-off.
+
+    Per replay: :attr:`lam_out` (graph-owned) holds the cotangent of the state,
+    :attr:`g_coef` accumulates the coefficient cotangents (zeroed by
+    :meth:`reset`), :attr:`g_w` holds the source-sample cotangent.
+    """
+
+    def __init__(self, st, template, coef_values, src, rec, nsrc: int, need_c: bool,
+                 need_w: bool, warmup: int = 2):
+        F = _module(st)
+        dev = torch.device(st.device)
+        self.st, self.F = st, F
+        u = [t.clone() for t in F.zero_state(st)]
+        self.active = [i for i, t in enumerate(u) if t.numel()]
+        self.u = u
+        self.lam_in = [torch.zeros_like(t) for t in u]
+        nrec = rec.count if rec is not None else 0
+        self.gd = torch.zeros((st.nshot, nrec), dtype=st.dtype, device=dev)
+        self.w = torch.zeros(max(1, nsrc), dtype=st.dtype, device=dev)
+        self.leaves = [t.detach().clone() for t in coef_values]
+        self.g_coef = [torch.zeros_like(t) for t in self.leaves]
+        self.g_w = torch.zeros_like(self.w)
+        self.need_c, self.need_w = need_c, need_w
+        for i in self.active:
+            u[i].requires_grad_(True)
+        for t in self.leaves:
+            t.requires_grad_(need_c)
+        self.w.requires_grad_(need_w)
+        coefs = template.replaced(self.leaves)
+        self._args = (st, coefs, src, rec)
+        side = torch.cuda.Stream(dev)
+        side.wait_stream(torch.cuda.current_stream(dev))
+        with torch.cuda.stream(side):
+            for _ in range(warmup):
+                self._body()
+        torch.cuda.current_stream(dev).wait_stream(side)
+        self.graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(self.graph):
+            self.lam_out = self._body()
+        self.reset()
+
+    def _body(self):
+        st, coefs, src, rec = self._args
+        F, u, act = self.F, self.u, self.active
+        # grad mode is off inside an autograd Function's backward: enable it here
+        with torch.enable_grad():
+            nxt = F.step(st, coefs, tuple(u), src, self.w)
+            outs = [nxt[i] for i in act]
+            gouts = [self.lam_in[i] for i in act]
+            if rec is not None:
+                outs.append(F.sample(st, rec, nxt))
+                gouts.append(self.gd)
+            ins = [u[i] for i in act] + (self.leaves if self.need_c else []) + (
+                [self.w] if self.need_w else [])
+            grads = torch.autograd.grad(outs, ins, gouts, allow_unused=True)
+        with torch.no_grad():
+            lam = [torch.zeros_like(t) for t in u]
+            for slot, i in enumerate(act):
+                if grads[slot] is not None:
+                    lam[i] = grads[slot]
+            pos = len(act)
+            if self.need_c:
+                for j, g in enumerate(grads[pos:pos + len(self.leaves)]):
+                    if g is not None:
+                        self.g_coef[j].add_(g)
+                pos += len(self.leaves)
+            if self.need_w and grads[pos] is not None:
+                self.g_w.copy_(grads[pos])
+        return lam
+
+    def reset(self, coef_values=None):
+        """Zero the accumulators; ``coef_values``: new coefficient values (same shapes)."""
+        with torch.no_grad():
+            for t in self.g_coef:
+                t.zero_()
+            self.g_w.zero_()
+            if coef_values is not None:
+                for a, b in zip(self.leaves, coef_values):
+                    a.copy_(b)
+
+    def __call__(self, state, lam_next, gd, amp):
+        """One reverse step: returns the cotangent of ``state`` (graph-owned buffers,
+        valid until the next call)."""
+        with torch.no_grad():
+            for i in self.active:
+                self.u[i].copy_(state[i])
+                self.lam_in[i].copy_(lam_next[i])
+            if gd is not None:
+                self.gd.copy_(gd)
+            self.w.copy_(amp)
+        self.graph.replay()
+        return self.lam_out
+
+
+def make_vjp(st, template, coef_values, src, rec, nsrc, need_c, need_w) -> Optional[GraphedVJP]:
+    """A :class:`GraphedVJP`, or ``None`` when graphs are disabled or capture fails."""
+    if torch.device(st.device).type != "cuda" or not hasattr(torch.cuda, "CUDAGraph"):
+        return None
+    if os.environ.get("DEEPGPR_HYBRID_DISABLE_GRAPHS") or os.environ.get(
+            "DEEPGPR_HYBRID_DISABLE_VJP_GRAPH"):
+        return None
+    try:
+        return GraphedVJP(st, template, coef_values, src, rec, nsrc, need_c, need_w)
+    except Exception as exc:  # pragma: no cover - depends on the driver/toolkit
+        _LOGGER.warning("CUDA Graph capture of the reverse step failed (%s); using the eager "
+                        "autograd sweep.", exc)
+        return None
+
+
+__all__ = ["GraphedStep", "GraphedStep3D", "GraphedVJP", "enabled", "make", "make_vjp",
+           "state_bytes"]

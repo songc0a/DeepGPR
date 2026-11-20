@@ -205,14 +205,38 @@ def _resample_polyline(y: np.ndarray, x: np.ndarray, spacing: float) -> np.ndarr
     return np.stack([np.interp(target, arc, x), np.interp(target, arc, y)], axis=1)
 
 
-def _distance_to_polyline(points: np.ndarray, poly: np.ndarray) -> np.ndarray:
-    a = poly[:-1][None]
-    b = poly[1:][None]
-    p = points[:, None]
+def _segment_distances(p: np.ndarray, a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Distances ``(m, k)`` of points ``p`` (m, 1, 2) to segments ``a``-``b`` ((1|m), k, 2)."""
     ab = b - a
     t = np.clip(np.sum((p - a) * ab, axis=2) / np.maximum(np.sum(ab * ab, axis=2), 1e-300), 0, 1)
-    closest = a + t[..., None] * ab
-    return np.min(np.linalg.norm(p - closest, axis=2), axis=1)
+    return np.linalg.norm(p - (a + t[..., None] * ab), axis=2)
+
+
+def _distance_to_polyline(points: np.ndarray, poly: np.ndarray) -> np.ndarray:
+    a, b = poly[:-1], poly[1:]
+    nseg = len(a)
+    if nseg * len(points) <= 4_000_000:
+        return np.min(_segment_distances(points[:, None], a[None], b[None]), axis=1)
+    # Exact pruned search (memory linear in the number of points): a segment whose
+    # midpoint is farther than d_k from p is at least d_k - L_max / 2 away, so the
+    # minimum over the k nearest midpoints is final once it is below that bound.
+    from scipy.spatial import cKDTree
+    mid = 0.5 * (a + b)
+    half = 0.5 * float(np.max(np.hypot(*(b - a).T)))
+    tree = cKDTree(mid)
+    out = np.empty(len(points))
+    for c0 in range(0, len(points), 50_000):
+        todo = np.arange(c0, min(len(points), c0 + 50_000))
+        k = min(nseg, 16)
+        while todo.size:
+            dm, im = tree.query(points[todo], k=k)
+            dm, im = dm.reshape(len(todo), -1), im.reshape(len(todo), -1)
+            best = np.min(_segment_distances(points[todo][:, None], a[im], b[im]), axis=1)
+            done = (best <= dm[:, -1] - half) | (k >= nseg)
+            out[todo[done]] = best[done]
+            todo = todo[~done]
+            k = min(nseg, 4 * k)
+    return out
 
 
 def _hex_lattice(x0, x1, y0, y1, h, phase=0.0):

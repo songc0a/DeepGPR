@@ -103,9 +103,10 @@ class TapsCuda:
         self.n, self.T, self.N = n, T, int(n_in)
         self.code = 1 if dtype == torch.float64 else 0
 
-    def fwd(self, x) -> torch.Tensor:
+    def fwd(self, x, out=None) -> torch.Tensor:
+        """``y`` (S, n) from the three main fields ``x`` (into ``out`` when given)."""
         S = x[0].shape[0]
-        y = torch.empty((S, self.n), dtype=x[0].dtype, device=x[0].device)
+        y = torch.empty((S, self.n), dtype=x[0].dtype, device=x[0].device) if out is None else out
         io = _ptrs([self.idx, self.w, self.comp] + list(x) + [y])
         _check(self.lib.hsg3d_taps(self.code, 0, _ll([S, self.n, self.T, self.N]), io,
                                    _stream(y)), "taps forward")

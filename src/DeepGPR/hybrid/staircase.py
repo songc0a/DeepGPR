@@ -145,6 +145,12 @@ def staircase_layer_mesh(t, b, mdx, mdy, surface_ext, h, h_surface=None, seed=0)
     surface = _resample_polyline(dense_y, dense_x, h_surface)
     surface[0, 1], surface[-1, 1] = 0.0, width
     surface[0, 0], surface[-1, 0] = dense_x[0], dense_x[-1]
+    # The surface end points lie on the side edges: drop resampled side-edge points
+    # (never polygon corners) closer than h / 2 to them, else a near-duplicate pair
+    # forms a sliver that sets the CFL step.
+    corner = (np.abs(boundary[:, None] - poly[None]).sum(axis=2) < 1e-12).any(axis=1)
+    near = np.minimum(np.hypot(*(boundary - surface[0]).T), np.hypot(*(boundary - surface[-1]).T))
+    boundary = boundary[corner | (near >= 0.5 * h)]
     if not np.all(_inside_polygon(poly, surface[1:-1], tol=0.4 * h)):
         raise ValueError("The surface must stay inside the layer by at least 0.4 h.")
     lat = _hex_lattice(poly[:, 0].min(), poly[:, 0].max(), 0.0, width, h, phase=rng.random())
@@ -667,7 +673,8 @@ class StaircaseHybridTM2D(HybridTM2D):
             self.fd, self.dg, self.couplings = fd, dg, cps
         return fd, dg, cps
 
-    def _make_static(self, fd, dg, couplings, nshot, dtype=None) -> fn.StepStatic:
+    def _make_static(self, fd, dg, couplings, nshot, dtype=None,
+                     conservative: bool = False) -> fn.StepStatic:
         dtype = self.dtype if dtype is None else dtype
         stair = StaircaseStatic(self._struct, couplings, self._struct["segments"], self.dx,
                                 self.dy, dtype, self.device)

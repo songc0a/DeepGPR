@@ -8,7 +8,8 @@
 """
 
 from .hsg import PointSet, SubgridCoefs, SubgridStepStatic, fine_source_samples
+from .schedule import CostModel, Scheduler, TimeStepLadder
 from .solver import Subgrid, SubgridMaxwell3D, block_average
 
-__all__ = ["PointSet", "Subgrid", "SubgridCoefs", "SubgridMaxwell3D", "SubgridStepStatic",
-           "block_average", "fine_source_samples"]
+__all__ = ["CostModel", "PointSet", "Scheduler", "Subgrid", "SubgridCoefs", "SubgridMaxwell3D",
+           "SubgridStepStatic", "TimeStepLadder", "block_average", "fine_source_samples"]
