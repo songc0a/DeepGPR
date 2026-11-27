@@ -30,6 +30,7 @@ import torch
 
 from ..native.bridge import invoke, native_stream_scope, require_capability
 from ..native.loader import get_deepgpr_lib
+from ..tucker.blockwise import BlockTuckerConfig, BlockTuckerHistory
 from ..tucker.sketch import TuckerSketchConfig
 from ..tucker.wavefield import ComponentErrorStats, HistorySizeReport, SketchedWavefieldHistory
 from ..utils.logger import get_logger
@@ -239,7 +240,8 @@ class DeepGPRSketched(torch.autograd.Function):
         e_buffer = r_buffer = torch.empty(0, device=device, dtype=torch.float32)
         segment_frames = saved_time_steps(steps, interval)
         if needs_model_gradient:
-            history = SketchedWavefieldHistory(
+            history_class = BlockTuckerHistory if isinstance(sketch, BlockTuckerConfig) else SketchedWavefieldHistory
+            history = history_class(
                 components,
                 config.history_cells,
                 config.nstep,
