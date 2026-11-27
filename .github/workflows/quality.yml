@@ -28,7 +28,8 @@ jobs:
 
   cpu-tests:
     name: CPU unit tests (Python ${{ matrix.python }})
-    runs-on: ubuntu-latest
+    # ubuntu-latest is 26.04, for which actions/setup-python has no 3.9 build.
+    runs-on: ubuntu-24.04
     needs: lint
     strategy:
       fail-fast: false
