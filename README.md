@@ -211,6 +211,15 @@ and `TVRegularization(method="legacy_isotropic")` to reproduce earlier numbers.
 If you find our code useful, please cite:
 
 ```bibtex
+@article{liu2026deepgpr,
+  title     = {DeepGPR: A High-Performance Deep Learning Framework for Ground Penetrating Radar Full Waveform Inversion Using Multi-scale Structural Similarity Loss Function},
+  author    = {Liu, Lei and Song, Chao and Richardson, Alan and He, Liangsheng and Lu, Qi and Feng, Xuan and Liu, Cai},
+  journal   = {Journal of Geophysics and Engineering},
+  pages     = {gxag139},
+  year      = {2026},
+  publisher = {Oxford University Press}
+}
+
 @article{liu2026fast,
   title     = {Fast ground penetrating radar dual-parameter full waveform inversion method accelerated by hybrid compilation of CUDA kernel function and PyTorch},
   author    = {Liu, Lei and Song, Chao and He, Liangsheng and Wang, Silin and Feng, Xuan and Liu, Cai},
