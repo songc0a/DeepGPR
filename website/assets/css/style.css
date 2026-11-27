@@ -1246,6 +1246,10 @@ pre code {
   padding: clamp(24px, 5vw, 48px);
 }
 
+.publication-card + .publication-card {
+  margin-top: 24px;
+}
+
 .author-list {
   margin: 20px 0;
   color: var(--white);
