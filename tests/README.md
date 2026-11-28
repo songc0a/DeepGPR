@@ -12,6 +12,12 @@ Run the fast terminal suite with:
 python -m unittest discover -s tests -p "test_*.py"
 ```
 
+CPU index-decoding optimization has a separate A/B driver
+(`verify_cpu_index_decoding.py`, using `cpu_index_decoding_cases.py`) and a paired
+benchmark (`benchmark_cpu_index_decoding.py`). Build and run instructions,
+measurements and limitations are in the
+[CPU index-decoding report](profiling_results/cpu_index_decoding_report.md).
+
 `test_native_abi.py` parses `src/DeepGPR/lib/deepgpr.h` and checks that the
 Python ABI table (`DeepGPR/native/abi.py`) lists every exported function with
 identical parameter names, types and order; it also covers argument
@@ -36,9 +42,10 @@ c++ -std=c++14 -pthread -I"$CUDA_HOME/include" tests/cuda_resource_cache_native.
 /tmp/cache-test
 ```
 
-`test_cpu_determinism.py` runs the same forward/backward problems with 1, 2
-and 5 OpenMP threads in separate processes and requires bitwise identical
-results (the CPU adjoint has no atomics since 0.1.0). The CUDA 2D TM gather
+`test_cpu_determinism.py` runs the same forward/backward problems with 1, 2,
+5 and 8 OpenMP threads in separate processes and requires bitwise identical
+results, including a two-column no-PML grid with fewer shot/x slices than
+threads (the CPU adjoint has no atomics since 0.1.0). The CUDA 2D TM gather
 adjoint has no atomics either:
 `test_discrete_adjoint.test_cuda_2d_tm_adjoint_is_bitwise_reproducible` repeats
 2D mode 2 and mode 3 gradients (including coincident sources and receivers)
